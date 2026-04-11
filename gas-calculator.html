@@ -1,0 +1,199 @@
+
+<style>
+  .lbl { font-size: 12px; color: var(--color-text-secondary); margin: 0 0 4px; }
+  .val { font-size: 22px; font-weight: 500; margin: 0; color: var(--color-text-primary); }
+  .metric { background: var(--color-background-secondary); border-radius: 8px; padding: 0.85rem 1rem; }
+  .card { background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .row label { font-size: 13px; color: var(--color-text-secondary); width: 160px; flex-shrink: 0; }
+  .row input[type=range] { flex: 1; }
+  .row span { font-size: 13px; font-weight: 500; min-width: 72px; text-align: right; color: var(--color-text-primary); }
+  .g2 { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+  .g3 { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
+  .sect { font-size: 11px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; color: var(--color-text-tertiary); margin: 0 0 8px; }
+  .verdict-box { border-radius: 12px; padding: 1rem 1.25rem; margin-top: 12px; }
+  .verdict-title { font-size: 15px; font-weight: 500; margin: 0 0 4px; }
+  .verdict-sub { font-size: 13px; margin: 0; }
+  .divider { border: none; border-top: 0.5px solid var(--color-border-tertiary); margin: 12px 0; }
+</style>
+
+<h2 class="sr-only">Gas station trip calculator: is it worth driving farther for cheaper fuel?</h2>
+
+<div class="card">
+  <p class="sect">Your inputs</p>
+  <div class="row">
+    <label>Distance to far station</label>
+    <input type="range" id="farKm" min="5" max="80" step="1" value="23">
+    <span id="farKmOut">23 km (one way)</span>
+  </div>
+  <div class="row">
+    <label>Distance to near station</label>
+    <input type="range" id="nearKm" min="1" max="40" step="1" value="5">
+    <span id="nearKmOut">5 km (one way)</span>
+  </div>
+  <div class="row">
+    <label>Far station price</label>
+    <input type="range" id="farPrice" min="1.40" max="2.20" step="0.01" value="1.75">
+    <span id="farPriceOut">$1.75 / L</span>
+  </div>
+  <div class="row">
+    <label>Near station price</label>
+    <input type="range" id="nearPrice" min="1.40" max="2.20" step="0.01" value="1.95">
+    <span id="nearPriceOut">$1.95 / L</span>
+  </div>
+  <div class="row">
+    <label>Tank size</label>
+    <input type="range" id="tank" min="20" max="100" step="1" value="60">
+    <span id="tankOut">60 L</span>
+  </div>
+  <div class="row" style="margin-bottom:0;">
+    <label>Fuel consumption</label>
+    <input type="range" id="cons" min="5" max="20" step="0.1" value="10.9">
+    <span id="consOut">10.9 L/100km</span>
+  </div>
+</div>
+
+<p class="sect">The math</p>
+<div class="g3" style="margin-bottom:10px;">
+  <div class="metric">
+    <p class="lbl">Extra distance (round trip)</p>
+    <p class="val" id="extraKm">36 km</p>
+  </div>
+  <div class="metric">
+    <p class="lbl">Fuel used for detour</p>
+    <p class="val" id="extraFuel">3.9 L</p>
+  </div>
+  <div class="metric">
+    <p class="lbl">Cost of detour</p>
+    <p class="val" id="detourCost">$6.87</p>
+  </div>
+</div>
+
+<div class="g2">
+  <div class="metric">
+    <p class="lbl">Savings per litre</p>
+    <p class="val" id="savingsL">$0.20 / L</p>
+  </div>
+  <div class="metric">
+    <p class="lbl">Savings on full tank</p>
+    <p class="val" id="tankSavings">$12.00</p>
+  </div>
+</div>
+
+<div class="g2" style="margin-top:10px;">
+  <div class="metric">
+    <p class="lbl">Net result</p>
+    <p class="val" id="net">+$5.13</p>
+  </div>
+  <div class="metric">
+    <p class="lbl">Break-even tank size</p>
+    <p class="val" id="breakeven">34 L</p>
+  </div>
+</div>
+
+<div class="verdict-box" id="verdictBox">
+  <p class="verdict-title" id="verdictTitle"></p>
+  <p class="verdict-sub" id="verdictSub"></p>
+</div>
+
+<div style="margin-top: 16px; position: relative; height: 220px;">
+  <canvas id="chart" role="img" aria-label="Bar chart comparing detour cost vs fuel savings"></canvas>
+</div>
+<div style="display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--color-text-secondary);">
+  <span style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:2px;background:#D85A30;display:inline-block;"></span>Detour cost</span>
+  <span style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:2px;background:#1D9E75;display:inline-block;"></span>Fuel savings</span>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+let chart;
+
+function calc() {
+  const farKm = +document.getElementById('farKm').value;
+  const nearKm = +document.getElementById('nearKm').value;
+  const farPrice = +document.getElementById('farPrice').value;
+  const nearPrice = +document.getElementById('nearPrice').value;
+  const tank = +document.getElementById('tank').value;
+  const cons = +document.getElementById('cons').value;
+
+  document.getElementById('farKmOut').textContent = farKm + ' km (one way)';
+  document.getElementById('nearKmOut').textContent = nearKm + ' km (one way)';
+  document.getElementById('farPriceOut').textContent = '$' + farPrice.toFixed(2) + ' / L';
+  document.getElementById('nearPriceOut').textContent = '$' + nearPrice.toFixed(2) + ' / L';
+  document.getElementById('tankOut').textContent = tank + ' L';
+  document.getElementById('consOut').textContent = cons.toFixed(1) + ' L/100km';
+
+  const extraKm = (farKm - nearKm) * 2;
+  const extraFuel = (extraKm * cons) / 100;
+  const detourCost = extraFuel * farPrice;
+  const savingsPerL = nearPrice - farPrice;
+  const tankSavings = savingsPerL * tank;
+  const net = tankSavings - detourCost;
+  const breakeven = savingsPerL > 0 ? detourCost / savingsPerL : null;
+
+  document.getElementById('extraKm').textContent = extraKm.toFixed(0) + ' km';
+  document.getElementById('extraFuel').textContent = extraFuel.toFixed(1) + ' L';
+  document.getElementById('detourCost').textContent = '$' + detourCost.toFixed(2);
+  document.getElementById('savingsL').textContent = '$' + savingsPerL.toFixed(2) + ' / L';
+  document.getElementById('tankSavings').textContent = '$' + tankSavings.toFixed(2);
+  document.getElementById('net').textContent = (net >= 0 ? '+' : '') + '$' + net.toFixed(2);
+  document.getElementById('net').style.color = net >= 0 ? 'var(--color-text-success)' : 'var(--color-text-danger)';
+  document.getElementById('breakeven').textContent = breakeven !== null ? breakeven.toFixed(0) + ' L' : 'N/A';
+
+  const vBox = document.getElementById('verdictBox');
+  const vTitle = document.getElementById('verdictTitle');
+  const vSub = document.getElementById('verdictSub');
+
+  if (net > 0) {
+    vBox.style.background = 'var(--color-background-success)';
+    vTitle.style.color = 'var(--color-text-success)';
+    vSub.style.color = 'var(--color-text-success)';
+    vTitle.textContent = 'Worth it — you come out ahead by $' + net.toFixed(2);
+    vSub.textContent = 'You save $' + tankSavings.toFixed(2) + ' on fuel, and the detour only costs $' + detourCost.toFixed(2) + ' in extra gas.';
+  } else {
+    vBox.style.background = 'var(--color-background-danger)';
+    vTitle.style.color = 'var(--color-text-danger)';
+    vSub.style.color = 'var(--color-text-danger)';
+    vTitle.textContent = 'Not worth it — you lose $' + Math.abs(net).toFixed(2);
+    vSub.textContent = 'The detour costs $' + detourCost.toFixed(2) + ' in fuel but only saves $' + tankSavings.toFixed(2) + ' at the pump.';
+  }
+
+  if (chart) {
+    chart.data.datasets[0].data = [detourCost, tankSavings];
+    chart.update();
+  } else {
+    chart = new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: {
+        labels: ['Detour cost', 'Fuel savings'],
+        datasets: [{
+          data: [detourCost, tankSavings],
+          backgroundColor: ['#D85A30', '#1D9E75'],
+          borderRadius: 6,
+          barThickness: 56
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: {
+          callbacks: { label: ctx => ' $' + ctx.parsed.y.toFixed(2) }
+        }},
+        scales: {
+          x: { grid: { display: false }, ticks: { color: '#888780', font: { size: 12 } } },
+          y: {
+            beginAtZero: true,
+            grid: { color: 'rgba(136,135,128,0.15)' },
+            ticks: { color: '#888780', font: { size: 11 }, callback: v => '$' + v.toFixed(0) }
+          }
+        }
+      }
+    });
+  }
+}
+
+['farKm','nearKm','farPrice','nearPrice','tank','cons'].forEach(id =>
+  document.getElementById(id).addEventListener('input', calc)
+);
+calc();
+</script>
