@@ -1698,6 +1698,12 @@ function loadTrack(index, autoplay) {
   titleEl.textContent = track.title;
   subtitleEl.textContent = subtitleFor(track);
   setNowPlayingArt(track.pictureUrl || albumArtUrlFor(albumOf(track)));
+  // Reset the seek/time display; loadedmetadata will refresh once the audio
+  // header is parsed, but for Jellyfin transcodes the metadata duration is
+  // already known up-front so prefer it.
+  seek.value = '0';
+  currentEl.textContent = '0:00';
+  durationEl.textContent = track.durationSec > 0 ? formatTime(track.durationSec) : '0:00';
   render();
   updateMediaSession();
   if (autoplay) audio.play().catch(() => {});
@@ -2042,28 +2048,45 @@ volume.addEventListener('input', () => {
   savePrefs();
 });
 
+// Returns the duration to use for the seek bar / time display. Prefers the
+// audio element's reported duration; falls back to the current track's
+// metadata duration (Jellyfin transcoding streams have no Content-Length so
+// audio.duration ends up Infinity).
+function effectiveDuration() {
+  if (isFinite(audio.duration) && audio.duration > 0) return audio.duration;
+  const t = state.tracks[state.currentIndex];
+  if (t && t.durationSec > 0) return t.durationSec;
+  return 0;
+}
+
 seek.addEventListener('input', () => { state.seeking = true; });
 seek.addEventListener('change', () => {
-  if (audio.duration) audio.currentTime = (Number(seek.value) / 1000) * audio.duration;
+  const dur = effectiveDuration();
+  if (dur > 0) audio.currentTime = (Number(seek.value) / 1000) * dur;
   state.seeking = false;
 });
 
 audio.addEventListener('timeupdate', () => {
   if (state.seeking) return;
-  if (audio.duration) seek.value = String(Math.floor((audio.currentTime / audio.duration) * 1000));
+  const dur = effectiveDuration();
+  if (dur > 0) seek.value = String(Math.floor((audio.currentTime / dur) * 1000));
   currentEl.textContent = formatTime(audio.currentTime);
-  if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && audio.duration) {
+  if (dur > 0 && !durationEl.textContent.match(/^\d+:\d\d$/)) {
+    durationEl.textContent = formatTime(dur);
+  }
+  if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && dur > 0) {
     try {
       navigator.mediaSession.setPositionState({
-        duration: audio.duration,
+        duration: dur,
         playbackRate: audio.playbackRate,
-        position: audio.currentTime,
+        position: Math.min(audio.currentTime, dur),
       });
     } catch (e) { /* iOS may reject */ }
   }
 });
 audio.addEventListener('loadedmetadata', () => {
-  durationEl.textContent = formatTime(audio.duration);
+  const dur = effectiveDuration();
+  durationEl.textContent = formatTime(dur);
 });
 audio.addEventListener('play', () => {
   playIcon.innerHTML = PAUSE_ICON;
@@ -2209,7 +2232,8 @@ if ('mediaSession' in navigator) {
       audio.currentTime = Math.max(0, audio.currentTime - (e.seekOffset || 10));
     });
     navigator.mediaSession.setActionHandler('seekforward', (e) => {
-      audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + (e.seekOffset || 10));
+      const dur = effectiveDuration();
+      audio.currentTime = Math.min(dur || (audio.currentTime + 10), audio.currentTime + (e.seekOffset || 10));
     });
   } catch (e) { /* optional */ }
 }
