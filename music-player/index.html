@@ -2076,6 +2076,22 @@ shuffleBtn.addEventListener('click', () => {
   state.shuffle = !state.shuffle;
   shuffleBtn.classList.toggle('active', state.shuffle);
   shuffleBtn.setAttribute('aria-pressed', String(state.shuffle));
+  // If the user is inside an album-detail view, scope the queue to that
+  // album so shuffle stays within the folder. Otherwise just reshuffle
+  // whatever queue is currently active.
+  if (state.view === 'album-detail' && state.currentAlbum) {
+    const album = state.currentAlbum;
+    const albumIndices = state.tracks
+      .map((t, i) => albumOf(t) === album ? i : -1)
+      .filter(i => i !== -1);
+    if (albumIndices.length > 0) {
+      const playingIdx = state.queuePos >= 0 ? state.queue[state.queuePos] : -1;
+      const startIdx = albumIndices.includes(playingIdx) ? playingIdx : albumIndices[0];
+      setQueue(albumIndices, startIdx);
+      savePrefs();
+      return;
+    }
+  }
   reshuffleQueueKeepingCurrent();
   savePrefs();
 });
