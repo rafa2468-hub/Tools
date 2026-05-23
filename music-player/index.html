@@ -1056,6 +1056,30 @@ const JF = {
     } catch (e) { /* ignore */ }
   },
   async fetchAllAudio(config) {
+    const libs = await this.fetchViews(config);
+    const musicLibs = libs.filter(l => l.CollectionType === 'music');
+    if (musicLibs.length === 0) {
+      // No explicit music library — fall back to "everything", which mirrors
+      // the old behaviour. Better than returning nothing.
+      return this._fetchAudioUnder(config, null);
+    }
+    const all = [];
+    for (const lib of musicLibs) {
+      const items = await this._fetchAudioUnder(config, lib.Id);
+      for (const it of items) all.push(it);
+    }
+    return all;
+  },
+  async fetchViews(config) {
+    const url = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/Views`;
+    const res = await fetch(url, {
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Views fetch failed (HTTP ${res.status})`);
+    const json = await res.json();
+    return Array.isArray(json.Items) ? json.Items : [];
+  },
+  async _fetchAudioUnder(config, parentId) {
     const params = new URLSearchParams({
       IncludeItemTypes: 'Audio',
       Recursive: 'true',
@@ -1066,6 +1090,7 @@ const JF = {
       EnableImages: 'true',
       ImageTypeLimit: '1',
     });
+    if (parentId) params.set('ParentId', parentId);
     const url = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/Items?${params}`;
     const res = await fetch(url, {
       headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
