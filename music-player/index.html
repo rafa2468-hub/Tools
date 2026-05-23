@@ -1010,10 +1010,25 @@ function tagString(v) {
 }
 
 function albumArtUrlFor(albumName) {
+  if (isMixedArtistAlbum(albumName)) return null;
   for (const t of state.tracks) {
     if (albumOf(t) === albumName && t.pictureUrl) return t.pictureUrl;
   }
   return null;
+}
+
+// True when the album groups songs from more than one named artist — in that
+// case the first-track's cover art is not representative, so we'd rather show
+// the generic gradient than mislead by reusing one song's art for the others.
+function isMixedArtistAlbum(albumName) {
+  const seen = new Set();
+  for (const t of state.tracks) {
+    if (albumOf(t) !== albumName) continue;
+    const a = (t.artist || '').trim();
+    if (a) seen.add(a);
+    if (seen.size > 1) return true;
+  }
+  return false;
 }
 
 /* ---------- Jellyfin API client ---------- */
