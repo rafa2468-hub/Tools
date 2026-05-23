@@ -2066,8 +2066,21 @@ seek.addEventListener('change', () => {
   state.seeking = false;
 });
 
+function resetTimeDisplay() {
+  seek.value = '0';
+  currentEl.textContent = '0:00';
+  const t = state.tracks[state.currentIndex];
+  if (t && t.durationSec > 0) durationEl.textContent = formatTime(t.durationSec);
+  else durationEl.textContent = '0:00';
+}
+
 audio.addEventListener('timeupdate', () => {
   if (state.seeking) return;
+  // Skip stale events from a previous source. After audio.src changes, the
+  // element drops to readyState 0 and re-progresses; ignore everything before
+  // metadata is available again so the old track's currentTime doesn't briefly
+  // get displayed against the new track's duration.
+  if (audio.readyState < 1) return;
   const dur = effectiveDuration();
   if (dur > 0) seek.value = String(Math.floor((audio.currentTime / dur) * 1000));
   currentEl.textContent = formatTime(audio.currentTime);
@@ -2084,6 +2097,8 @@ audio.addEventListener('timeupdate', () => {
     } catch (e) { /* iOS may reject */ }
   }
 });
+audio.addEventListener('emptied', resetTimeDisplay);
+audio.addEventListener('loadstart', resetTimeDisplay);
 audio.addEventListener('loadedmetadata', () => {
   const dur = effectiveDuration();
   durationEl.textContent = formatTime(dur);
