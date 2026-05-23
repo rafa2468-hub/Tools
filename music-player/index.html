@@ -1690,6 +1690,34 @@ async function persistTrack(t) {
 }
 
 /* ---------- Playback ---------- */
+// audio.play() is a Promise that can reject for many reasons: autoplay policy,
+// audio-focus interruptions (Bluetooth, navigation prompts in the car, phone
+// calls), transient network errors, etc. Track which url we were trying to
+// start; if a retry would attempt to play a different track, drop it.
+async function playWithFallback(reason) {
+  const startedSrc = audio.src;
+  try {
+    await audio.play();
+    return true;
+  } catch (err) {
+    console.warn(`audio.play() rejected (${reason || '?'}):`, err && err.name, err && err.message);
+    if (audio.src !== startedSrc) return false; // user moved on, give up
+    // One short retry — clears most transient Bluetooth/audio-focus glitches.
+    await new Promise(r => setTimeout(r, 500));
+    if (audio.src !== startedSrc) return false;
+    try {
+      await audio.play();
+      return true;
+    } catch (err2) {
+      console.warn('audio.play() retry rejected:', err2 && err2.name, err2 && err2.message);
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+      playIcon.innerHTML = PLAY_ICON;
+      showToast('Playback paused — tap play to resume');
+      return false;
+    }
+  }
+}
+
 function loadTrack(index, autoplay) {
   if (index < 0 || index >= state.tracks.length) return;
   state.currentIndex = index;
@@ -1706,7 +1734,7 @@ function loadTrack(index, autoplay) {
   durationEl.textContent = track.durationSec > 0 ? formatTime(track.durationSec) : '0:00';
   render();
   updateMediaSession();
-  if (autoplay) audio.play().catch(() => {});
+  if (autoplay) playWithFallback('loadTrack');
 }
 
 function subtitleFor(track) {
@@ -1755,7 +1783,7 @@ function playPause() {
     loadTrack(state.queue[0], true);
     return;
   }
-  if (audio.paused) audio.play().catch(() => {});
+  if (audio.paused) playWithFallback('playPause');
   else audio.pause();
 }
 
@@ -1763,7 +1791,7 @@ function nextTrack(auto) {
   if (state.tracks.length === 0 || state.queue.length === 0) return;
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
-    audio.play().catch(() => {});
+    playWithFallback('repeatOne');
     return;
   }
   let pos = state.queuePos + 1;
@@ -2232,7 +2260,7 @@ clearBtn.addEventListener('click', () => {
 
 // Lock-screen / Bluetooth / headphone key controls
 if ('mediaSession' in navigator) {
-  navigator.mediaSession.setActionHandler('play', () => audio.play().catch(() => {}));
+  navigator.mediaSession.setActionHandler('play', () => playWithFallback('mediaSession'));
   navigator.mediaSession.setActionHandler('pause', () => audio.pause());
   navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
   navigator.mediaSession.setActionHandler('nexttrack', () => nextTrack(false));
