@@ -524,6 +524,108 @@
   .sheet-action.danger { color: var(--danger); }
   .sheet-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 4px 0; }
 
+  .source-toggle {
+    display: inline-flex;
+    background: rgba(255,255,255,0.06);
+    border-radius: 999px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .src-pill {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    min-width: 60px;
+  }
+  .src-pill.active {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff;
+  }
+  .icon-btn {
+    appearance: none;
+    border: 0;
+    background: rgba(255,255,255,0.08);
+    color: var(--text);
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+  }
+  .icon-btn:active { background: rgba(255,255,255,0.16); }
+  .icon-btn svg { width: 18px; height: 18px; fill: currentColor; }
+  .icon-btn .spin { animation: spin 0.9s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .settings-form { padding: 12px 18px; }
+  .settings-form label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 10px 0 4px;
+  }
+  .settings-form input {
+    width: 100%;
+    appearance: none;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .settings-form input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .settings-row { display: flex; gap: 8px; padding: 10px 18px 4px; }
+  .settings-row button {
+    flex: 1;
+    appearance: none;
+    border: 0;
+    border-radius: 10px;
+    padding: 11px 14px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .settings-row .primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff;
+  }
+  .settings-row .secondary {
+    background: rgba(255,255,255,0.08);
+    color: var(--text);
+  }
+  .settings-row .danger {
+    background: rgba(255, 93, 108, 0.16);
+    color: var(--danger);
+    border: 1px solid rgba(255,93,108,0.3);
+  }
+  .conn-status {
+    margin: 4px 18px 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 12px;
+    background: rgba(255,255,255,0.04);
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  .conn-status.ok { color: var(--accent-2); background: rgba(74,214,255,0.08); }
+  .conn-status.err { color: var(--danger); background: rgba(255,93,108,0.08); }
+  .conn-hint { font-size: 11px; color: var(--muted); padding: 0 18px 12px; line-height: 1.5; }
+
   @media (min-width: 720px) {
     body { padding: 0; }
     main, header { max-width: 480px; margin-left: auto; margin-right: auto; width: 100%; }
@@ -534,17 +636,26 @@
 <body>
 
 <header>
-  <h1>Music</h1>
+  <div class="source-toggle" id="source-toggle">
+    <button class="src-pill active" data-src="local" type="button">Local</button>
+    <button class="src-pill" data-src="jellyfin" type="button">Jellyfin</button>
+  </div>
   <div class="header-actions">
     <label class="pick-btn ghost" id="folder-pick" hidden>
       <svg viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
       Folder
       <input id="folder-input" type="file" webkitdirectory directory multiple>
     </label>
-    <label class="pick-btn">
+    <label class="pick-btn" id="files-pick">
       Add files
       <input id="file-input" type="file" accept="audio/*,.mp3,.m4a,.aac,.ogg,.oga,.opus,.wav,.flac,.wma,.webm" multiple>
     </label>
+    <button class="icon-btn" id="jf-refresh" type="button" aria-label="Refresh Jellyfin library" hidden>
+      <svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.45 11h-2.07A6 6 0 1 1 12 6a5.9 5.9 0 0 1 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+    </button>
+    <button class="icon-btn" id="settings-btn" type="button" aria-label="Settings">
+      <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+    </button>
   </div>
 </header>
 
@@ -713,29 +824,65 @@ const PAUSE_ICON = '<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>';
 const PREFS_KEY = 'music-player-prefs';
 
 /* ---------- State ---------- */
+const JF_CONFIG_KEY = 'music-player-jf';
+const SOURCE_KEY = 'music-player-source';
+
 const state = {
-  tracks: [],          // master list, indexed by position
-  currentIndex: -1,    // index into state.tracks
+  tracks: [],          // active library — points to state.local.tracks or state.jellyfin.tracks
+  currentIndex: -1,
   shuffle: false,
   repeat: 'off',
-  queue: [],           // array of track indices to play in order
-  queuePos: -1,        // position in queue
+  queue: [],
+  queuePos: -1,
   seeking: false,
-  view: 'albums',      // 'albums' | 'songs' | 'album-detail'
-  currentAlbum: null,  // album name when view === 'album-detail'
+  view: 'albums',
+  currentAlbum: null,
   db: null,
+  source: 'local',     // 'local' | 'jellyfin'
+  local: { tracks: [] },
+  jellyfin: {
+    tracks: [],
+    config: { serverUrl: '', accessToken: '', userId: '', username: '', deviceId: '' },
+    lastSync: 0,
+    syncing: false,
+  },
 };
+
+function loadJellyfinConfig() {
+  try {
+    const raw = localStorage.getItem(JF_CONFIG_KEY);
+    if (raw) Object.assign(state.jellyfin.config, JSON.parse(raw));
+  } catch (e) { /* ignore */ }
+  if (!state.jellyfin.config.deviceId) {
+    state.jellyfin.config.deviceId = 'pwa-' + Math.random().toString(36).slice(2, 14);
+    saveJellyfinConfig();
+  }
+}
+function saveJellyfinConfig() {
+  try { localStorage.setItem(JF_CONFIG_KEY, JSON.stringify(state.jellyfin.config)); } catch (e) { /* ignore */ }
+}
+function clearJellyfinConfig() {
+  state.jellyfin.config = { serverUrl: '', accessToken: '', userId: '', username: '', deviceId: state.jellyfin.config.deviceId };
+  saveJellyfinConfig();
+}
+function loadSavedSource() {
+  try {
+    const s = localStorage.getItem(SOURCE_KEY);
+    if (s === 'local' || s === 'jellyfin') state.source = s;
+  } catch (e) { /* ignore */ }
+}
+function saveSource() {
+  try { localStorage.setItem(SOURCE_KEY, state.source); } catch (e) { /* ignore */ }
+}
 
 /* ---------- Feature detection ---------- */
 // webkitdirectory works on desktop and Android Chromium; not on iOS Safari.
 {
   const supports = 'webkitdirectory' in folderInput || 'directory' in folderInput;
-  // Best heuristic for iOS: known UA strings. webkitdirectory the attribute exists but
-  // the picker does not in iOS Safari, so also gate on non-iOS.
   const ua = navigator.userAgent;
   const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
-  if (supports && !isIOS) {
-    folderPickLabel.hidden = false;
+  if (!(supports && !isIOS)) {
+    folderPickLabel.dataset.unsupported = 'true';
   }
 }
 
@@ -867,6 +1014,214 @@ function albumArtUrlFor(albumName) {
     if (albumOf(t) === albumName && t.pictureUrl) return t.pictureUrl;
   }
   return null;
+}
+
+/* ---------- Jellyfin API client ---------- */
+const JF = {
+  authHeader(token, deviceId) {
+    const parts = [
+      'MediaBrowser Client="MusicPlayerPWA"',
+      'Device="Web"',
+      `DeviceId="${deviceId || 'music-player-pwa'}"`,
+      'Version="1.0.0"',
+    ];
+    if (token) parts.push(`Token="${token}"`);
+    return parts.join(', ');
+  },
+  trimUrl(u) { return (u || '').trim().replace(/\/+$/, ''); },
+  async authenticate(serverUrl, username, password, deviceId) {
+    const url = `${this.trimUrl(serverUrl)}/Users/AuthenticateByName`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Emby-Authorization': this.authHeader(null, deviceId),
+      },
+      body: JSON.stringify({ Username: username, Pw: password }),
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.text()).slice(0, 200); } catch (e) { /* ignore */ }
+      throw new Error(`Auth failed (HTTP ${res.status})${detail ? ': ' + detail : ''}`);
+    }
+    return await res.json();
+  },
+  async logout(config) {
+    if (!config.serverUrl || !config.accessToken) return;
+    try {
+      await fetch(`${this.trimUrl(config.serverUrl)}/Sessions/Logout`, {
+        method: 'POST',
+        headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+      });
+    } catch (e) { /* ignore */ }
+  },
+  async fetchAllAudio(config) {
+    const params = new URLSearchParams({
+      IncludeItemTypes: 'Audio',
+      Recursive: 'true',
+      Fields: 'AlbumId,Album,Artists,AlbumArtist,ParentIndexNumber,IndexNumber,RunTimeTicks,Path',
+      SortBy: 'AlbumArtist,Album,ParentIndexNumber,IndexNumber,SortName',
+      SortOrder: 'Ascending',
+      Limit: '10000',
+      EnableImages: 'true',
+      ImageTypeLimit: '1',
+    });
+    const url = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/Items?${params}`;
+    const res = await fetch(url, {
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Library fetch failed (HTTP ${res.status})`);
+    const json = await res.json();
+    return Array.isArray(json.Items) ? json.Items : [];
+  },
+  imageUrl(config, itemId, type, size) {
+    if (!itemId) return null;
+    const t = type || 'Primary';
+    const s = size || 600;
+    return `${this.trimUrl(config.serverUrl)}/Items/${itemId}/Images/${t}?fillHeight=${s}&fillWidth=${s}&quality=90`;
+  },
+  streamUrl(config, itemId) {
+    const params = new URLSearchParams({
+      UserId: config.userId,
+      DeviceId: config.deviceId,
+      api_key: config.accessToken,
+      AudioCodec: 'mp3,aac,opus',
+      Container: 'mp3,aac,m4a,webm,ogg',
+      MaxStreamingBitrate: '320000',
+      MaxAudioChannels: '2',
+      TranscodingProtocol: 'http',
+    });
+    return `${this.trimUrl(config.serverUrl)}/Audio/${itemId}/universal?${params}`;
+  },
+};
+
+function jfItemToTrack(item, config) {
+  const artist = Array.isArray(item.Artists) && item.Artists.length
+    ? item.Artists.join(', ')
+    : (item.AlbumArtist || '');
+  const albumName = (item.Album && item.Album.trim()) || UNSORTED;
+  const pictureUrl = item.AlbumId
+    ? JF.imageUrl(config, item.AlbumId)
+    : JF.imageUrl(config, item.Id);
+  return {
+    source: 'jellyfin',
+    id: 'jf:' + item.Id,
+    itemId: item.Id,
+    albumItemId: item.AlbumId || null,
+    title: item.Name || 'Unknown',
+    artist,
+    album: albumName,
+    url: JF.streamUrl(config, item.Id),
+    pictureUrl,
+    indexNumber: item.IndexNumber || 0,
+    parentIndexNumber: item.ParentIndexNumber || 0,
+    durationSec: item.RunTimeTicks ? Math.round(item.RunTimeTicks / 1e7) : 0,
+    tagsRead: true,
+  };
+}
+
+async function syncJellyfin(showFeedback) {
+  const cfg = state.jellyfin.config;
+  if (!cfg.serverUrl || !cfg.accessToken || !cfg.userId) {
+    if (showFeedback) showToast('Not connected to Jellyfin');
+    return false;
+  }
+  state.jellyfin.syncing = true;
+  updateRefreshSpin(true);
+  try {
+    const items = await JF.fetchAllAudio(cfg);
+    const tracks = items.map(it => jfItemToTrack(it, cfg));
+    state.jellyfin.tracks = tracks;
+    state.jellyfin.lastSync = Date.now();
+    if (state.source === 'jellyfin') {
+      state.tracks = state.jellyfin.tracks;
+      // Reset current view + playback bookkeeping
+      state.currentIndex = -1;
+      state.queue = [];
+      state.queuePos = -1;
+      render();
+    }
+    if (showFeedback) showToast(`Loaded ${tracks.length} Jellyfin track${tracks.length === 1 ? '' : 's'}`);
+    return true;
+  } catch (err) {
+    console.error('Jellyfin sync failed', err);
+    showToast(`Jellyfin: ${err.message || 'sync failed'}`);
+    return false;
+  } finally {
+    state.jellyfin.syncing = false;
+    updateRefreshSpin(false);
+  }
+}
+
+function updateRefreshSpin(spinning) {
+  const btn = document.getElementById('jf-refresh');
+  if (!btn) return;
+  const svg = btn.querySelector('svg');
+  if (svg) svg.classList.toggle('spin', !!spinning);
+}
+
+async function setActiveSource(nextSource, opts) {
+  if (state.source === nextSource && !(opts && opts.force)) return;
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  state.currentIndex = -1;
+  state.queue = [];
+  state.queuePos = -1;
+  state.view = 'albums';
+  state.currentAlbum = null;
+  setNowPlayingArt(null);
+  titleEl.textContent = 'No track loaded';
+
+  state.source = nextSource;
+  saveSource();
+
+  if (nextSource === 'local') {
+    state.tracks = state.local.tracks;
+    subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
+  } else if (nextSource === 'jellyfin') {
+    if (!state.jellyfin.config.accessToken) {
+      state.tracks = [];
+      subtitleEl.textContent = 'Tap the gear to connect to Jellyfin';
+      render();
+      applySourceUI();
+      openSettingsSheet();
+      return;
+    }
+    if (state.jellyfin.tracks.length === 0) {
+      state.tracks = [];
+      subtitleEl.textContent = 'Loading your Jellyfin library…';
+      render();
+      applySourceUI();
+      const ok = await syncJellyfin(false);
+      if (!ok) {
+        subtitleEl.textContent = 'Could not reach Jellyfin';
+        return;
+      }
+    }
+    state.tracks = state.jellyfin.tracks;
+    if (state.tracks.length > 0) {
+      const indices = state.tracks.map((_, i) => i);
+      setQueue(indices, indices[0]);
+      loadTrack(indices[0], false);
+    } else {
+      subtitleEl.textContent = 'No tracks found';
+    }
+  }
+  render();
+  applySourceUI();
+}
+
+function applySourceUI() {
+  const isLocal = state.source === 'local';
+  document.querySelectorAll('.src-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.src === state.source);
+  });
+  document.getElementById('files-pick').hidden = !isLocal;
+  // Folder picker has its own feature-detect gate; keep hidden if unsupported
+  const folderSupported = !document.getElementById('folder-pick').dataset.unsupported;
+  document.getElementById('folder-pick').hidden = !(isLocal && folderSupported);
+  document.getElementById('jf-refresh').hidden = isLocal;
 }
 
 function groupedAlbums() {
@@ -1045,14 +1400,17 @@ function trackRow(trackIndex, number, showAlbumSub) {
 function openTrackSheet(trackIndex) {
   const t = state.tracks[trackIndex];
   if (!t) return;
-  const albums = groupedAlbums().map(a => a.name).filter(n => n !== albumOf(t));
-  sheetBody.innerHTML = `
-    <div class="sheet-title">${escapeHtml(t.title)}</div>
-    <button class="sheet-action" data-act="play">Play</button>
+  const isLocal = (t.source || 'local') === 'local';
+  const localActions = `
     <button class="sheet-action" data-act="rename">Rename track…</button>
     <button class="sheet-action" data-act="move">Move to album…</button>
     <div class="sheet-divider"></div>
     <button class="sheet-action danger" data-act="remove">Remove from library</button>
+  `;
+  sheetBody.innerHTML = `
+    <div class="sheet-title">${escapeHtml(t.title)}</div>
+    <button class="sheet-action" data-act="play">Play</button>
+    ${isLocal ? localActions : ''}
     <button class="sheet-action" data-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
   `;
   sheetBackdrop.classList.add('visible');
@@ -1064,12 +1422,16 @@ function openAlbumSheet(albumName) {
     .map((t, i) => albumOf(t) === albumName ? i : -1)
     .filter(i => i !== -1);
   if (indices.length === 0) return;
-  sheetBody.innerHTML = `
-    <div class="sheet-title">${escapeHtml(albumName)} · ${indices.length} track${indices.length === 1 ? '' : 's'}</div>
-    <button class="sheet-action" data-album-act="play">Play album</button>
+  const isLocal = state.source === 'local';
+  const localActions = `
     <button class="sheet-action" data-album-act="rename">Rename album…</button>
     <div class="sheet-divider"></div>
     <button class="sheet-action danger" data-album-act="remove">Remove album from library</button>
+  `;
+  sheetBody.innerHTML = `
+    <div class="sheet-title">${escapeHtml(albumName)} · ${indices.length} track${indices.length === 1 ? '' : 's'}</div>
+    <button class="sheet-action" data-album-act="play">Play album</button>
+    ${isLocal ? localActions : ''}
     <button class="sheet-action" data-album-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
   `;
   sheetBackdrop.classList.add('visible');
@@ -1080,10 +1442,116 @@ function closeSheet() {
   sheetBackdrop.classList.remove('visible');
   delete sheetBackdrop.dataset.track;
   delete sheetBackdrop.dataset.album;
+  delete sheetBackdrop.dataset.settings;
   sheetBody.innerHTML = '';
 }
 
+function openSettingsSheet() {
+  const cfg = state.jellyfin.config;
+  const connected = !!cfg.accessToken;
+  const status = connected
+    ? `<div class="conn-status ok">Connected to <strong>${escapeHtml(cfg.serverUrl)}</strong> as <strong>${escapeHtml(cfg.username)}</strong>${state.jellyfin.lastSync ? ` · ${state.jellyfin.tracks.length} track${state.jellyfin.tracks.length === 1 ? '' : 's'}` : ''}</div>`
+    : `<div class="conn-status">Not connected.</div>`;
+  const buttons = connected
+    ? `<div class="settings-row">
+         <button class="primary" data-settings-act="refresh" type="button">Refresh library</button>
+         <button class="danger" data-settings-act="disconnect" type="button">Disconnect</button>
+       </div>`
+    : `<div class="settings-row">
+         <button class="primary" data-settings-act="connect" type="button">Connect</button>
+         <button class="secondary" data-settings-act="cancel" type="button">Cancel</button>
+       </div>`;
+  sheetBody.innerHTML = `
+    <div class="sheet-title">Jellyfin</div>
+    ${status}
+    <div class="settings-form">
+      <label for="jf-url">Server URL</label>
+      <input id="jf-url" type="url" inputmode="url" autocomplete="url" placeholder="https://jellyfin.home.lab" value="${escapeHtml(cfg.serverUrl)}" ${connected ? 'disabled' : ''}>
+      <label for="jf-user">Username</label>
+      <input id="jf-user" type="text" autocomplete="username" placeholder="username" value="${escapeHtml(cfg.username)}" ${connected ? 'disabled' : ''}>
+      ${connected ? '' : `
+        <label for="jf-pass">Password</label>
+        <input id="jf-pass" type="password" autocomplete="current-password" placeholder="password">
+      `}
+    </div>
+    ${buttons}
+    <div class="conn-hint">
+      ${connected
+        ? 'Your password is not stored — only the access token. Refresh re-fetches your library.'
+        : 'The server must allow CORS from <code>' + escapeHtml(location.origin) + '</code>. On Jellyfin: Dashboard → Networking → CORS Hosts.'}
+    </div>
+  `;
+  sheetBackdrop.classList.add('visible');
+  sheetBackdrop.dataset.settings = 'jellyfin';
+}
+
+async function handleSettingsAction(act) {
+  if (act === 'cancel') { closeSheet(); return; }
+  if (act === 'disconnect') {
+    closeSheet();
+    if (!confirm('Disconnect from Jellyfin? The cached library will be cleared from this device.')) return;
+    await JF.logout(state.jellyfin.config);
+    clearJellyfinConfig();
+    state.jellyfin.tracks = [];
+    state.jellyfin.lastSync = 0;
+    if (state.source === 'jellyfin') {
+      await setActiveSource('local');
+    }
+    showToast('Disconnected from Jellyfin');
+    return;
+  }
+  if (act === 'refresh') {
+    closeSheet();
+    await syncJellyfin(true);
+    return;
+  }
+  if (act === 'connect') {
+    const urlInput = document.getElementById('jf-url');
+    const userInput = document.getElementById('jf-user');
+    const passInput = document.getElementById('jf-pass');
+    const serverUrl = JF.trimUrl(urlInput.value);
+    const username = (userInput.value || '').trim();
+    const password = passInput.value || '';
+    if (!serverUrl || !username || !password) {
+      showToast('Fill in server, username, and password');
+      return;
+    }
+    // Mixed-content guard
+    if (location.protocol === 'https:' && serverUrl.startsWith('http://')) {
+      showToast('HTTPS page can\'t talk to an HTTP server — use https:// on Jellyfin');
+      return;
+    }
+    const deviceId = state.jellyfin.config.deviceId;
+    const btn = sheetBody.querySelector('button[data-settings-act="connect"]');
+    if (btn) { btn.textContent = 'Connecting…'; btn.disabled = true; }
+    try {
+      const result = await JF.authenticate(serverUrl, username, password, deviceId);
+      if (!result || !result.AccessToken || !result.User) throw new Error('No token returned');
+      state.jellyfin.config = {
+        serverUrl,
+        accessToken: result.AccessToken,
+        userId: result.User.Id,
+        username: result.User.Name || username,
+        deviceId,
+      };
+      saveJellyfinConfig();
+      closeSheet();
+      showToast('Connected to Jellyfin');
+      await setActiveSource('jellyfin', { force: true });
+    } catch (err) {
+      console.error('Jellyfin connect failed', err);
+      const msg = String(err.message || err);
+      const friendly = msg.includes('Failed to fetch')
+        ? 'Can\'t reach the server. Check the URL, network, and CORS.'
+        : msg;
+      showToast(friendly);
+      if (btn) { btn.textContent = 'Connect'; btn.disabled = false; }
+    }
+  }
+}
+
 async function renameAlbum(oldName, newName) {
+  if (state.source !== 'local') return;
   const target = (newName || '').trim() || UNSORTED;
   if (target === oldName) return;
   const affected = state.tracks.filter(t => albumOf(t) === oldName);
@@ -1097,6 +1565,7 @@ async function renameAlbum(oldName, newName) {
 }
 
 async function removeAlbum(albumName) {
+  if (state.source !== 'local') return;
   const indices = [];
   state.tracks.forEach((t, i) => { if (albumOf(t) === albumName) indices.push(i); });
   if (indices.length === 0) return;
@@ -1291,6 +1760,9 @@ function prevTrack() {
 
 /* ---------- File ingestion ---------- */
 async function addFiles(files) {
+  if (state.source !== 'local') {
+    await setActiveSource('local');
+  }
   const audioFiles = Array.from(files).filter(f =>
     f.type.startsWith('audio/') || /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|wma|webm)$/i.test(f.name)
   );
@@ -1346,6 +1818,7 @@ async function addFiles(files) {
 }
 
 async function removeTrack(index) {
+  if (state.source !== 'local') return;
   if (index < 0 || index >= state.tracks.length) return;
   const track = state.tracks[index];
   const wasPlaying = index === state.currentIndex && !audio.paused;
@@ -1380,11 +1853,13 @@ async function removeTrack(index) {
 }
 
 async function clearPlaylist() {
-  for (const t of state.tracks) {
+  if (state.source !== 'local') return;
+  for (const t of state.local.tracks) {
     URL.revokeObjectURL(t.url);
     if (t.pictureUrl) URL.revokeObjectURL(t.pictureUrl);
   }
-  state.tracks = [];
+  state.local.tracks.length = 0;
+  state.tracks = state.local.tracks;
   state.currentIndex = -1;
   state.queue = [];
   state.queuePos = -1;
@@ -1425,6 +1900,7 @@ async function restoreLibrary() {
     state.db = await openDB();
     const records = await idbAll(state.db);
     let needsMigration = false;
+    state.local.tracks.length = 0;
     for (const r of records) {
       if (!r.album) {
         r.album = UNSORTED;
@@ -1432,21 +1908,21 @@ async function restoreLibrary() {
       }
       r.url = URL.createObjectURL(r.blob);
       if (r.pictureBlob) r.pictureUrl = URL.createObjectURL(r.pictureBlob);
-      state.tracks.push(r);
+      r.source = 'local';
+      state.local.tracks.push(r);
     }
     if (needsMigration) {
-      for (const r of state.tracks) {
+      for (const r of state.local.tracks) {
         if (r.album === UNSORTED) await idbPut(state.db, r).catch(() => {});
       }
     }
-    if (state.tracks.length > 0) {
+    await setActiveSource(state.source, { force: true });
+    if (state.source === 'local' && state.tracks.length > 0) {
       const indices = state.tracks.map((_, i) => i);
       setQueue(indices, indices[0]);
       loadTrack(indices[0], false);
-    } else {
-      render();
     }
-    backfillTags();
+    if (state.source === 'local') backfillTags();
   } catch (err) {
     console.error('Failed to open library', err);
     showToast('Could not load saved library');
@@ -1657,6 +2133,11 @@ async function handleAlbumSheetAction(act, albumName) {
 
 sheetBackdrop.addEventListener('click', e => {
   if (e.target === sheetBackdrop) { closeSheet(); return; }
+  const settingsBtn = e.target.closest('[data-settings-act]');
+  if (settingsBtn) {
+    handleSettingsAction(settingsBtn.dataset.settingsAct);
+    return;
+  }
   const action = e.target.closest('.sheet-action');
   if (!action) return;
   if (action.dataset.albumAct) {
@@ -1667,7 +2148,19 @@ sheetBackdrop.addEventListener('click', e => {
   handleSheetAction(action.dataset.act, trackIndex);
 });
 
+document.getElementById('source-toggle').addEventListener('click', e => {
+  const pill = e.target.closest('.src-pill');
+  if (!pill) return;
+  setActiveSource(pill.dataset.src);
+});
+document.getElementById('settings-btn').addEventListener('click', openSettingsSheet);
+document.getElementById('jf-refresh').addEventListener('click', () => syncJellyfin(true));
+
 clearBtn.addEventListener('click', () => {
+  if (state.source !== 'local') {
+    showToast('Clear only works on the Local library');
+    return;
+  }
   if (state.tracks.length === 0) return;
   if (confirm('Remove all tracks from your library? Your music files on your phone are not affected — only the references this app stores.')) {
     clearPlaylist();
@@ -1742,6 +2235,10 @@ if (navigator.storage && navigator.storage.persist) {
 /* ---------- Boot ---------- */
 loadPrefs();
 applyRepeatVisual();
+loadJellyfinConfig();
+loadSavedSource();
+state.tracks = state.local.tracks;
+applySourceUI();
 restoreLibrary();
 </script>
 </body>
