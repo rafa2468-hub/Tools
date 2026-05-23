@@ -12,6 +12,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<script src="vendor/jsmediatags.min.js"></script>
 <style>
   :root {
     --bg: #0b0b10;
@@ -101,8 +102,17 @@
     justify-content: center;
     color: rgba(255,255,255,0.85);
     overflow: hidden;
+    position: relative;
   }
   .artwork svg { width: 38%; height: 38%; opacity: 0.85; }
+  .artwork img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .artwork.has-art svg { display: none; }
   .track-meta { width: 100%; padding: 0 8px; }
   .track-title {
     font-size: 17px;
@@ -336,8 +346,18 @@
     align-items: center;
     justify-content: center;
     color: rgba(255,255,255,0.7);
+    position: relative;
+    overflow: hidden;
   }
   .album-art svg { width: 38%; height: 38%; fill: currentColor; }
+  .album-art img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .album-art.has-art svg { display: none; }
   .album-name {
     font-size: 13px;
     font-weight: 600;
@@ -537,6 +557,7 @@
 <main>
   <section class="now-playing">
     <div class="artwork" id="artwork">
+      <img id="artwork-img" alt="" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
     </div>
     <div class="track-meta">
@@ -806,6 +827,47 @@ function deriveAlbum(file) {
 }
 
 function albumOf(track) { return track.album || UNSORTED; }
+function artistOf(track) { return track.artist || ''; }
+
+/* ---------- ID3 / metadata tag reading via jsmediatags ---------- */
+function readTags(file) {
+  return new Promise((resolve) => {
+    if (typeof window.jsmediatags === 'undefined') { resolve(null); return; }
+    try {
+      window.jsmediatags.read(file, {
+        onSuccess: (result) => resolve(result && result.tags ? result.tags : null),
+        onError: () => resolve(null),
+      });
+    } catch (e) { resolve(null); }
+  });
+}
+
+function pictureToBlob(picture) {
+  if (!picture || !picture.data || !picture.format) return null;
+  const data = picture.data;
+  const arr = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) arr[i] = data[i];
+  return new Blob([arr], { type: picture.format });
+}
+
+// jsmediatags occasionally returns title/artist/album as objects on M4A files
+// (e.g. { type: 'STR', text: '...' }). Normalize to plain strings.
+function tagString(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'object') {
+    if (typeof v.text === 'string') return v.text.trim();
+    if (typeof v.data === 'string') return v.data.trim();
+  }
+  return String(v).trim();
+}
+
+function albumArtUrlFor(albumName) {
+  for (const t of state.tracks) {
+    if (albumOf(t) === albumName && t.pictureUrl) return t.pictureUrl;
+  }
+  return null;
+}
 
 function groupedAlbums() {
   const map = new Map();
@@ -898,15 +960,18 @@ function renderAlbumsGrid() {
     view.innerHTML = '<div class="empty">No albums yet.</div>';
     return;
   }
-  const html = '<div class="album-grid">' + albums.map(a => `
+  const html = '<div class="album-grid">' + albums.map(a => {
+    const art = albumArtUrlFor(a.name);
+    const artHtml = art
+      ? `<img src="${escapeHtml(art)}" alt="">`
+      : '<svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
+    return `
     <div class="album-card" data-album="${escapeHtml(a.name)}">
-      <div class="album-art">
-        <svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
-      </div>
+      <div class="album-art${art ? ' has-art' : ''}">${artHtml}</div>
       <div class="album-name">${escapeHtml(a.name)}</div>
       <div class="album-count">${a.indices.length} track${a.indices.length === 1 ? '' : 's'}</div>
-    </div>
-  `).join('') + '</div>';
+    </div>`;
+  }).join('') + '</div>';
   view.innerHTML = html;
 }
 
@@ -951,9 +1016,17 @@ function renderSongsList() {
 function trackRow(trackIndex, number, showAlbumSub) {
   const t = state.tracks[trackIndex];
   const playing = trackIndex === state.currentIndex;
-  const sub = showAlbumSub
-    ? `<div class="track-album-sub">${escapeHtml(albumOf(t))}</div>`
-    : '';
+  let subText = '';
+  if (showAlbumSub) {
+    const artist = artistOf(t);
+    const album = albumOf(t);
+    subText = artist && album !== UNSORTED ? `${artist} · ${album}` :
+              artist ? artist :
+              album !== UNSORTED ? album : '';
+  } else if (artistOf(t)) {
+    subText = artistOf(t);
+  }
+  const sub = subText ? `<div class="track-album-sub">${escapeHtml(subText)}</div>` : '';
   return `
     <div class="track${playing ? ' playing' : ''}" data-track="${trackIndex}">
       <span class="track-num">${number}</span>
@@ -1038,6 +1111,7 @@ async function removeAlbum(albumName) {
     const t = state.tracks[i];
     try { await idbDelete(state.db, t.id); } catch (e) { /* ignore */ }
     URL.revokeObjectURL(t.url);
+    if (t.pictureUrl) URL.revokeObjectURL(t.pictureUrl);
     state.tracks.splice(i, 1);
   }
 
@@ -1128,12 +1202,34 @@ function loadTrack(index, autoplay) {
   const track = state.tracks[index];
   audio.src = track.url;
   titleEl.textContent = track.title;
-  subtitleEl.textContent = albumOf(track) === UNSORTED
-    ? formatBytes(track.size || 0)
-    : albumOf(track);
+  subtitleEl.textContent = subtitleFor(track);
+  setNowPlayingArt(track.pictureUrl || albumArtUrlFor(albumOf(track)));
   render();
   updateMediaSession();
   if (autoplay) audio.play().catch(() => {});
+}
+
+function subtitleFor(track) {
+  const artist = artistOf(track);
+  const album = albumOf(track);
+  if (artist && album !== UNSORTED) return `${artist} · ${album}`;
+  if (artist) return artist;
+  if (album !== UNSORTED) return album;
+  return formatBytes(track.size || 0);
+}
+
+function setNowPlayingArt(url) {
+  const artwork = document.getElementById('artwork');
+  const img = document.getElementById('artwork-img');
+  if (url) {
+    img.src = url;
+    img.hidden = false;
+    artwork.classList.add('has-art');
+  } else {
+    img.removeAttribute('src');
+    img.hidden = true;
+    artwork.classList.remove('has-art');
+  }
 }
 
 function playTrackFromCurrentView(trackIndex) {
@@ -1210,19 +1306,30 @@ async function addFiles(files) {
   const startedEmpty = state.tracks.length === 0;
 
   for (const file of audioFiles) {
+    const tags = await readTags(file);
+    const tagTitle = tags ? tagString(tags.title) : '';
+    const tagArtist = tags ? tagString(tags.artist) : '';
+    const tagAlbum = tags ? tagString(tags.album) : '';
+    const pictureBlob = tags ? pictureToBlob(tags.picture) : null;
+
     const record = {
       name: file.name,
-      title: titleFromName(file.name),
-      album: deriveAlbum(file),
+      title: tagTitle || titleFromName(file.name),
+      artist: tagArtist || null,
+      album: tagAlbum || deriveAlbum(file),
       type: file.type || 'audio/mpeg',
       size: file.size,
       addedAt: Date.now(),
       blob: file,
+      pictureBlob: pictureBlob || undefined,
+      pictureMime: pictureBlob ? pictureBlob.type : undefined,
+      tagsRead: true,
     };
     try {
       const id = await idbAdd(state.db, record);
       record.id = id;
       record.url = URL.createObjectURL(record.blob);
+      if (pictureBlob) record.pictureUrl = URL.createObjectURL(pictureBlob);
       state.tracks.push(record);
     } catch (err) {
       console.error('Failed to store track', file.name, err);
@@ -1246,6 +1353,7 @@ async function removeTrack(index) {
 
   try { await idbDelete(state.db, track.id); } catch (e) { /* ignore */ }
   URL.revokeObjectURL(track.url);
+  if (track.pictureUrl) URL.revokeObjectURL(track.pictureUrl);
   state.tracks.splice(index, 1);
 
   // Fix up state.currentIndex and queue indices after removal.
@@ -1272,7 +1380,10 @@ async function removeTrack(index) {
 }
 
 async function clearPlaylist() {
-  for (const t of state.tracks) URL.revokeObjectURL(t.url);
+  for (const t of state.tracks) {
+    URL.revokeObjectURL(t.url);
+    if (t.pictureUrl) URL.revokeObjectURL(t.pictureUrl);
+  }
   state.tracks = [];
   state.currentIndex = -1;
   state.queue = [];
@@ -1283,6 +1394,7 @@ async function clearPlaylist() {
   audio.load();
   titleEl.textContent = 'No track loaded';
   subtitleEl.textContent = 'Tap "Add files" to load music';
+  setNowPlayingArt(null);
   state.view = 'albums';
   state.currentAlbum = null;
   render();
@@ -1292,10 +1404,19 @@ function updateMediaSession() {
   if (!('mediaSession' in navigator)) return;
   const track = state.tracks[state.currentIndex];
   if (!track) { navigator.mediaSession.metadata = null; return; }
+  const artUrl = track.pictureUrl || albumArtUrlFor(albumOf(track));
+  const artwork = artUrl
+    ? [{
+        src: artUrl,
+        sizes: '512x512',
+        type: track.pictureMime || 'image/jpeg',
+      }]
+    : [];
   navigator.mediaSession.metadata = new MediaMetadata({
     title: track.title,
-    artist: '',
+    artist: artistOf(track),
     album: albumOf(track) === UNSORTED ? '' : albumOf(track),
+    artwork,
   });
 }
 
@@ -1310,6 +1431,7 @@ async function restoreLibrary() {
         needsMigration = true;
       }
       r.url = URL.createObjectURL(r.blob);
+      if (r.pictureBlob) r.pictureUrl = URL.createObjectURL(r.pictureBlob);
       state.tracks.push(r);
     }
     if (needsMigration) {
@@ -1324,10 +1446,65 @@ async function restoreLibrary() {
     } else {
       render();
     }
+    backfillTags();
   } catch (err) {
     console.error('Failed to open library', err);
     showToast('Could not load saved library');
     render();
+  }
+}
+
+// One-time progressive tag backfill for tracks imported before tag reading
+// existed. Marks each record with `tagsRead: true` once processed so we only
+// touch each track once. Runs in the background, gentle on the main thread.
+async function backfillTags() {
+  if (typeof window.jsmediatags === 'undefined') return;
+  const todo = state.tracks.filter(t => !t.tagsRead);
+  if (todo.length === 0) return;
+  let updated = 0;
+  for (const t of todo) {
+    if (!t.blob) { t.tagsRead = true; await idbPut(state.db, t).catch(() => {}); continue; }
+    const tags = await readTags(t.blob);
+    let changed = false;
+    if (tags) {
+      const tagTitle = tagString(tags.title);
+      const tagArtist = tagString(tags.artist);
+      const tagAlbum = tagString(tags.album);
+      const pictureBlob = pictureToBlob(tags.picture);
+      // Only overwrite title/album if the existing values are filename/folder-derived
+      // (we have no way to tell perfectly, but we keep user-edited values intact by
+      // not overwriting if the user has already renamed via the sheet — there's no
+      // marker for that, so be conservative: only fill empty/derived fields)
+      if (!t.artist && tagArtist) { t.artist = tagArtist; changed = true; }
+      if (tagAlbum && (t.album === UNSORTED || t.album === deriveAlbum({ webkitRelativePath: '', name: t.name }))) {
+        if (t.album !== tagAlbum) { t.album = tagAlbum; changed = true; }
+      }
+      if (tagTitle && t.title === titleFromName(t.name)) {
+        t.title = tagTitle; changed = true;
+      }
+      if (!t.pictureBlob && pictureBlob) {
+        t.pictureBlob = pictureBlob;
+        t.pictureMime = pictureBlob.type;
+        t.pictureUrl = URL.createObjectURL(pictureBlob);
+        changed = true;
+      }
+    }
+    t.tagsRead = true;
+    await idbPut(state.db, t).catch(() => {});
+    if (changed) updated++;
+    // Yield to the UI between tracks
+    await new Promise(r => setTimeout(r, 0));
+  }
+  if (updated > 0) {
+    render();
+    if (state.currentIndex !== -1) {
+      const t = state.tracks[state.currentIndex];
+      titleEl.textContent = t.title;
+      subtitleEl.textContent = subtitleFor(t);
+      setNowPlayingArt(t.pictureUrl || albumArtUrlFor(albumOf(t)));
+      updateMediaSession();
+    }
+    showToast(`Read tags from ${updated} track${updated === 1 ? '' : 's'}`);
   }
 }
 
