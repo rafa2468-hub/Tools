@@ -44,7 +44,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: 8px;
   }
   header h1 {
     font-size: 18px;
@@ -52,6 +52,7 @@
     font-weight: 600;
     letter-spacing: 0.3px;
   }
+  .header-actions { display: flex; gap: 6px; }
   .pick-btn {
     appearance: none;
     border: 0;
@@ -60,12 +61,22 @@
     font-weight: 600;
     padding: 10px 14px;
     border-radius: 999px;
-    font-size: 14px;
+    font-size: 13px;
     cursor: pointer;
     box-shadow: 0 6px 18px rgba(124, 92, 255, 0.35);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pick-btn.ghost {
+    background: rgba(255,255,255,0.08);
+    color: var(--text);
+    box-shadow: none;
+    font-weight: 500;
   }
   .pick-btn:active { transform: translateY(1px); }
   .pick-btn input { display: none; }
+  .pick-btn svg { width: 14px; height: 14px; fill: currentColor; }
 
   main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
@@ -196,45 +207,151 @@
   .volume-row svg { width: 18px; height: 18px; fill: currentColor; }
   .volume-row input[type=range] { flex: 1; }
 
-  .playlist {
+  .library {
     flex: 1;
-    min-height: 140px;
+    min-height: 160px;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     background: rgba(255,255,255,0.02);
     border-top: 1px solid rgba(255,255,255,0.06);
-    padding: 6px 0 8px;
+    padding-bottom: 8px;
   }
-  .playlist-header {
-    padding: 10px 18px 6px;
+  .tabs {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: rgba(11, 11, 16, 0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    color: var(--muted);
+    padding: 8px 12px;
+    gap: 4px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
   }
-  .playlist-header .count {
+  .tab {
+    appearance: none;
+    border: 0;
+    background: transparent;
     color: var(--muted);
-    font-weight: 400;
-    text-transform: none;
-    letter-spacing: 0;
-    margin-left: 6px;
-    font-size: 11px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
   }
-  .clear-btn {
+  .tab.active { background: rgba(124,92,255,0.18); color: var(--text); }
+  .tabs .spacer { flex: 1; }
+  .tabs .clear-btn {
     background: transparent;
     border: 1px solid rgba(255,255,255,0.15);
     color: var(--muted);
     border-radius: 999px;
-    padding: 4px 10px;
+    padding: 6px 10px;
     font-size: 11px;
-    text-transform: none;
-    letter-spacing: 0;
     cursor: pointer;
   }
-  .clear-btn:active { background: rgba(255,255,255,0.08); }
+  .tabs .clear-btn:active { background: rgba(255,255,255,0.08); }
+
+  .back-row {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: rgba(11, 11, 16, 0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .back-btn {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .back-btn:active { background: rgba(255,255,255,0.08); }
+  .back-btn svg { width: 22px; height: 22px; fill: currentColor; }
+  .back-title { flex: 1; min-width: 0; }
+  .back-title h2 {
+    font-size: 15px;
+    margin: 0;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .back-title .meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 1px;
+  }
+  .play-album-btn {
+    appearance: none;
+    border: 0;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff;
+    font-weight: 600;
+    padding: 7px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .play-album-btn svg { width: 12px; height: 12px; fill: currentColor; }
+  .play-album-btn:active { transform: translateY(1px); }
+
+  .album-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    padding: 14px;
+  }
+  .album-card {
+    background: var(--surface);
+    border-radius: 14px;
+    overflow: hidden;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+  }
+  .album-card:active { transform: scale(0.98); }
+  .album-art {
+    aspect-ratio: 1 / 1;
+    background:
+      radial-gradient(120% 120% at 30% 20%, rgba(124,92,255,0.7), rgba(74,214,255,0.3) 60%, rgba(0,0,0,0.4) 100%),
+      var(--bg-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,0.7);
+  }
+  .album-art svg { width: 38%; height: 38%; fill: currentColor; }
+  .album-name {
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 10px 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .album-count {
+    font-size: 11px;
+    color: var(--muted);
+    padding: 0 10px 10px;
+  }
+
   .track {
     padding: 12px 18px;
     display: flex;
@@ -252,14 +369,22 @@
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
+  .track-info { flex: 1; min-width: 0; }
   .track-name {
-    flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 14px;
   }
-  .track-remove {
+  .track-album-sub {
+    font-size: 11px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 2px;
+  }
+  .track-menu {
     appearance: none;
     border: 0;
     background: transparent;
@@ -272,13 +397,14 @@
     align-items: center;
     justify-content: center;
   }
-  .track-remove:active { background: rgba(255,255,255,0.08); color: var(--danger); }
-  .track-remove svg { width: 16px; height: 16px; fill: currentColor; }
+  .track-menu:active { background: rgba(255,255,255,0.08); }
+  .track-menu svg { width: 18px; height: 18px; fill: currentColor; }
   .track.playing .track-name { color: var(--accent-2); font-weight: 600; }
+
   .empty {
     color: var(--muted);
     text-align: center;
-    padding: 28px 24px;
+    padding: 32px 24px;
     font-size: 14px;
     line-height: 1.5;
   }
@@ -337,9 +463,51 @@
     transform: translateX(-50%) translateY(0);
   }
 
+  .sheet-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: none;
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 200;
+  }
+  .sheet-backdrop.visible { display: flex; }
+  .sheet {
+    background: var(--bg-2);
+    border-radius: 18px 18px 0 0;
+    width: 100%;
+    max-width: 480px;
+    padding: 12px 0 max(12px, env(safe-area-inset-bottom));
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .sheet-title {
+    text-align: center;
+    font-size: 13px;
+    color: var(--muted);
+    padding: 8px 16px 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .sheet-action {
+    display: block;
+    width: 100%;
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    padding: 14px 18px;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  .sheet-action:active { background: rgba(255,255,255,0.06); }
+  .sheet-action.danger { color: var(--danger); }
+  .sheet-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 4px 0; }
+
   @media (min-width: 720px) {
     body { padding: 0; }
     main, header { max-width: 480px; margin-left: auto; margin-right: auto; width: 100%; }
+    .album-grid { grid-template-columns: repeat(3, 1fr); }
   }
 </style>
 </head>
@@ -347,10 +515,17 @@
 
 <header>
   <h1>Music</h1>
-  <label class="pick-btn">
-    Add files
-    <input id="file-input" type="file" accept="audio/*,.mp3,.m4a,.aac,.ogg,.oga,.opus,.wav,.flac,.wma,.webm" multiple>
-  </label>
+  <div class="header-actions">
+    <label class="pick-btn ghost" id="folder-pick" hidden>
+      <svg viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+      Folder
+      <input id="folder-input" type="file" webkitdirectory directory multiple>
+    </label>
+    <label class="pick-btn">
+      Add files
+      <input id="file-input" type="file" accept="audio/*,.mp3,.m4a,.aac,.ogg,.oga,.opus,.wav,.flac,.wma,.webm" multiple>
+    </label>
+  </div>
 </header>
 
 <div class="install-banner" id="install-banner" role="region" aria-label="Install app">
@@ -401,19 +576,20 @@
     <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
   </div>
 
-  <section class="playlist" id="playlist">
-    <div class="playlist-header">
-      <span>Library <span class="count" id="count"></span></span>
+  <section class="library" id="library">
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-view="albums" type="button">Albums</button>
+      <button class="tab" data-view="songs" type="button">Songs</button>
+      <div class="spacer"></div>
       <button class="clear-btn" id="clear" type="button">Clear all</button>
     </div>
-    <div id="track-list">
-      <div class="empty">
-        Your library is empty.
-        <div class="hint">Pick audio files from your device — they're stored locally on your phone, not uploaded anywhere.</div>
-      </div>
-    </div>
+    <div id="view"></div>
   </section>
 </main>
+
+<div class="sheet-backdrop" id="sheet" role="dialog" aria-modal="true">
+  <div class="sheet" id="sheet-body"></div>
+</div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <audio id="audio" preload="metadata"></audio>
@@ -425,6 +601,7 @@
 const DB_NAME = 'music-player-db';
 const DB_VERSION = 1;
 const STORE = 'tracks';
+const UNSORTED = 'Unsorted';
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -459,6 +636,15 @@ function idbAdd(db, record) {
   });
 }
 
+function idbPut(db, record) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const req = tx.objectStore(STORE).put(record);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 function idbDelete(db, id) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
@@ -477,9 +663,11 @@ function idbClear(db) {
   });
 }
 
-/* ---------- App state ---------- */
+/* ---------- DOM refs ---------- */
 const audio = document.getElementById('audio');
 const fileInput = document.getElementById('file-input');
+const folderInput = document.getElementById('folder-input');
+const folderPickLabel = document.getElementById('folder-pick');
 const titleEl = document.getElementById('title');
 const subtitleEl = document.getElementById('subtitle');
 const seek = document.getElementById('seek');
@@ -492,26 +680,45 @@ const nextBtn = document.getElementById('next');
 const shuffleBtn = document.getElementById('shuffle');
 const repeatBtn = document.getElementById('repeat');
 const volume = document.getElementById('volume');
-const trackList = document.getElementById('track-list');
+const view = document.getElementById('view');
+const tabs = document.getElementById('tabs');
 const clearBtn = document.getElementById('clear');
-const countEl = document.getElementById('count');
 const toast = document.getElementById('toast');
+const sheetBackdrop = document.getElementById('sheet');
+const sheetBody = document.getElementById('sheet-body');
 
 const PLAY_ICON = '<path d="M8 5v14l11-7z"/>';
 const PAUSE_ICON = '<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>';
 const PREFS_KEY = 'music-player-prefs';
 
+/* ---------- State ---------- */
 const state = {
-  tracks: [],
-  currentIndex: -1,
+  tracks: [],          // master list, indexed by position
+  currentIndex: -1,    // index into state.tracks
   shuffle: false,
   repeat: 'off',
-  order: [],
-  orderPos: -1,
+  queue: [],           // array of track indices to play in order
+  queuePos: -1,        // position in queue
   seeking: false,
+  view: 'albums',      // 'albums' | 'songs' | 'album-detail'
+  currentAlbum: null,  // album name when view === 'album-detail'
   db: null,
 };
 
+/* ---------- Feature detection ---------- */
+// webkitdirectory works on desktop and Android Chromium; not on iOS Safari.
+{
+  const supports = 'webkitdirectory' in folderInput || 'directory' in folderInput;
+  // Best heuristic for iOS: known UA strings. webkitdirectory the attribute exists but
+  // the picker does not in iOS Safari, so also gate on non-iOS.
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+  if (supports && !isIOS) {
+    folderPickLabel.hidden = false;
+  }
+}
+
+/* ---------- Prefs ---------- */
 function loadPrefs() {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
@@ -553,6 +760,7 @@ function applyRepeatVisual() {
     : '<svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>';
 }
 
+/* ---------- Utilities ---------- */
 let toastTimer = null;
 function showToast(msg) {
   toast.textContent = msg;
@@ -580,72 +788,290 @@ function titleFromName(name) {
 }
 
 function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, c => ({
+  return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[c]));
 }
 
-function rebuildOrder() {
-  const n = state.tracks.length;
-  state.order = Array.from({ length: n }, (_, i) => i);
+// Derive album name from a File's webkitRelativePath. For
+// "Artist/Album/01 Track.mp3" returns "Album". For "Album/01 Track.mp3" returns
+// "Album". For files without a path, returns UNSORTED.
+function deriveAlbum(file) {
+  const path = file.webkitRelativePath || '';
+  if (!path) return UNSORTED;
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length >= 3) return parts[parts.length - 2];
+  if (parts.length === 2) return parts[0];
+  return UNSORTED;
+}
+
+function albumOf(track) { return track.album || UNSORTED; }
+
+function groupedAlbums() {
+  const map = new Map();
+  state.tracks.forEach((t, i) => {
+    const a = albumOf(t);
+    if (!map.has(a)) map.set(a, []);
+    map.get(a).push(i);
+  });
+  // Sort albums alphabetically; UNSORTED at the end.
+  const names = Array.from(map.keys()).sort((a, b) => {
+    if (a === UNSORTED) return 1;
+    if (b === UNSORTED) return -1;
+    return a.localeCompare(b, undefined, { sensitivity: 'base' });
+  });
+  return names.map(name => ({ name, indices: map.get(name) }));
+}
+
+/* ---------- Queue management ---------- */
+function setQueue(indices, startIndex) {
+  // indices: array of track indices into state.tracks
+  // startIndex: which track to play first (a value present in indices)
+  let queue = indices.slice();
   if (state.shuffle) {
-    for (let i = n - 1; i > 0; i--) {
+    for (let i = queue.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [state.order[i], state.order[j]] = [state.order[j], state.order[i]];
+      [queue[i], queue[j]] = [queue[j], queue[i]];
     }
-    if (state.currentIndex >= 0) {
-      const pos = state.order.indexOf(state.currentIndex);
+    if (startIndex !== undefined && startIndex !== null) {
+      const pos = queue.indexOf(startIndex);
       if (pos > 0) {
-        [state.order[0], state.order[pos]] = [state.order[pos], state.order[0]];
+        [queue[0], queue[pos]] = [queue[pos], queue[0]];
       }
-      state.orderPos = 0;
+    }
+  }
+  state.queue = queue;
+  if (startIndex !== undefined && startIndex !== null) {
+    state.queuePos = queue.indexOf(startIndex);
+  } else {
+    state.queuePos = queue.length > 0 ? 0 : -1;
+  }
+}
+
+function reshuffleQueueKeepingCurrent() {
+  if (state.queue.length === 0) return;
+  const current = state.queuePos >= 0 ? state.queue[state.queuePos] : null;
+  const indices = state.queue.slice();
+  if (state.shuffle) {
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+    if (current !== null) {
+      const pos = indices.indexOf(current);
+      if (pos > 0) [indices[0], indices[pos]] = [indices[pos], indices[0]];
     }
   } else {
-    state.orderPos = state.currentIndex;
+    indices.sort((a, b) => a - b);
   }
+  state.queue = indices;
+  if (current !== null) state.queuePos = indices.indexOf(current);
 }
 
-function renderPlaylist() {
-  countEl.textContent = state.tracks.length ? `(${state.tracks.length})` : '';
+/* ---------- View rendering ---------- */
+function render() {
+  // Update tab visuals
+  tabs.querySelectorAll('.tab').forEach(t => {
+    const active = t.dataset.view === state.view || (state.view === 'album-detail' && t.dataset.view === 'albums');
+    t.classList.toggle('active', active);
+  });
+  // Toggle sticky header type
+  if (state.view === 'album-detail') {
+    tabs.style.display = 'none';
+  } else {
+    tabs.style.display = '';
+  }
+
   if (state.tracks.length === 0) {
-    trackList.innerHTML = '<div class="empty">Your library is empty.<div class="hint">Pick audio files from your device — they\'re stored locally on your phone, not uploaded anywhere.</div></div>';
+    view.innerHTML = '<div class="empty">Your library is empty.<div class="hint">Pick audio files or a folder — they\'re stored locally on your phone, not uploaded anywhere.</div></div>';
     return;
   }
-  const html = state.tracks.map((t, i) => `
-    <div class="track${i === state.currentIndex ? ' playing' : ''}" data-index="${i}">
-      <span class="track-num">${i + 1}</span>
-      <span class="track-name">${escapeHtml(t.title)}</span>
-      <button class="track-remove" data-remove="${i}" aria-label="Remove" type="button">
-        <svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-      </button>
-    </div>
-  `).join('');
-  trackList.innerHTML = html;
+
+  if (state.view === 'albums') renderAlbumsGrid();
+  else if (state.view === 'songs') renderSongsList();
+  else if (state.view === 'album-detail') renderAlbumDetail();
 }
 
+function renderAlbumsGrid() {
+  const albums = groupedAlbums();
+  if (albums.length === 0) {
+    view.innerHTML = '<div class="empty">No albums yet.</div>';
+    return;
+  }
+  const html = '<div class="album-grid">' + albums.map(a => `
+    <div class="album-card" data-album="${escapeHtml(a.name)}">
+      <div class="album-art">
+        <svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
+      </div>
+      <div class="album-name">${escapeHtml(a.name)}</div>
+      <div class="album-count">${a.indices.length} track${a.indices.length === 1 ? '' : 's'}</div>
+    </div>
+  `).join('') + '</div>';
+  view.innerHTML = html;
+}
+
+function renderAlbumDetail() {
+  const album = state.currentAlbum;
+  const indices = state.tracks
+    .map((t, i) => albumOf(t) === album ? i : -1)
+    .filter(i => i !== -1);
+  if (indices.length === 0) {
+    // Album disappeared (last track removed) — bounce back
+    state.view = 'albums';
+    state.currentAlbum = null;
+    render();
+    return;
+  }
+  const header = `
+    <div class="back-row">
+      <button class="back-btn" id="back" type="button" aria-label="Back">
+        <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
+      <div class="back-title">
+        <h2>${escapeHtml(album)}</h2>
+        <div class="meta">${indices.length} track${indices.length === 1 ? '' : 's'}</div>
+      </div>
+      <button class="play-album-btn" id="play-album" type="button">
+        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play
+      </button>
+    </div>
+  `;
+  const list = indices.map((i, n) => trackRow(i, n + 1, false)).join('');
+  view.innerHTML = header + list;
+}
+
+function renderSongsList() {
+  const html = state.tracks.map((t, i) => trackRow(i, i + 1, true)).join('');
+  view.innerHTML = html;
+}
+
+function trackRow(trackIndex, number, showAlbumSub) {
+  const t = state.tracks[trackIndex];
+  const playing = trackIndex === state.currentIndex;
+  const sub = showAlbumSub
+    ? `<div class="track-album-sub">${escapeHtml(albumOf(t))}</div>`
+    : '';
+  return `
+    <div class="track${playing ? ' playing' : ''}" data-track="${trackIndex}">
+      <span class="track-num">${number}</span>
+      <div class="track-info">
+        <div class="track-name">${escapeHtml(t.title)}</div>
+        ${sub}
+      </div>
+      <button class="track-menu" data-menu="${trackIndex}" aria-label="Track menu" type="button">
+        <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+      </button>
+    </div>
+  `;
+}
+
+/* ---------- Track sheet (per-track menu) ---------- */
+function openTrackSheet(trackIndex) {
+  const t = state.tracks[trackIndex];
+  if (!t) return;
+  const albums = groupedAlbums().map(a => a.name).filter(n => n !== albumOf(t));
+  sheetBody.innerHTML = `
+    <div class="sheet-title">${escapeHtml(t.title)}</div>
+    <button class="sheet-action" data-act="play">Play</button>
+    <button class="sheet-action" data-act="rename">Rename track…</button>
+    <button class="sheet-action" data-act="move">Move to album…</button>
+    <div class="sheet-divider"></div>
+    <button class="sheet-action danger" data-act="remove">Remove from library</button>
+    <button class="sheet-action" data-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
+  `;
+  sheetBackdrop.classList.add('visible');
+  sheetBackdrop.dataset.track = String(trackIndex);
+}
+
+function closeSheet() {
+  sheetBackdrop.classList.remove('visible');
+  delete sheetBackdrop.dataset.track;
+  sheetBody.innerHTML = '';
+}
+
+async function handleSheetAction(act, trackIndex) {
+  const t = state.tracks[trackIndex];
+  if (!t) { closeSheet(); return; }
+  if (act === 'play') {
+    closeSheet();
+    playTrackFromCurrentView(trackIndex);
+  } else if (act === 'rename') {
+    closeSheet();
+    const next = prompt('Rename track', t.title);
+    if (next !== null) {
+      const trimmed = next.trim();
+      if (trimmed) {
+        t.title = trimmed;
+        await persistTrack(t);
+        if (trackIndex === state.currentIndex) titleEl.textContent = trimmed;
+        render();
+      }
+    }
+  } else if (act === 'move') {
+    closeSheet();
+    const existing = groupedAlbums().map(a => a.name).filter(n => n !== albumOf(t));
+    const hint = existing.length ? `\n\nExisting albums:\n• ${existing.join('\n• ')}` : '';
+    const next = prompt(`Move "${t.title}" to album:${hint}`, albumOf(t));
+    if (next !== null) {
+      const trimmed = next.trim() || UNSORTED;
+      t.album = trimmed;
+      await persistTrack(t);
+      render();
+      showToast(`Moved to "${trimmed}"`);
+    }
+  } else if (act === 'remove') {
+    closeSheet();
+    removeTrack(trackIndex);
+  } else {
+    closeSheet();
+  }
+}
+
+async function persistTrack(t) {
+  try {
+    await idbPut(state.db, t);
+  } catch (e) {
+    console.error('Persist failed', e);
+    showToast('Could not save change');
+  }
+}
+
+/* ---------- Playback ---------- */
 function loadTrack(index, autoplay) {
   if (index < 0 || index >= state.tracks.length) return;
   state.currentIndex = index;
   const track = state.tracks[index];
   audio.src = track.url;
   titleEl.textContent = track.title;
-  subtitleEl.textContent = track.size ? formatBytes(track.size) : '';
-  renderPlaylist();
+  subtitleEl.textContent = albumOf(track) === UNSORTED
+    ? formatBytes(track.size || 0)
+    : albumOf(track);
+  render();
   updateMediaSession();
-  if (state.shuffle) {
-    const pos = state.order.indexOf(index);
-    if (pos !== -1) state.orderPos = pos;
+  if (autoplay) audio.play().catch(() => {});
+}
+
+function playTrackFromCurrentView(trackIndex) {
+  // Queue depends on the current view.
+  if (state.view === 'album-detail' && state.currentAlbum) {
+    const album = state.currentAlbum;
+    const indices = state.tracks
+      .map((t, i) => albumOf(t) === album ? i : -1)
+      .filter(i => i !== -1);
+    setQueue(indices, trackIndex);
   } else {
-    state.orderPos = index;
+    // Songs view or albums grid play-all: queue all tracks
+    const indices = state.tracks.map((_, i) => i);
+    setQueue(indices, trackIndex);
   }
-  if (autoplay) {
-    audio.play().catch(() => {});
-  }
+  loadTrack(trackIndex, true);
 }
 
 function playPause() {
   if (state.currentIndex === -1 && state.tracks.length > 0) {
-    loadTrack(state.shuffle ? state.order[0] : 0, true);
+    const indices = state.tracks.map((_, i) => i);
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
     return;
   }
   if (audio.paused) audio.play().catch(() => {});
@@ -653,35 +1079,36 @@ function playPause() {
 }
 
 function nextTrack(auto) {
-  if (state.tracks.length === 0) return;
+  if (state.tracks.length === 0 || state.queue.length === 0) return;
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
     audio.play().catch(() => {});
     return;
   }
-  let pos = state.orderPos + 1;
-  if (pos >= state.order.length) {
+  let pos = state.queuePos + 1;
+  if (pos >= state.queue.length) {
     if (state.repeat === 'all' || !auto) {
       pos = 0;
-      if (state.shuffle) rebuildOrder();
+      if (state.shuffle) reshuffleQueueKeepingCurrent();
     } else {
       audio.pause();
       return;
     }
   }
-  state.orderPos = pos;
-  loadTrack(state.order[pos], true);
+  state.queuePos = pos;
+  loadTrack(state.queue[pos], true);
 }
 
 function prevTrack() {
-  if (state.tracks.length === 0) return;
+  if (state.tracks.length === 0 || state.queue.length === 0) return;
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
-  let pos = state.orderPos - 1;
-  if (pos < 0) pos = state.order.length - 1;
-  state.orderPos = pos;
-  loadTrack(state.order[pos], true);
+  let pos = state.queuePos - 1;
+  if (pos < 0) pos = state.queue.length - 1;
+  state.queuePos = pos;
+  loadTrack(state.queue[pos], true);
 }
 
+/* ---------- File ingestion ---------- */
 async function addFiles(files) {
   const audioFiles = Array.from(files).filter(f =>
     f.type.startsWith('audio/') || /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|wma|webm)$/i.test(f.name)
@@ -690,17 +1117,22 @@ async function addFiles(files) {
     showToast('No supported audio files in selection');
     return;
   }
-  audioFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  audioFiles.sort((a, b) => {
+    const ap = a.webkitRelativePath || a.name;
+    const bp = b.webkitRelativePath || b.name;
+    return ap.localeCompare(bp, undefined, { numeric: true, sensitivity: 'base' });
+  });
   const startedEmpty = state.tracks.length === 0;
 
   for (const file of audioFiles) {
     const record = {
       name: file.name,
       title: titleFromName(file.name),
+      album: deriveAlbum(file),
       type: file.type || 'audio/mpeg',
       size: file.size,
       addedAt: Date.now(),
-      blob: file, // Blob is structured-cloneable; IDB stores it natively
+      blob: file,
     };
     try {
       const id = await idbAdd(state.db, record);
@@ -712,10 +1144,11 @@ async function addFiles(files) {
       showToast(`Couldn't save "${file.name}"`);
     }
   }
-  rebuildOrder();
-  renderPlaylist();
+  render();
   if (startedEmpty && state.tracks.length > 0) {
-    loadTrack(state.shuffle ? state.order[0] : 0, false);
+    const indices = state.tracks.map((_, i) => i);
+    setQueue(indices, indices[0]);
+    loadTrack(indices[0], false);
   }
   showToast(`Added ${audioFiles.length} track${audioFiles.length === 1 ? '' : 's'}`);
 }
@@ -730,6 +1163,8 @@ async function removeTrack(index) {
   URL.revokeObjectURL(track.url);
   state.tracks.splice(index, 1);
 
+  // Fix up state.currentIndex and queue indices after removal.
+  state.queue = state.queue.filter(i => i !== index).map(i => i > index ? i - 1 : i);
   if (wasCurrent) {
     audio.pause();
     audio.removeAttribute('src');
@@ -737,30 +1172,35 @@ async function removeTrack(index) {
     state.currentIndex = -1;
     titleEl.textContent = 'No track loaded';
     subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
-    if (state.tracks.length > 0) {
-      const nextIdx = Math.min(index, state.tracks.length - 1);
-      loadTrack(nextIdx, wasPlaying);
+    if (state.queue.length > 0) {
+      state.queuePos = Math.min(state.queuePos, state.queue.length - 1);
+      if (state.queuePos < 0) state.queuePos = 0;
+      loadTrack(state.queue[state.queuePos], wasPlaying);
+    } else {
+      state.queuePos = -1;
     }
   } else if (state.currentIndex > index) {
     state.currentIndex--;
+    // queuePos refers to position within queue, not affected by reindexing tracks
   }
-  rebuildOrder();
-  renderPlaylist();
+  render();
 }
 
 async function clearPlaylist() {
   for (const t of state.tracks) URL.revokeObjectURL(t.url);
   state.tracks = [];
   state.currentIndex = -1;
-  state.order = [];
-  state.orderPos = -1;
+  state.queue = [];
+  state.queuePos = -1;
   try { await idbClear(state.db); } catch (e) { /* ignore */ }
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
   titleEl.textContent = 'No track loaded';
   subtitleEl.textContent = 'Tap "Add files" to load music';
-  renderPlaylist();
+  state.view = 'albums';
+  state.currentAlbum = null;
+  render();
 }
 
 function updateMediaSession() {
@@ -770,7 +1210,7 @@ function updateMediaSession() {
   navigator.mediaSession.metadata = new MediaMetadata({
     title: track.title,
     artist: '',
-    album: '',
+    album: albumOf(track) === UNSORTED ? '' : albumOf(track),
   });
 }
 
@@ -778,18 +1218,31 @@ async function restoreLibrary() {
   try {
     state.db = await openDB();
     const records = await idbAll(state.db);
+    let needsMigration = false;
     for (const r of records) {
+      if (!r.album) {
+        r.album = UNSORTED;
+        needsMigration = true;
+      }
       r.url = URL.createObjectURL(r.blob);
       state.tracks.push(r);
     }
-    rebuildOrder();
-    renderPlaylist();
+    if (needsMigration) {
+      for (const r of state.tracks) {
+        if (r.album === UNSORTED) await idbPut(state.db, r).catch(() => {});
+      }
+    }
     if (state.tracks.length > 0) {
-      loadTrack(state.shuffle ? state.order[0] : 0, false);
+      const indices = state.tracks.map((_, i) => i);
+      setQueue(indices, indices[0]);
+      loadTrack(indices[0], false);
+    } else {
+      render();
     }
   } catch (err) {
     console.error('Failed to open library', err);
     showToast('Could not load saved library');
+    render();
   }
 }
 
@@ -797,6 +1250,10 @@ async function restoreLibrary() {
 fileInput.addEventListener('change', e => {
   addFiles(e.target.files);
   fileInput.value = '';
+});
+folderInput.addEventListener('change', e => {
+  addFiles(e.target.files);
+  folderInput.value = '';
 });
 
 playBtn.addEventListener('click', playPause);
@@ -807,7 +1264,7 @@ shuffleBtn.addEventListener('click', () => {
   state.shuffle = !state.shuffle;
   shuffleBtn.classList.toggle('active', state.shuffle);
   shuffleBtn.setAttribute('aria-pressed', String(state.shuffle));
-  rebuildOrder();
+  reshuffleQueueKeepingCurrent();
   savePrefs();
 });
 
@@ -859,18 +1316,62 @@ audio.addEventListener('error', () => {
   setTimeout(() => nextTrack(true), 500);
 });
 
-trackList.addEventListener('click', e => {
-  const removeBtn = e.target.closest('.track-remove');
-  if (removeBtn) {
+tabs.addEventListener('click', e => {
+  const tab = e.target.closest('.tab');
+  if (!tab) return;
+  state.view = tab.dataset.view;
+  state.currentAlbum = null;
+  view.scrollTop = 0;
+  render();
+});
+
+view.addEventListener('click', e => {
+  const menu = e.target.closest('.track-menu');
+  if (menu) {
     e.stopPropagation();
-    const idx = Number(removeBtn.dataset.remove);
-    if (!Number.isNaN(idx)) removeTrack(idx);
+    const idx = Number(menu.dataset.menu);
+    if (!Number.isNaN(idx)) openTrackSheet(idx);
     return;
   }
-  const row = e.target.closest('.track');
-  if (!row) return;
-  const idx = Number(row.dataset.index);
-  if (!Number.isNaN(idx)) loadTrack(idx, true);
+  const trackRow = e.target.closest('.track');
+  if (trackRow) {
+    const idx = Number(trackRow.dataset.track);
+    if (!Number.isNaN(idx)) playTrackFromCurrentView(idx);
+    return;
+  }
+  const albumCard = e.target.closest('.album-card');
+  if (albumCard) {
+    state.view = 'album-detail';
+    state.currentAlbum = albumCard.dataset.album;
+    view.scrollTop = 0;
+    render();
+    return;
+  }
+  if (e.target.closest('#back')) {
+    state.view = 'albums';
+    state.currentAlbum = null;
+    view.scrollTop = 0;
+    render();
+    return;
+  }
+  if (e.target.closest('#play-album')) {
+    const album = state.currentAlbum;
+    const indices = state.tracks
+      .map((t, i) => albumOf(t) === album ? i : -1)
+      .filter(i => i !== -1);
+    if (indices.length === 0) return;
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
+    return;
+  }
+});
+
+sheetBackdrop.addEventListener('click', e => {
+  if (e.target === sheetBackdrop) { closeSheet(); return; }
+  const action = e.target.closest('.sheet-action');
+  if (!action) return;
+  const trackIndex = Number(sheetBackdrop.dataset.track);
+  handleSheetAction(action.dataset.act, trackIndex);
 });
 
 clearBtn.addEventListener('click', () => {
@@ -941,7 +1442,6 @@ window.addEventListener('appinstalled', () => {
   showToast('Installed — launch from your home screen');
 });
 
-// Ask the browser to keep our IDB data persistent (best-effort, especially on iOS).
 if (navigator.storage && navigator.storage.persist) {
   navigator.storage.persist().catch(() => {});
 }
