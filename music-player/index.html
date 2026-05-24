@@ -973,6 +973,16 @@ function deriveAlbum(file) {
   return UNSORTED;
 }
 
+// When the user picked a folder (webkitRelativePath set), the folder name is
+// their organization intent — use it even if individual files have ID3 album
+// tags pointing somewhere else (so a "Workout Mix" folder doesn't get exploded
+// back into the original album names). For individually-picked files we have
+// no folder context, so fall back to the ID3 album, then UNSORTED.
+function chooseAlbumName(file, tagAlbum) {
+  if (file.webkitRelativePath) return deriveAlbum(file);
+  return tagAlbum || UNSORTED;
+}
+
 function albumOf(track) { return track.album || UNSORTED; }
 function artistOf(track) { return track.artist || ''; }
 
@@ -980,12 +990,17 @@ function artistOf(track) { return track.artist || ''; }
 function readTags(file) {
   return new Promise((resolve) => {
     if (typeof window.jsmediatags === 'undefined') { resolve(null); return; }
+    // jsmediatags can silently hang on malformed tag headers in some files.
+    // Cap the wait so a bad file can't stall the whole import.
+    let done = false;
+    const finish = (val) => { if (done) return; done = true; clearTimeout(timer); resolve(val); };
+    const timer = setTimeout(() => finish(null), 8000);
     try {
       window.jsmediatags.read(file, {
-        onSuccess: (result) => resolve(result && result.tags ? result.tags : null),
-        onError: () => resolve(null),
+        onSuccess: (result) => finish(result && result.tags ? result.tags : null),
+        onError: () => finish(null),
       });
-    } catch (e) { resolve(null); }
+    } catch (e) { finish(null); }
   });
 }
 
@@ -1850,6 +1865,8 @@ async function addFiles(files) {
     return ap.localeCompare(bp, undefined, { numeric: true, sensitivity: 'base' });
   });
   const startedEmpty = state.tracks.length === 0;
+  let added = 0;
+  let failed = 0;
 
   for (const file of audioFiles) {
     const tags = await readTags(file);
@@ -1862,7 +1879,7 @@ async function addFiles(files) {
       name: file.name,
       title: tagTitle || titleFromName(file.name),
       artist: tagArtist || null,
-      album: tagAlbum || deriveAlbum(file),
+      album: chooseAlbumName(file, tagAlbum),
       type: file.type || 'audio/mpeg',
       size: file.size,
       addedAt: Date.now(),
@@ -1877,9 +1894,10 @@ async function addFiles(files) {
       record.url = URL.createObjectURL(record.blob);
       if (pictureBlob) record.pictureUrl = URL.createObjectURL(pictureBlob);
       state.tracks.push(record);
+      added++;
     } catch (err) {
       console.error('Failed to store track', file.name, err);
-      showToast(`Couldn't save "${file.name}"`);
+      failed++;
     }
   }
   render();
@@ -1888,7 +1906,13 @@ async function addFiles(files) {
     setQueue(indices, indices[0]);
     loadTrack(indices[0], false);
   }
-  showToast(`Added ${audioFiles.length} track${audioFiles.length === 1 ? '' : 's'}`);
+  if (failed > 0) {
+    showToast(`Added ${added} · ${failed} couldn't be saved`);
+  } else if (added < audioFiles.length) {
+    showToast(`Added ${added} of ${audioFiles.length}`);
+  } else {
+    showToast(`Added ${added} track${added === 1 ? '' : 's'}`);
+  }
 }
 
 async function removeTrack(index) {
