@@ -41,11 +41,18 @@
     -webkit-user-select: none;
   }
   header {
-    padding: 16px 18px 8px;
+    padding: 14px 14px 8px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+  @media (max-width: 359px) {
+    header { padding: 12px 8px 6px; gap: 4px; }
+    .header-actions { gap: 4px; }
+    .icon-btn, .pick-btn.compact { width: 32px; height: 32px; }
+    .src-pill { padding: 6px 10px; min-width: 0; }
   }
   header h1 {
     font-size: 18px;
@@ -78,6 +85,16 @@
   .pick-btn:active { transform: translateY(1px); }
   .pick-btn input { display: none; }
   .pick-btn svg { width: 14px; height: 14px; fill: currentColor; }
+  .pick-btn.compact {
+    padding: 0;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    font-size: 0;
+    gap: 0;
+    justify-content: center;
+  }
+  .pick-btn.compact svg { width: 18px; height: 18px; }
 
   main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
@@ -709,13 +726,12 @@
     <button class="src-pill" data-src="jellyfin" type="button">Jellyfin</button>
   </div>
   <div class="header-actions">
-    <label class="pick-btn ghost" id="folder-pick" hidden>
+    <label class="pick-btn compact ghost" id="folder-pick" hidden aria-label="Add folder">
       <svg viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
-      Folder
       <input id="folder-input" type="file" webkitdirectory directory multiple>
     </label>
-    <label class="pick-btn" id="files-pick">
-      Add files
+    <label class="pick-btn compact" id="files-pick" aria-label="Add files">
+      <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
       <input id="file-input" type="file" accept="audio/*,.mp3,.m4a,.aac,.ogg,.oga,.opus,.wav,.flac,.wma,.webm" multiple>
     </label>
     <button class="icon-btn" id="jf-refresh" type="button" aria-label="Refresh Jellyfin library" hidden>
