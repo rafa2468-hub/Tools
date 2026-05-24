@@ -1230,12 +1230,51 @@ const JF = {
       // the old behaviour. Better than returning nothing.
       return this._fetchAudioUnder(config, null);
     }
+    // Fetch MusicAlbum entities first to get authoritative album names.
+    // Jellyfin uses the folder name as a display fallback when the ID3 tag is
+    // missing, but the per-track API field stays empty — so grouping by
+    // item.Album alone dumps those songs into "Unsorted". Mapping by AlbumId
+    // gives us the same names Jellyfin's own UI shows.
+    const albumNameById = new Map();
+    for (const lib of musicLibs) {
+      try {
+        const albums = await this._fetchAlbumsUnder(config, lib.Id);
+        for (const a of albums) {
+          if (a.Id && a.Name) albumNameById.set(a.Id, a.Name);
+        }
+      } catch (e) {
+        console.warn('Album list fetch failed for lib', lib.Id, e);
+      }
+    }
     const all = [];
     for (const lib of musicLibs) {
       const items = await this._fetchAudioUnder(config, lib.Id);
-      for (const it of items) all.push(it);
+      for (const it of items) {
+        if (it.AlbumId && albumNameById.has(it.AlbumId)) {
+          it.Album = albumNameById.get(it.AlbumId);
+        }
+        all.push(it);
+      }
     }
     return all;
+  },
+  async _fetchAlbumsUnder(config, parentId) {
+    const params = new URLSearchParams({
+      IncludeItemTypes: 'MusicAlbum',
+      Recursive: 'true',
+      Fields: 'AlbumArtist',
+      SortBy: 'AlbumArtist,SortName',
+      SortOrder: 'Ascending',
+      Limit: '10000',
+    });
+    if (parentId) params.set('ParentId', parentId);
+    const url = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/Items?${params}`;
+    const res = await fetch(url, {
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Album list fetch failed (HTTP ${res.status})`);
+    const json = await res.json();
+    return Array.isArray(json.Items) ? json.Items : [];
   },
   async fetchViews(config) {
     const url = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/Views`;
