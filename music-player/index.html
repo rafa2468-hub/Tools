@@ -664,6 +664,36 @@
   }
   #search-btn.active { background: rgba(124,92,255,0.25); color: #fff; }
 
+  .sleep-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    padding: 4px 18px 12px;
+  }
+  .sleep-btn {
+    appearance: none;
+    border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+    padding: 10px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .sleep-btn.active {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff;
+    border-color: transparent;
+  }
+  .sheet-section-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    padding: 12px 18px 4px;
+  }
+
   @media (min-width: 720px) {
     body { padding: 0; }
     main, header { max-width: 480px; margin-left: auto; margin-right: auto; width: 100%; }
@@ -887,6 +917,7 @@ const state = {
   db: null,
   source: 'local',     // 'local' | 'jellyfin'
   search: '',          // lowercased current search query (empty = no filter)
+  sleep: { expiresAt: 0, intervalId: 0 },
   local: { tracks: [] },
   jellyfin: {
     tracks: [],
@@ -1592,7 +1623,19 @@ function openSettingsSheet() {
          <button class="primary" data-settings-act="connect" type="button">Connect</button>
          <button class="secondary" data-settings-act="cancel" type="button">Cancel</button>
        </div>`;
+  const sleepActiveMin = state.sleep.expiresAt > 0
+    ? Math.ceil((state.sleep.expiresAt - Date.now()) / 60000)
+    : 0;
+  const sleepOptions = [0, 15, 30, 45, 60, 90];
+  const sleepHtml = sleepOptions.map(m => {
+    const label = m === 0 ? 'Off' : `${m} min`;
+    const active = (m === 0 && sleepActiveMin === 0) || (m > 0 && sleepActiveMin > 0 && sleepActiveMin <= m && sleepActiveMin > (m - 15));
+    return `<button class="sleep-btn${active ? ' active' : ''}" data-sleep="${m}" type="button">${label}</button>`;
+  }).join('');
   sheetBody.innerHTML = `
+    <div class="sheet-section-title">Sleep timer</div>
+    <div class="sleep-grid">${sleepHtml}</div>
+    <div class="sheet-divider"></div>
     <div class="sheet-title">Jellyfin</div>
     ${status}
     <div class="settings-form">
@@ -1847,10 +1890,48 @@ function loadTrack(index, autoplay) {
 function subtitleFor(track) {
   const artist = artistOf(track);
   const album = albumOf(track);
-  if (artist && album !== UNSORTED) return `${artist} · ${album}`;
-  if (artist) return artist;
-  if (album !== UNSORTED) return album;
-  return formatBytes(track.size || 0);
+  let base;
+  if (artist && album !== UNSORTED) base = `${artist} · ${album}`;
+  else if (artist) base = artist;
+  else if (album !== UNSORTED) base = album;
+  else base = formatBytes(track.size || 0);
+  if (state.sleep.expiresAt > 0) {
+    const remaining = Math.max(0, state.sleep.expiresAt - Date.now());
+    const m = Math.floor(remaining / 60000);
+    const s = Math.floor((remaining % 60000) / 1000).toString().padStart(2, '0');
+    return `${base} · sleep ${m}:${s}`;
+  }
+  return base;
+}
+
+function refreshNowPlayingSubtitle() {
+  const t = state.tracks[state.currentIndex];
+  if (t) subtitleEl.textContent = subtitleFor(t);
+}
+
+function setSleepTimer(minutes) {
+  if (state.sleep.intervalId) {
+    clearInterval(state.sleep.intervalId);
+    state.sleep.intervalId = 0;
+  }
+  if (minutes > 0) {
+    state.sleep.expiresAt = Date.now() + minutes * 60000;
+    state.sleep.intervalId = setInterval(() => {
+      if (Date.now() >= state.sleep.expiresAt) {
+        clearInterval(state.sleep.intervalId);
+        state.sleep.intervalId = 0;
+        state.sleep.expiresAt = 0;
+        audio.pause();
+        showToast('Sleep timer expired');
+        refreshNowPlayingSubtitle();
+      } else {
+        refreshNowPlayingSubtitle();
+      }
+    }, 1000);
+  } else {
+    state.sleep.expiresAt = 0;
+  }
+  refreshNowPlayingSubtitle();
 }
 
 function setNowPlayingArt(url) {
@@ -2377,6 +2458,15 @@ async function handleAlbumSheetAction(act, albumName) {
 
 sheetBackdrop.addEventListener('click', e => {
   if (e.target === sheetBackdrop) { closeSheet(); return; }
+  const sleepBtn = e.target.closest('[data-sleep]');
+  if (sleepBtn) {
+    const minutes = Number(sleepBtn.dataset.sleep);
+    setSleepTimer(minutes);
+    showToast(minutes > 0 ? `Sleep in ${minutes} min` : 'Sleep timer off');
+    // Re-render the settings sheet so the active pill updates
+    openSettingsSheet();
+    return;
+  }
   const settingsBtn = e.target.closest('[data-settings-act]');
   if (settingsBtn) {
     handleSettingsAction(settingsBtn.dataset.settingsAct);
