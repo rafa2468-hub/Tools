@@ -626,6 +626,15 @@
   .conn-status.err { color: var(--danger); background: rgba(255,93,108,0.08); }
   .conn-hint { font-size: 11px; color: var(--muted); padding: 0 18px 12px; line-height: 1.5; }
 
+  .lib-footer {
+    padding: 18px 18px 24px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    opacity: 0.55;
+    letter-spacing: 0.3px;
+  }
+
   @media (min-width: 720px) {
     body { padding: 0; }
     main, header { max-width: 480px; margin-left: auto; margin-right: auto; width: 100%; }
@@ -716,6 +725,7 @@
       <button class="clear-btn" id="clear" type="button">Clear all</button>
     </div>
     <div id="view"></div>
+    <div class="lib-footer" id="lib-footer"></div>
   </section>
 </main>
 
@@ -728,6 +738,8 @@
 
 <script>
 "use strict";
+
+const APP_VERSION = '1.0.0';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1536,6 +1548,7 @@ function openSettingsSheet() {
         ? 'Your password is not stored — only the access token. Refresh re-fetches your library.'
         : 'The server must allow CORS from <code>' + escapeHtml(location.origin) + '</code>. On Jellyfin: Dashboard → Networking → CORS Hosts.'}
     </div>
+    <div class="conn-hint" style="text-align:center;opacity:0.6">Music Player v${APP_VERSION}</div>
   `;
   sheetBackdrop.classList.add('visible');
   sheetBackdrop.dataset.settings = 'jellyfin';
@@ -2408,6 +2421,7 @@ loadJellyfinConfig();
 loadSavedSource();
 state.tracks = state.local.tracks;
 applySourceUI();
+document.getElementById('lib-footer').textContent = `Music Player v${APP_VERSION}`;
 restoreLibrary();
 </script>
 </body>
