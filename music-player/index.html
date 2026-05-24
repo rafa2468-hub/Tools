@@ -626,6 +626,74 @@
   .conn-status.err { color: var(--danger); background: rgba(255,93,108,0.08); }
   .conn-hint { font-size: 11px; color: var(--muted); padding: 0 18px 12px; line-height: 1.5; }
 
+  .lib-footer {
+    padding: 18px 18px 24px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    opacity: 0.55;
+    letter-spacing: 0.3px;
+  }
+
+  .search-bar {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    padding: 8px 14px;
+    background: rgba(11,11,16,0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    display: none;
+  }
+  .search-bar.visible { display: block; }
+  .search-bar input {
+    width: 100%;
+    appearance: none;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .search-bar input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  #search-btn.active { background: rgba(124,92,255,0.25); color: #fff; }
+
+  .sleep-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    padding: 4px 18px 12px;
+  }
+  .sleep-btn {
+    appearance: none;
+    border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+    padding: 10px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .sleep-btn.active {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff;
+    border-color: transparent;
+  }
+  .sheet-section-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    padding: 12px 18px 4px;
+  }
+
   @media (min-width: 720px) {
     body { padding: 0; }
     main, header { max-width: 480px; margin-left: auto; margin-right: auto; width: 100%; }
@@ -652,6 +720,9 @@
     </label>
     <button class="icon-btn" id="jf-refresh" type="button" aria-label="Refresh Jellyfin library" hidden>
       <svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.45 11h-2.07A6 6 0 1 1 12 6a5.9 5.9 0 0 1 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+    </button>
+    <button class="icon-btn" id="search-btn" type="button" aria-label="Search">
+      <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
     </button>
     <button class="icon-btn" id="settings-btn" type="button" aria-label="Settings">
       <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
@@ -712,10 +783,15 @@
     <div class="tabs" id="tabs">
       <button class="tab active" data-view="albums" type="button">Albums</button>
       <button class="tab" data-view="songs" type="button">Songs</button>
+      <button class="tab" data-view="playlists" type="button" id="tab-playlists">Playlists</button>
       <div class="spacer"></div>
       <button class="clear-btn" id="clear" type="button">Clear all</button>
     </div>
+    <div class="search-bar" id="search-bar">
+      <input id="search-input" type="search" placeholder="Search by title, artist, or album" autocomplete="off">
+    </div>
     <div id="view"></div>
+    <div class="lib-footer" id="lib-footer"></div>
   </section>
 </main>
 
@@ -729,10 +805,13 @@
 <script>
 "use strict";
 
+const APP_VERSION = '1.0.0';
+
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'tracks';
+const PLAYLIST_STORE = 'playlists';
 const UNSORTED = 'Unsorted';
 
 function openDB() {
@@ -743,6 +822,10 @@ function openDB() {
       if (!db.objectStoreNames.contains(STORE)) {
         const store = db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
         store.createIndex('addedAt', 'addedAt');
+      }
+      if (!db.objectStoreNames.contains(PLAYLIST_STORE)) {
+        const store = db.createObjectStore(PLAYLIST_STORE, { keyPath: 'id', autoIncrement: true });
+        store.createIndex('createdAt', 'createdAt');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -795,6 +878,39 @@ function idbClear(db) {
   });
 }
 
+function idbAllPlaylists(db) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PLAYLIST_STORE, 'readonly');
+    const req = tx.objectStore(PLAYLIST_STORE).index('createdAt').getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbAddPlaylist(db, record) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PLAYLIST_STORE, 'readwrite');
+    const req = tx.objectStore(PLAYLIST_STORE).add(record);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbPutPlaylist(db, record) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PLAYLIST_STORE, 'readwrite');
+    const req = tx.objectStore(PLAYLIST_STORE).put(record);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbDeletePlaylist(db, id) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PLAYLIST_STORE, 'readwrite');
+    const req = tx.objectStore(PLAYLIST_STORE).delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
 /* ---------- DOM refs ---------- */
 const audio = document.getElementById('audio');
 const fileInput = document.getElementById('file-input');
@@ -839,6 +955,10 @@ const state = {
   currentAlbum: null,
   db: null,
   source: 'local',     // 'local' | 'jellyfin'
+  search: '',          // lowercased current search query (empty = no filter)
+  sleep: { expiresAt: 0, intervalId: 0 },
+  playlists: [],       // local-only; loaded from PLAYLIST_STORE on boot
+  currentPlaylist: null, // playlist record when view === 'playlist-detail'
   local: { tracks: [] },
   jellyfin: {
     tracks: [],
@@ -1280,6 +1400,20 @@ function applySourceUI() {
   document.getElementById('jf-refresh').hidden = isLocal;
 }
 
+function trackMatchesSearch(t) {
+  if (!state.search) return true;
+  const q = state.search;
+  return (t.title || '').toLowerCase().includes(q) ||
+         (t.artist || '').toLowerCase().includes(q) ||
+         (t.album || '').toLowerCase().includes(q);
+}
+
+function albumMatchesSearch(albumName, indices) {
+  if (!state.search) return true;
+  if (albumName.toLowerCase().includes(state.search)) return true;
+  return indices.some(i => trackMatchesSearch(state.tracks[i]));
+}
+
 function groupedAlbums() {
   const map = new Map();
   state.tracks.forEach((t, i) => {
@@ -1345,15 +1479,20 @@ function reshuffleQueueKeepingCurrent() {
 function render() {
   // Update tab visuals
   tabs.querySelectorAll('.tab').forEach(t => {
-    const active = t.dataset.view === state.view || (state.view === 'album-detail' && t.dataset.view === 'albums');
+    const active = t.dataset.view === state.view
+      || (state.view === 'album-detail' && t.dataset.view === 'albums')
+      || (state.view === 'playlist-detail' && t.dataset.view === 'playlists');
     t.classList.toggle('active', active);
   });
-  // Toggle sticky header type
-  if (state.view === 'album-detail') {
-    tabs.style.display = 'none';
-  } else {
-    tabs.style.display = '';
-  }
+  // Hide tabs on detail views (replaced by back-row)
+  const isDetail = state.view === 'album-detail' || state.view === 'playlist-detail';
+  tabs.style.display = isDetail ? 'none' : '';
+  // Playlists are local-only
+  const tabPlaylists = document.getElementById('tab-playlists');
+  if (tabPlaylists) tabPlaylists.hidden = state.source !== 'local';
+
+  if (state.view === 'playlists') { renderPlaylistsList(); return; }
+  if (state.view === 'playlist-detail') { renderPlaylistDetail(); return; }
 
   if (state.tracks.length === 0) {
     view.innerHTML = '<div class="empty">Your library is empty.<div class="hint">Pick audio files or a folder — they\'re stored locally on your phone, not uploaded anywhere.</div></div>';
@@ -1366,9 +1505,10 @@ function render() {
 }
 
 function renderAlbumsGrid() {
-  const albums = groupedAlbums();
+  let albums = groupedAlbums();
+  if (state.search) albums = albums.filter(a => albumMatchesSearch(a.name, a.indices));
   if (albums.length === 0) {
-    view.innerHTML = '<div class="empty">No albums yet.</div>';
+    view.innerHTML = '<div class="empty">' + (state.search ? 'No matches.' : 'No albums yet.') + '</div>';
     return;
   }
   const html = '<div class="album-grid">' + albums.map(a => {
@@ -1388,16 +1528,19 @@ function renderAlbumsGrid() {
 
 function renderAlbumDetail() {
   const album = state.currentAlbum;
-  const indices = state.tracks
+  const allIndices = state.tracks
     .map((t, i) => albumOf(t) === album ? i : -1)
     .filter(i => i !== -1);
-  if (indices.length === 0) {
+  if (allIndices.length === 0) {
     // Album disappeared (last track removed) — bounce back
     state.view = 'albums';
     state.currentAlbum = null;
     render();
     return;
   }
+  const indices = state.search
+    ? allIndices.filter(i => trackMatchesSearch(state.tracks[i]))
+    : allIndices;
   const header = `
     <div class="back-row">
       <button class="back-btn" id="back" type="button" aria-label="Back">
@@ -1405,7 +1548,7 @@ function renderAlbumDetail() {
       </button>
       <div class="back-title">
         <h2>${escapeHtml(album)}</h2>
-        <div class="meta">${indices.length} track${indices.length === 1 ? '' : 's'}</div>
+        <div class="meta">${allIndices.length} track${allIndices.length === 1 ? '' : 's'}${state.search && indices.length !== allIndices.length ? ` · ${indices.length} shown` : ''}</div>
       </div>
       <button class="play-album-btn" id="play-album" type="button">
         <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play
@@ -1415,13 +1558,125 @@ function renderAlbumDetail() {
       </button>
     </div>
   `;
-  const list = indices.map((i, n) => trackRow(i, n + 1, false)).join('');
+  const list = indices.length > 0
+    ? indices.map((i, n) => trackRow(i, n + 1, false)).join('')
+    : '<div class="empty">No matches.</div>';
   view.innerHTML = header + list;
 }
 
 function renderSongsList() {
-  const html = state.tracks.map((t, i) => trackRow(i, i + 1, true)).join('');
+  const filtered = state.search
+    ? state.tracks.map((t, i) => trackMatchesSearch(t) ? i : -1).filter(i => i !== -1)
+    : state.tracks.map((_, i) => i);
+  if (filtered.length === 0) {
+    view.innerHTML = '<div class="empty">' + (state.search ? 'No matches.' : 'No tracks.') + '</div>';
+    return;
+  }
+  const html = filtered.map((trackIdx, n) => trackRow(trackIdx, n + 1, true)).join('');
   view.innerHTML = html;
+}
+
+function playlistTracks(playlist) {
+  // Resolve playlist trackIds to current state.tracks indices. Missing tracks
+  // (since clear / removal) are filtered out.
+  return playlist.trackIds
+    .map(id => state.tracks.findIndex(t => t.id === id))
+    .filter(i => i >= 0);
+}
+
+function renderPlaylistsList() {
+  const all = state.playlists;
+  const filtered = state.search
+    ? all.filter(p => p.name.toLowerCase().includes(state.search))
+    : all;
+  const cards = filtered.map(p => {
+    const indices = playlistTracks(p);
+    return `
+      <div class="track" data-playlist-id="${p.id}">
+        <span class="track-num">♬</span>
+        <div class="track-info">
+          <div class="track-name">${escapeHtml(p.name)}</div>
+          <div class="track-album-sub">${indices.length} track${indices.length === 1 ? '' : 's'}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  const newBtn = `
+    <div class="track" data-action="new-playlist" style="border-left-color: var(--accent-2)">
+      <span class="track-num" style="color:var(--accent-2)">+</span>
+      <div class="track-info"><div class="track-name" style="color: var(--accent-2)">New playlist</div></div>
+    </div>
+  `;
+  if (filtered.length === 0 && !state.search) {
+    view.innerHTML = newBtn + '<div class="empty">No playlists yet.<div class="hint">Open a track\'s menu and tap "Add to playlist…" to start one.</div></div>';
+    return;
+  }
+  if (filtered.length === 0 && state.search) {
+    view.innerHTML = newBtn + '<div class="empty">No matches.</div>';
+    return;
+  }
+  view.innerHTML = newBtn + cards;
+}
+
+function renderPlaylistDetail() {
+  const p = state.currentPlaylist
+    ? state.playlists.find(pl => pl.id === state.currentPlaylist.id)
+    : null;
+  if (!p) {
+    state.view = 'playlists';
+    state.currentPlaylist = null;
+    render();
+    return;
+  }
+  state.currentPlaylist = p; // refresh reference
+  const allIndices = playlistTracks(p);
+  const indices = state.search
+    ? allIndices.filter(i => trackMatchesSearch(state.tracks[i]))
+    : allIndices;
+  const header = `
+    <div class="back-row">
+      <button class="back-btn" id="back" type="button" aria-label="Back">
+        <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
+      <div class="back-title">
+        <h2>${escapeHtml(p.name)}</h2>
+        <div class="meta">${allIndices.length} track${allIndices.length === 1 ? '' : 's'}${state.search && indices.length !== allIndices.length ? ` · ${indices.length} shown` : ''}</div>
+      </div>
+      <button class="play-album-btn" id="play-playlist" type="button">
+        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play
+      </button>
+      <button class="back-btn" id="playlist-menu" type="button" aria-label="Playlist menu">
+        <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+      </button>
+    </div>
+  `;
+  const list = indices.length > 0
+    ? indices.map((i, n) => playlistTrackRow(i, allIndices.indexOf(i))).join('')
+    : '<div class="empty">' + (state.search ? 'No matches.' : 'Empty playlist. Add tracks from the Albums or Songs tabs.') + '</div>';
+  view.innerHTML = header + list;
+}
+
+function playlistTrackRow(trackIndex, positionInPlaylist) {
+  const t = state.tracks[trackIndex];
+  const playing = trackIndex === state.currentIndex;
+  const artist = artistOf(t);
+  const album = albumOf(t);
+  const subText = artist && album !== UNSORTED ? `${artist} · ${album}`
+    : artist ? artist
+    : album !== UNSORTED ? album : '';
+  const sub = subText ? `<div class="track-album-sub">${escapeHtml(subText)}</div>` : '';
+  return `
+    <div class="track${playing ? ' playing' : ''}" data-track="${trackIndex}" data-playlist-pos="${positionInPlaylist}">
+      <span class="track-num">${positionInPlaylist + 1}</span>
+      <div class="track-info">
+        <div class="track-name">${escapeHtml(t.title)}</div>
+        ${sub}
+      </div>
+      <button class="track-menu" data-playlist-track="${positionInPlaylist}" aria-label="Track menu" type="button">
+        <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+      </button>
+    </div>
+  `;
 }
 
 function trackRow(trackIndex, number, showAlbumSub) {
@@ -1458,6 +1713,7 @@ function openTrackSheet(trackIndex) {
   if (!t) return;
   const isLocal = (t.source || 'local') === 'local';
   const localActions = `
+    <button class="sheet-action" data-act="add-to-playlist">Add to playlist…</button>
     <button class="sheet-action" data-act="rename">Rename track…</button>
     <button class="sheet-action" data-act="move">Move to album…</button>
     <div class="sheet-divider"></div>
@@ -1473,6 +1729,72 @@ function openTrackSheet(trackIndex) {
   sheetBackdrop.dataset.track = String(trackIndex);
 }
 
+function openAddToPlaylistSheet(kind, payload) {
+  // kind: 'track' (payload = trackIndex) | 'album' (payload = album name)
+  const items = state.playlists.map(p =>
+    `<button class="sheet-action" data-add-playlist-id="${p.id}">${escapeHtml(p.name)} <span style="color:var(--muted);font-size:12px">· ${p.trackIds.length}</span></button>`
+  ).join('');
+  sheetBody.innerHTML = `
+    <div class="sheet-title">Add ${kind === 'album' ? 'album' : 'track'} to playlist</div>
+    <button class="sheet-action" data-add-playlist-id="__new__" style="color:var(--accent-2)">+ New playlist…</button>
+    ${items ? '<div class="sheet-divider"></div>' + items : ''}
+    <button class="sheet-action" data-add-playlist-id="__cancel__" style="text-align:center;color:var(--muted)">Cancel</button>
+  `;
+  sheetBackdrop.classList.add('visible');
+  sheetBackdrop.dataset.addToPlaylist = String(payload);
+  sheetBackdrop.dataset.addToPlaylistKind = kind;
+}
+
+function openPlaylistTrackSheet(positionInPlaylist) {
+  const p = state.currentPlaylist;
+  if (!p) return;
+  const trackId = p.trackIds[positionInPlaylist];
+  const trackIdx = state.tracks.findIndex(t => t.id === trackId);
+  const t = trackIdx >= 0 ? state.tracks[trackIdx] : null;
+  const title = t ? t.title : '(missing track)';
+  const isFirst = positionInPlaylist === 0;
+  const isLast = positionInPlaylist === p.trackIds.length - 1;
+  sheetBody.innerHTML = `
+    <div class="sheet-title">${escapeHtml(title)}</div>
+    <button class="sheet-action" data-plt-act="play">Play</button>
+    <button class="sheet-action" data-plt-act="move-up" ${isFirst ? 'disabled style="opacity:0.4"' : ''}>Move up</button>
+    <button class="sheet-action" data-plt-act="move-down" ${isLast ? 'disabled style="opacity:0.4"' : ''}>Move down</button>
+    <div class="sheet-divider"></div>
+    <button class="sheet-action danger" data-plt-act="remove">Remove from playlist</button>
+    <button class="sheet-action" data-plt-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
+  `;
+  sheetBackdrop.classList.add('visible');
+  sheetBackdrop.dataset.playlistPos = String(positionInPlaylist);
+}
+
+function openPlaylistMenuSheet() {
+  const p = state.currentPlaylist;
+  if (!p) return;
+  sheetBody.innerHTML = `
+    <div class="sheet-title">${escapeHtml(p.name)}</div>
+    <button class="sheet-action" data-pl-act="play">Play playlist</button>
+    <button class="sheet-action" data-pl-act="rename">Rename playlist…</button>
+    <div class="sheet-divider"></div>
+    <button class="sheet-action danger" data-pl-act="delete">Delete playlist</button>
+    <button class="sheet-action" data-pl-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
+  `;
+  sheetBackdrop.classList.add('visible');
+  sheetBackdrop.dataset.playlist = String(p.id);
+}
+
+async function promptCreatePlaylist() {
+  const name = prompt('Name your new playlist:');
+  if (!name) return;
+  const p = await createPlaylist(name);
+  if (p) {
+    showToast(`Created "${p.name}"`);
+    state.currentPlaylist = p;
+    state.view = 'playlist-detail';
+    view.scrollTop = 0;
+    render();
+  }
+}
+
 function openAlbumSheet(albumName) {
   const indices = state.tracks
     .map((t, i) => albumOf(t) === albumName ? i : -1)
@@ -1480,6 +1802,7 @@ function openAlbumSheet(albumName) {
   if (indices.length === 0) return;
   const isLocal = state.source === 'local';
   const localActions = `
+    <button class="sheet-action" data-album-act="add-to-playlist">Add album to playlist…</button>
     <button class="sheet-action" data-album-act="rename">Rename album…</button>
     <div class="sheet-divider"></div>
     <button class="sheet-action danger" data-album-act="remove">Remove album from library</button>
@@ -1499,6 +1822,10 @@ function closeSheet() {
   delete sheetBackdrop.dataset.track;
   delete sheetBackdrop.dataset.album;
   delete sheetBackdrop.dataset.settings;
+  delete sheetBackdrop.dataset.playlist;
+  delete sheetBackdrop.dataset.playlistPos;
+  delete sheetBackdrop.dataset.addToPlaylist;
+  delete sheetBackdrop.dataset.addToPlaylistKind;
   sheetBody.innerHTML = '';
 }
 
@@ -1517,7 +1844,19 @@ function openSettingsSheet() {
          <button class="primary" data-settings-act="connect" type="button">Connect</button>
          <button class="secondary" data-settings-act="cancel" type="button">Cancel</button>
        </div>`;
+  const sleepActiveMin = state.sleep.expiresAt > 0
+    ? Math.ceil((state.sleep.expiresAt - Date.now()) / 60000)
+    : 0;
+  const sleepOptions = [0, 15, 30, 45, 60, 90];
+  const sleepHtml = sleepOptions.map(m => {
+    const label = m === 0 ? 'Off' : `${m} min`;
+    const active = (m === 0 && sleepActiveMin === 0) || (m > 0 && sleepActiveMin > 0 && sleepActiveMin <= m && sleepActiveMin > (m - 15));
+    return `<button class="sleep-btn${active ? ' active' : ''}" data-sleep="${m}" type="button">${label}</button>`;
+  }).join('');
   sheetBody.innerHTML = `
+    <div class="sheet-section-title">Sleep timer</div>
+    <div class="sleep-grid">${sleepHtml}</div>
+    <div class="sheet-divider"></div>
     <div class="sheet-title">Jellyfin</div>
     ${status}
     <div class="settings-form">
@@ -1536,6 +1875,7 @@ function openSettingsSheet() {
         ? 'Your password is not stored — only the access token. Refresh re-fetches your library.'
         : 'The server must allow CORS from <code>' + escapeHtml(location.origin) + '</code>. On Jellyfin: Dashboard → Networking → CORS Hosts.'}
     </div>
+    <div class="conn-hint" style="text-align:center;opacity:0.6">Music Player v${APP_VERSION}</div>
   `;
   sheetBackdrop.classList.add('visible');
   sheetBackdrop.dataset.settings = 'jellyfin';
@@ -1706,6 +2046,8 @@ async function handleSheetAction(act, trackIndex) {
   } else if (act === 'remove') {
     closeSheet();
     removeTrack(trackIndex);
+  } else if (act === 'add-to-playlist') {
+    openAddToPlaylistSheet('track', trackIndex);
   } else {
     closeSheet();
   }
@@ -1718,6 +2060,56 @@ async function persistTrack(t) {
     console.error('Persist failed', e);
     showToast('Could not save change');
   }
+}
+
+/* ---------- Playlists ---------- */
+async function createPlaylist(name) {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return null;
+  const record = { name: trimmed, trackIds: [], createdAt: Date.now() };
+  try {
+    const id = await idbAddPlaylist(state.db, record);
+    record.id = id;
+    state.playlists.push(record);
+    return record;
+  } catch (e) {
+    console.error('Create playlist failed', e);
+    showToast('Could not create playlist');
+    return null;
+  }
+}
+
+async function addTrackToPlaylist(playlist, localTrackId) {
+  if (playlist.trackIds.includes(localTrackId)) return false;
+  playlist.trackIds.push(localTrackId);
+  try { await idbPutPlaylist(state.db, playlist); return true; }
+  catch (e) { console.error(e); return false; }
+}
+
+async function removeTrackFromPlaylist(playlist, positionInPlaylist) {
+  if (positionInPlaylist < 0 || positionInPlaylist >= playlist.trackIds.length) return;
+  playlist.trackIds.splice(positionInPlaylist, 1);
+  try { await idbPutPlaylist(state.db, playlist); } catch (e) { console.error(e); }
+}
+
+async function movePlaylistTrack(playlist, fromPos, toPos) {
+  if (fromPos < 0 || fromPos >= playlist.trackIds.length) return;
+  if (toPos < 0 || toPos >= playlist.trackIds.length) return;
+  const [item] = playlist.trackIds.splice(fromPos, 1);
+  playlist.trackIds.splice(toPos, 0, item);
+  try { await idbPutPlaylist(state.db, playlist); } catch (e) { console.error(e); }
+}
+
+async function renamePlaylist(playlist, newName) {
+  const trimmed = (newName || '').trim();
+  if (!trimmed || trimmed === playlist.name) return;
+  playlist.name = trimmed;
+  try { await idbPutPlaylist(state.db, playlist); } catch (e) { console.error(e); }
+}
+
+async function deletePlaylist(playlistId) {
+  try { await idbDeletePlaylist(state.db, playlistId); } catch (e) { console.error(e); }
+  state.playlists = state.playlists.filter(p => p.id !== playlistId);
 }
 
 /* ---------- Playback ---------- */
@@ -1771,10 +2163,48 @@ function loadTrack(index, autoplay) {
 function subtitleFor(track) {
   const artist = artistOf(track);
   const album = albumOf(track);
-  if (artist && album !== UNSORTED) return `${artist} · ${album}`;
-  if (artist) return artist;
-  if (album !== UNSORTED) return album;
-  return formatBytes(track.size || 0);
+  let base;
+  if (artist && album !== UNSORTED) base = `${artist} · ${album}`;
+  else if (artist) base = artist;
+  else if (album !== UNSORTED) base = album;
+  else base = formatBytes(track.size || 0);
+  if (state.sleep.expiresAt > 0) {
+    const remaining = Math.max(0, state.sleep.expiresAt - Date.now());
+    const m = Math.floor(remaining / 60000);
+    const s = Math.floor((remaining % 60000) / 1000).toString().padStart(2, '0');
+    return `${base} · sleep ${m}:${s}`;
+  }
+  return base;
+}
+
+function refreshNowPlayingSubtitle() {
+  const t = state.tracks[state.currentIndex];
+  if (t) subtitleEl.textContent = subtitleFor(t);
+}
+
+function setSleepTimer(minutes) {
+  if (state.sleep.intervalId) {
+    clearInterval(state.sleep.intervalId);
+    state.sleep.intervalId = 0;
+  }
+  if (minutes > 0) {
+    state.sleep.expiresAt = Date.now() + minutes * 60000;
+    state.sleep.intervalId = setInterval(() => {
+      if (Date.now() >= state.sleep.expiresAt) {
+        clearInterval(state.sleep.intervalId);
+        state.sleep.intervalId = 0;
+        state.sleep.expiresAt = 0;
+        audio.pause();
+        showToast('Sleep timer expired');
+        refreshNowPlayingSubtitle();
+      } else {
+        refreshNowPlayingSubtitle();
+      }
+    }, 1000);
+  } else {
+    state.sleep.expiresAt = 0;
+  }
+  refreshNowPlayingSubtitle();
 }
 
 function setNowPlayingArt(url) {
@@ -1798,6 +2228,9 @@ function playTrackFromCurrentView(trackIndex) {
     const indices = state.tracks
       .map((t, i) => albumOf(t) === album ? i : -1)
       .filter(i => i !== -1);
+    setQueue(indices, trackIndex);
+  } else if (state.view === 'playlist-detail' && state.currentPlaylist) {
+    const indices = playlistTracks(state.currentPlaylist);
     setQueue(indices, trackIndex);
   } else {
     // Songs view or albums grid play-all: queue all tracks
@@ -2036,6 +2469,12 @@ async function restoreLibrary() {
         if (r.album === UNSORTED) await idbPut(state.db, r).catch(() => {});
       }
     }
+    try {
+      state.playlists = await idbAllPlaylists(state.db);
+    } catch (e) {
+      console.warn('Could not load playlists', e);
+      state.playlists = [];
+    }
     await setActiveSource(state.source, { force: true });
     if (state.source === 'local' && state.tracks.length > 0) {
       const indices = state.tracks.map((_, i) => i);
@@ -2122,21 +2561,24 @@ shuffleBtn.addEventListener('click', () => {
   state.shuffle = !state.shuffle;
   shuffleBtn.classList.toggle('active', state.shuffle);
   shuffleBtn.setAttribute('aria-pressed', String(state.shuffle));
-  // If the user is inside an album-detail view, scope the queue to that
-  // album so shuffle stays within the folder. Otherwise just reshuffle
-  // whatever queue is currently active.
+  // If the user is inside an album-detail or playlist-detail view, scope the
+  // queue to that folder/playlist so shuffle stays within it. Otherwise just
+  // reshuffle whatever queue is currently active.
+  let scopedIndices = null;
   if (state.view === 'album-detail' && state.currentAlbum) {
     const album = state.currentAlbum;
-    const albumIndices = state.tracks
+    scopedIndices = state.tracks
       .map((t, i) => albumOf(t) === album ? i : -1)
       .filter(i => i !== -1);
-    if (albumIndices.length > 0) {
-      const playingIdx = state.queuePos >= 0 ? state.queue[state.queuePos] : -1;
-      const startIdx = albumIndices.includes(playingIdx) ? playingIdx : albumIndices[0];
-      setQueue(albumIndices, startIdx);
-      savePrefs();
-      return;
-    }
+  } else if (state.view === 'playlist-detail' && state.currentPlaylist) {
+    scopedIndices = playlistTracks(state.currentPlaylist);
+  }
+  if (scopedIndices && scopedIndices.length > 0) {
+    const playingIdx = state.queuePos >= 0 ? state.queue[state.queuePos] : -1;
+    const startIdx = scopedIndices.includes(playingIdx) ? playingIdx : scopedIndices[0];
+    setQueue(scopedIndices, startIdx);
+    savePrefs();
+    return;
   }
   reshuffleQueueKeepingCurrent();
   savePrefs();
@@ -2232,14 +2674,41 @@ tabs.addEventListener('click', e => {
 });
 
 view.addEventListener('click', e => {
-  const menu = e.target.closest('.track-menu');
+  // Track ⋮ in album-detail / songs / albums views
+  const menu = e.target.closest('.track-menu[data-menu]');
   if (menu) {
     e.stopPropagation();
     const idx = Number(menu.dataset.menu);
     if (!Number.isNaN(idx)) openTrackSheet(idx);
     return;
   }
-  const trackRow = e.target.closest('.track');
+  // Track ⋮ inside a playlist-detail view (different menu set)
+  const plMenu = e.target.closest('.track-menu[data-playlist-track]');
+  if (plMenu) {
+    e.stopPropagation();
+    const pos = Number(plMenu.dataset.playlistTrack);
+    if (!Number.isNaN(pos)) openPlaylistTrackSheet(pos);
+    return;
+  }
+  // "New playlist" tile
+  if (e.target.closest('[data-action="new-playlist"]')) {
+    promptCreatePlaylist();
+    return;
+  }
+  // Playlist row in playlists list
+  const plRow = e.target.closest('[data-playlist-id]');
+  if (plRow) {
+    const pid = Number(plRow.dataset.playlistId);
+    const p = state.playlists.find(p => p.id === pid);
+    if (p) {
+      state.currentPlaylist = p;
+      state.view = 'playlist-detail';
+      view.scrollTop = 0;
+      render();
+    }
+    return;
+  }
+  const trackRow = e.target.closest('.track[data-track]');
   if (trackRow) {
     const idx = Number(trackRow.dataset.track);
     if (!Number.isNaN(idx)) playTrackFromCurrentView(idx);
@@ -2254,8 +2723,13 @@ view.addEventListener('click', e => {
     return;
   }
   if (e.target.closest('#back')) {
-    state.view = 'albums';
-    state.currentAlbum = null;
+    if (state.view === 'playlist-detail') {
+      state.view = 'playlists';
+      state.currentPlaylist = null;
+    } else {
+      state.view = 'albums';
+      state.currentAlbum = null;
+    }
     view.scrollTop = 0;
     render();
     return;
@@ -2272,6 +2746,18 @@ view.addEventListener('click', e => {
   }
   if (e.target.closest('#album-menu')) {
     if (state.currentAlbum) openAlbumSheet(state.currentAlbum);
+    return;
+  }
+  if (e.target.closest('#play-playlist')) {
+    if (!state.currentPlaylist) return;
+    const indices = playlistTracks(state.currentPlaylist);
+    if (indices.length === 0) return;
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
+    return;
+  }
+  if (e.target.closest('#playlist-menu')) {
+    if (state.currentPlaylist) openPlaylistMenuSheet();
     return;
   }
 });
@@ -2294,13 +2780,126 @@ async function handleAlbumSheetAction(act, albumName) {
     const count = state.tracks.filter(t => albumOf(t) === albumName).length;
     const msg = `Remove "${albumName}" and all ${count} track${count === 1 ? '' : 's'} from your library?\n\nThe music files on your phone are not affected.`;
     if (confirm(msg)) await removeAlbum(albumName);
+  } else if (act === 'add-to-playlist') {
+    openAddToPlaylistSheet('album', albumName);
   } else {
     closeSheet();
   }
 }
 
+async function handleAddToPlaylistAction(playlistTarget, kind, payload) {
+  if (playlistTarget === '__cancel__') { closeSheet(); return; }
+  let playlist;
+  if (playlistTarget === '__new__') {
+    const name = prompt('Name your new playlist:');
+    if (!name) { closeSheet(); return; }
+    playlist = await createPlaylist(name);
+    if (!playlist) { closeSheet(); return; }
+  } else {
+    const id = Number(playlistTarget);
+    playlist = state.playlists.find(p => p.id === id);
+    if (!playlist) { closeSheet(); return; }
+  }
+  let added = 0, skipped = 0;
+  if (kind === 'track') {
+    const t = state.tracks[Number(payload)];
+    if (t && t.id != null) {
+      const ok = await addTrackToPlaylist(playlist, t.id);
+      if (ok) added++; else skipped++;
+    }
+  } else if (kind === 'album') {
+    const albumTracks = state.tracks.filter(t => albumOf(t) === payload);
+    for (const t of albumTracks) {
+      if (t.id == null) continue;
+      const ok = await addTrackToPlaylist(playlist, t.id);
+      if (ok) added++; else skipped++;
+    }
+  }
+  closeSheet();
+  if (added && skipped) showToast(`Added ${added} to "${playlist.name}" (${skipped} already there)`);
+  else if (added) showToast(`Added ${added} to "${playlist.name}"`);
+  else if (skipped) showToast(`Already in "${playlist.name}"`);
+  if (state.view === 'playlists' || state.view === 'playlist-detail') render();
+}
+
+async function handlePlaylistTrackAction(act, positionInPlaylist) {
+  const p = state.currentPlaylist;
+  if (!p) { closeSheet(); return; }
+  if (act === 'cancel') { closeSheet(); return; }
+  if (act === 'play') {
+    closeSheet();
+    const indices = playlistTracks(p);
+    if (indices.length === 0) return;
+    const targetTrackIdx = state.tracks.findIndex(t => t.id === p.trackIds[positionInPlaylist]);
+    if (targetTrackIdx < 0) return;
+    setQueue(indices, targetTrackIdx);
+    loadTrack(targetTrackIdx, true);
+    return;
+  }
+  if (act === 'move-up') {
+    closeSheet();
+    await movePlaylistTrack(p, positionInPlaylist, positionInPlaylist - 1);
+    render();
+    return;
+  }
+  if (act === 'move-down') {
+    closeSheet();
+    await movePlaylistTrack(p, positionInPlaylist, positionInPlaylist + 1);
+    render();
+    return;
+  }
+  if (act === 'remove') {
+    closeSheet();
+    await removeTrackFromPlaylist(p, positionInPlaylist);
+    render();
+    return;
+  }
+}
+
+async function handlePlaylistMenuAction(act) {
+  const p = state.currentPlaylist;
+  if (!p) { closeSheet(); return; }
+  if (act === 'cancel') { closeSheet(); return; }
+  if (act === 'play') {
+    closeSheet();
+    const indices = playlistTracks(p);
+    if (indices.length === 0) return;
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
+    return;
+  }
+  if (act === 'rename') {
+    closeSheet();
+    const next = prompt('Rename playlist', p.name);
+    if (next !== null) {
+      await renamePlaylist(p, next);
+      render();
+    }
+    return;
+  }
+  if (act === 'delete') {
+    closeSheet();
+    if (!confirm(`Delete playlist "${p.name}"? The songs in it are not affected.`)) return;
+    await deletePlaylist(p.id);
+    state.currentPlaylist = null;
+    state.view = 'playlists';
+    render();
+    showToast('Playlist deleted');
+    return;
+  }
+}
+
 sheetBackdrop.addEventListener('click', e => {
   if (e.target === sheetBackdrop) { closeSheet(); return; }
+  const sleepBtn = e.target.closest('[data-sleep]');
+  if (sleepBtn) {
+    const minutes = Number(sleepBtn.dataset.sleep);
+    setSleepTimer(minutes);
+    showToast(minutes > 0 ? `Sleep in ${minutes} min` : 'Sleep timer off');
+    // Re-render the settings sheet so the active pill updates
+    openSettingsSheet();
+    return;
+  }
   const settingsBtn = e.target.closest('[data-settings-act]');
   if (settingsBtn) {
     handleSettingsAction(settingsBtn.dataset.settingsAct);
@@ -2308,6 +2907,20 @@ sheetBackdrop.addEventListener('click', e => {
   }
   const action = e.target.closest('.sheet-action');
   if (!action) return;
+  if (action.dataset.addPlaylistId) {
+    const kind = sheetBackdrop.dataset.addToPlaylistKind;
+    const payload = kind === 'album' ? sheetBackdrop.dataset.addToPlaylist : Number(sheetBackdrop.dataset.addToPlaylist);
+    handleAddToPlaylistAction(action.dataset.addPlaylistId, kind, payload);
+    return;
+  }
+  if (action.dataset.pltAct) {
+    handlePlaylistTrackAction(action.dataset.pltAct, Number(sheetBackdrop.dataset.playlistPos));
+    return;
+  }
+  if (action.dataset.plAct) {
+    handlePlaylistMenuAction(action.dataset.plAct);
+    return;
+  }
   if (action.dataset.albumAct) {
     handleAlbumSheetAction(action.dataset.albumAct, sheetBackdrop.dataset.album);
     return;
@@ -2323,6 +2936,29 @@ document.getElementById('source-toggle').addEventListener('click', e => {
 });
 document.getElementById('settings-btn').addEventListener('click', openSettingsSheet);
 document.getElementById('jf-refresh').addEventListener('click', () => syncJellyfin(true));
+
+{
+  const searchBtn = document.getElementById('search-btn');
+  const searchBar = document.getElementById('search-bar');
+  const searchInput = document.getElementById('search-input');
+  searchBtn.addEventListener('click', () => {
+    const opening = !searchBar.classList.contains('visible');
+    searchBar.classList.toggle('visible', opening);
+    searchBtn.classList.toggle('active', opening);
+    if (opening) {
+      // Focus async so the keyboard opens reliably on mobile.
+      setTimeout(() => searchInput.focus(), 0);
+    } else {
+      searchInput.value = '';
+      state.search = '';
+      render();
+    }
+  });
+  searchInput.addEventListener('input', () => {
+    state.search = searchInput.value.trim().toLowerCase();
+    render();
+  });
+}
 
 clearBtn.addEventListener('click', () => {
   if (state.source !== 'local') {
@@ -2408,6 +3044,7 @@ loadJellyfinConfig();
 loadSavedSource();
 state.tracks = state.local.tracks;
 applySourceUI();
+document.getElementById('lib-footer').textContent = `Music Player v${APP_VERSION}`;
 restoreLibrary();
 </script>
 </body>
