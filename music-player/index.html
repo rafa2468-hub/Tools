@@ -990,11 +990,12 @@ function artistOf(track) { return track.artist || ''; }
 function readTags(file) {
   return new Promise((resolve) => {
     if (typeof window.jsmediatags === 'undefined') { resolve(null); return; }
-    // jsmediatags can silently hang on malformed tag headers in some files.
-    // Cap the wait so a bad file can't stall the whole import.
+    // jsmediatags can silently hang on malformed tag headers in some files
+    // (notably newer iTunes M4A variants). Cap the wait so a bad file can't
+    // stall the whole import.
     let done = false;
     const finish = (val) => { if (done) return; done = true; clearTimeout(timer); resolve(val); };
-    const timer = setTimeout(() => finish(null), 8000);
+    const timer = setTimeout(() => finish(null), 2500);
     try {
       window.jsmediatags.read(file, {
         onSuccess: (result) => finish(result && result.tags ? result.tags : null),
@@ -1867,9 +1868,26 @@ async function addFiles(files) {
   const startedEmpty = state.tracks.length === 0;
   let added = 0;
   let failed = 0;
+  const verbose = audioFiles.length > 3;
 
-  for (const file of audioFiles) {
-    const tags = await readTags(file);
+  // Read tags for all files in parallel batches. jsmediatags can hang per file
+  // up to the timeout, so processing serially turns a 20-file import into a
+  // multi-minute wait. Concurrency of 5 gets us through 20 files in roughly
+  // one timeout cycle.
+  const tagResults = new Array(audioFiles.length);
+  const BATCH = 5;
+  for (let i = 0; i < audioFiles.length; i += BATCH) {
+    const slice = audioFiles.slice(i, i + BATCH);
+    const results = await Promise.all(slice.map(f => readTags(f)));
+    for (let j = 0; j < results.length; j++) tagResults[i + j] = results[j];
+    if (verbose) showToast(`Reading tags ${Math.min(i + BATCH, audioFiles.length)}/${audioFiles.length}…`);
+  }
+
+  // Now write to IDB sequentially. Render every few additions so the user
+  // sees the library filling up rather than a blank wait.
+  for (let i = 0; i < audioFiles.length; i++) {
+    const file = audioFiles[i];
+    const tags = tagResults[i];
     const tagTitle = tags ? tagString(tags.title) : '';
     const tagArtist = tags ? tagString(tags.artist) : '';
     const tagAlbum = tags ? tagString(tags.album) : '';
@@ -1895,6 +1913,10 @@ async function addFiles(files) {
       if (pictureBlob) record.pictureUrl = URL.createObjectURL(pictureBlob);
       state.tracks.push(record);
       added++;
+      if (added === 1 || added % 5 === 0 || added === audioFiles.length) {
+        render();
+        if (verbose) showToast(`Saving ${added}/${audioFiles.length}…`);
+      }
     } catch (err) {
       console.error('Failed to store track', file.name, err);
       failed++;
