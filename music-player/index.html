@@ -635,6 +635,35 @@
     letter-spacing: 0.3px;
   }
 
+  .search-bar {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    padding: 8px 14px;
+    background: rgba(11,11,16,0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    display: none;
+  }
+  .search-bar.visible { display: block; }
+  .search-bar input {
+    width: 100%;
+    appearance: none;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .search-bar input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  #search-btn.active { background: rgba(124,92,255,0.25); color: #fff; }
+
   @media (min-width: 720px) {
     body { padding: 0; }
     main, header { max-width: 480px; margin-left: auto; margin-right: auto; width: 100%; }
@@ -661,6 +690,9 @@
     </label>
     <button class="icon-btn" id="jf-refresh" type="button" aria-label="Refresh Jellyfin library" hidden>
       <svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.45 11h-2.07A6 6 0 1 1 12 6a5.9 5.9 0 0 1 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+    </button>
+    <button class="icon-btn" id="search-btn" type="button" aria-label="Search">
+      <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
     </button>
     <button class="icon-btn" id="settings-btn" type="button" aria-label="Settings">
       <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
@@ -723,6 +755,9 @@
       <button class="tab" data-view="songs" type="button">Songs</button>
       <div class="spacer"></div>
       <button class="clear-btn" id="clear" type="button">Clear all</button>
+    </div>
+    <div class="search-bar" id="search-bar">
+      <input id="search-input" type="search" placeholder="Search by title, artist, or album" autocomplete="off">
     </div>
     <div id="view"></div>
     <div class="lib-footer" id="lib-footer"></div>
@@ -851,6 +886,7 @@ const state = {
   currentAlbum: null,
   db: null,
   source: 'local',     // 'local' | 'jellyfin'
+  search: '',          // lowercased current search query (empty = no filter)
   local: { tracks: [] },
   jellyfin: {
     tracks: [],
@@ -1292,6 +1328,20 @@ function applySourceUI() {
   document.getElementById('jf-refresh').hidden = isLocal;
 }
 
+function trackMatchesSearch(t) {
+  if (!state.search) return true;
+  const q = state.search;
+  return (t.title || '').toLowerCase().includes(q) ||
+         (t.artist || '').toLowerCase().includes(q) ||
+         (t.album || '').toLowerCase().includes(q);
+}
+
+function albumMatchesSearch(albumName, indices) {
+  if (!state.search) return true;
+  if (albumName.toLowerCase().includes(state.search)) return true;
+  return indices.some(i => trackMatchesSearch(state.tracks[i]));
+}
+
 function groupedAlbums() {
   const map = new Map();
   state.tracks.forEach((t, i) => {
@@ -1378,9 +1428,10 @@ function render() {
 }
 
 function renderAlbumsGrid() {
-  const albums = groupedAlbums();
+  let albums = groupedAlbums();
+  if (state.search) albums = albums.filter(a => albumMatchesSearch(a.name, a.indices));
   if (albums.length === 0) {
-    view.innerHTML = '<div class="empty">No albums yet.</div>';
+    view.innerHTML = '<div class="empty">' + (state.search ? 'No matches.' : 'No albums yet.') + '</div>';
     return;
   }
   const html = '<div class="album-grid">' + albums.map(a => {
@@ -1400,16 +1451,19 @@ function renderAlbumsGrid() {
 
 function renderAlbumDetail() {
   const album = state.currentAlbum;
-  const indices = state.tracks
+  const allIndices = state.tracks
     .map((t, i) => albumOf(t) === album ? i : -1)
     .filter(i => i !== -1);
-  if (indices.length === 0) {
+  if (allIndices.length === 0) {
     // Album disappeared (last track removed) — bounce back
     state.view = 'albums';
     state.currentAlbum = null;
     render();
     return;
   }
+  const indices = state.search
+    ? allIndices.filter(i => trackMatchesSearch(state.tracks[i]))
+    : allIndices;
   const header = `
     <div class="back-row">
       <button class="back-btn" id="back" type="button" aria-label="Back">
@@ -1417,7 +1471,7 @@ function renderAlbumDetail() {
       </button>
       <div class="back-title">
         <h2>${escapeHtml(album)}</h2>
-        <div class="meta">${indices.length} track${indices.length === 1 ? '' : 's'}</div>
+        <div class="meta">${allIndices.length} track${allIndices.length === 1 ? '' : 's'}${state.search && indices.length !== allIndices.length ? ` · ${indices.length} shown` : ''}</div>
       </div>
       <button class="play-album-btn" id="play-album" type="button">
         <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play
@@ -1427,12 +1481,21 @@ function renderAlbumDetail() {
       </button>
     </div>
   `;
-  const list = indices.map((i, n) => trackRow(i, n + 1, false)).join('');
+  const list = indices.length > 0
+    ? indices.map((i, n) => trackRow(i, n + 1, false)).join('')
+    : '<div class="empty">No matches.</div>';
   view.innerHTML = header + list;
 }
 
 function renderSongsList() {
-  const html = state.tracks.map((t, i) => trackRow(i, i + 1, true)).join('');
+  const filtered = state.search
+    ? state.tracks.map((t, i) => trackMatchesSearch(t) ? i : -1).filter(i => i !== -1)
+    : state.tracks.map((_, i) => i);
+  if (filtered.length === 0) {
+    view.innerHTML = '<div class="empty">' + (state.search ? 'No matches.' : 'No tracks.') + '</div>';
+    return;
+  }
+  const html = filtered.map((trackIdx, n) => trackRow(trackIdx, n + 1, true)).join('');
   view.innerHTML = html;
 }
 
@@ -2336,6 +2399,29 @@ document.getElementById('source-toggle').addEventListener('click', e => {
 });
 document.getElementById('settings-btn').addEventListener('click', openSettingsSheet);
 document.getElementById('jf-refresh').addEventListener('click', () => syncJellyfin(true));
+
+{
+  const searchBtn = document.getElementById('search-btn');
+  const searchBar = document.getElementById('search-bar');
+  const searchInput = document.getElementById('search-input');
+  searchBtn.addEventListener('click', () => {
+    const opening = !searchBar.classList.contains('visible');
+    searchBar.classList.toggle('visible', opening);
+    searchBtn.classList.toggle('active', opening);
+    if (opening) {
+      // Focus async so the keyboard opens reliably on mobile.
+      setTimeout(() => searchInput.focus(), 0);
+    } else {
+      searchInput.value = '';
+      state.search = '';
+      render();
+    }
+  });
+  searchInput.addEventListener('input', () => {
+    state.search = searchInput.value.trim().toLowerCase();
+    render();
+  });
+}
 
 clearBtn.addEventListener('click', () => {
   if (state.source !== 'local') {
