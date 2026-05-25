@@ -23,23 +23,7 @@ jobs:
           channel: stable
           cache: true
 
-      # Install android-35 if not present — required by google_mlkit_document_scanner
-      - name: Install Android 35 platform
-        run: |
-          echo "Installed platforms:" && ls $ANDROID_HOME/platforms/ 2>/dev/null || true
-          if [ ! -d "$ANDROID_HOME/platforms/android-35" ]; then
-            SDKMANAGER=$(find $ANDROID_HOME/cmdline-tools -name sdkmanager -type f 2>/dev/null | head -1)
-            if [ -n "$SDKMANAGER" ]; then
-              echo "Installing android-35 via $SDKMANAGER"
-              yes | sudo "$SDKMANAGER" "platforms;android-35" 2>&1 | tail -5
-            else
-              echo "sdkmanager not found"
-            fi
-          else
-            echo "android-35 already installed"
-          fi
-
-      # Cache Gradle downloads so re-runs finish in ~3 min instead of ~15
+      # Cache Gradle downloads so re-runs finish faster
       - uses: actions/cache@v4
         with:
           path: |
@@ -64,15 +48,18 @@ jobs:
           sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>|' \
             /tmp/build/android/app/src/main/AndroidManifest.xml
 
-      # Use broad patterns that match regardless of spacing or Groovy/Kotlin DSL variant
-      - name: Patch SDK versions in build.gradle
+      - name: Patch and verify SDK versions
         working-directory: /tmp/build/android/app
         run: |
           for f in build.gradle build.gradle.kts; do
             [ -f "$f" ] || continue
-            sed -i 's/flutter\.minSdkVersion/23/g'      "$f"
-            sed -i 's/flutter\.compileSdkVersion/35/g'  "$f"
-            echo "=== $f after patch ===" && cat "$f"
+            echo "--- Before patch: $f ---"
+            grep -E "compileSdk|minSdk|targetSdk" "$f" || echo "(no SDK lines found)"
+            sed -i 's/flutter\.minSdkVersion/23/g'     "$f"
+            sed -i 's/flutter\.compileSdkVersion/35/g' "$f"
+            sed -i 's/flutter\.targetSdkVersion/35/g'  "$f"
+            echo "--- After patch: $f ---"
+            grep -E "compileSdk|minSdk|targetSdk" "$f" || echo "(no SDK lines found)"
           done
 
       - name: Get Flutter packages
@@ -80,10 +67,21 @@ jobs:
         working-directory: /tmp/build
         run: flutter pub get
 
+      # Run flutter build; if Gradle fails, re-run Gradle directly with --info
+      # so the actual error is visible in the log.
       - name: Build debug APK
         timeout-minutes: 20
         working-directory: /tmp/build
-        run: flutter build apk --debug
+        run: |
+          flutter build apk --debug 2>&1 || {
+            echo ""
+            echo "====== Flutter build failed — re-running Gradle with --info ======"
+            cd android
+            ./gradlew assembleDebug --info 2>&1 | \
+              grep -E "(> |error:|Error:|FAILED|Exception|Could not|minCompile|minSdk|Unable|warning)" | \
+              head -80
+            exit 1
+          }
 
       - name: List build output
         run: ls -lh /tmp/build/build/app/outputs/flutter-apk/
