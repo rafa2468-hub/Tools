@@ -3,7 +3,7 @@ name: Build Android APK
 on:
   push:
     branches: [claude/mobile-document-scanner-EOLSL, main]
-  workflow_dispatch:   # allows triggering manually from GitHub's UI
+  workflow_dispatch:   # allows triggering manually from GitHub UI
 
 jobs:
   build-apk:
@@ -17,15 +17,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Let Flutter pick the latest stable — avoids version-pin download errors
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.0'
           channel: stable
           cache: true
 
-      # Flutter create generates the Android/iOS boilerplate we don't store in git.
-      # We then overlay our source files on top.
-      - name: Scaffold base Flutter project
+      # Accept SDK licenses non-interactively (required for first-run builds)
+      - name: Accept Android SDK licenses
+        run: yes | flutter doctor --android-licenses 2>/dev/null || true
+
+      # Helpful for debugging future failures
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      # Generate the full Android boilerplate we don't store in git
+      - name: Scaffold Flutter project
         run: |
           flutter create \
             --project-name paperless_scanner \
@@ -35,22 +42,24 @@ jobs:
 
       - name: Overlay our source files
         run: |
-          cp -r paperless_scanner/lib        /tmp/build/
-          cp    paperless_scanner/pubspec.yaml /tmp/build/
+          cp -r paperless_scanner/lib          /tmp/build/
+          cp    paperless_scanner/pubspec.yaml  /tmp/build/
           cp    paperless_scanner/android/app/src/main/AndroidManifest.xml \
                 /tmp/build/android/app/src/main/AndroidManifest.xml
 
-      # ML Kit Document Scanner requires minSdk 21.
-      # Flutter 3.22+ defaults to 21, but we patch explicitly to be safe.
-      - name: Set minSdkVersion 21
-        working-directory: /tmp/build
+      # Ensure minSdk 21 (ML Kit requirement). Flutter 3.22+ already defaults to
+      # 21, but we patch both DSL flavours explicitly so it never regresses.
+      - name: Patch minSdkVersion to 21
+        working-directory: /tmp/build/android/app
         run: |
-          # Groovy DSL (build.gradle)
-          sed -i 's/minSdkVersion flutter\.minSdkVersion/minSdkVersion 21/' \
-            android/app/build.gradle 2>/dev/null || true
-          # Kotlin DSL (build.gradle.kts)
-          sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 21/' \
-            android/app/build.gradle.kts 2>/dev/null || true
+          if [ -f build.gradle ]; then
+            sed -i 's/minSdkVersion flutter\.minSdkVersion/minSdkVersion 21/' build.gradle
+            echo "=== build.gradle (after patch) ===" && cat build.gradle
+          fi
+          if [ -f build.gradle.kts ]; then
+            sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 21/' build.gradle.kts
+            echo "=== build.gradle.kts (after patch) ===" && cat build.gradle.kts
+          fi
 
       - name: Get dependencies
         working-directory: /tmp/build
@@ -58,23 +67,15 @@ jobs:
 
       - name: Build APK
         working-directory: /tmp/build
-        run: |
-          flutter build apk --debug --split-per-abi
-          echo "--- Built files ---"
-          ls -lh build/app/outputs/flutter-apk/
+        run: flutter build apk --debug
 
-      # arm64-v8a covers all modern Android phones (2017+)
-      # The universal APK works on all architectures but is ~3x larger
-      - name: Upload arm64 APK (recommended for modern phones)
+      - name: Show build output
+        run: ls -lh /tmp/build/build/app/outputs/flutter-apk/
+
+      # Single universal APK — works on all Android CPU architectures
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: paperless-scanner-arm64
-          path: /tmp/build/build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
-          retention-days: 14
-
-      - name: Upload universal APK (older / unknown phones)
-        uses: actions/upload-artifact@v4
-        with:
-          name: paperless-scanner-universal
+          name: paperless-scanner
           path: /tmp/build/build/app/outputs/flutter-apk/app-debug.apk
           retention-days: 14
