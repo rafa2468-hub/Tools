@@ -3,12 +3,12 @@ name: Build Android APK
 on:
   push:
     branches: [claude/mobile-document-scanner-EOLSL, main]
-  workflow_dispatch:   # allows triggering manually from GitHub UI
+  workflow_dispatch:
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 30   # kill the job if it hangs rather than burning minutes
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -18,30 +18,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Let Flutter pick the latest stable — avoids version-pin download errors
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # Write known license hashes directly. Use sudo tee because $ANDROID_HOME
-      # is owned by root on GitHub-hosted runners.
-      - name: Accept Android SDK licenses
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          sudo mkdir -p "$ANDROID_HOME/licenses"
-          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e" \
-            | sudo tee "$ANDROID_HOME/licenses/android-sdk-license" > /dev/null
-          echo -e "84831b9409646a918e30573bab4c9c91346d8abd" \
-            | sudo tee "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license" > /dev/null
-          echo -e "33b6137b44d18231e0c4a7b14f4942e76a3d4441" \
-            | sudo tee "$ANDROID_HOME/licenses/android-sdk-preview-license" > /dev/null
-
-      # Helpful for debugging future failures
-      - name: Flutter doctor
-        run: flutter doctor -v
-
-      # Generate the full Android boilerplate we don't store in git
       - name: Scaffold Flutter project
         run: |
           flutter create \
@@ -57,18 +38,14 @@ jobs:
           cp    paperless_scanner/android/app/src/main/AndroidManifest.xml \
                 /tmp/build/android/app/src/main/AndroidManifest.xml
 
-      # Ensure minSdk 21 (ML Kit requirement). Flutter 3.22+ already defaults to
-      # 21, but we patch both DSL flavours explicitly so it never regresses.
       - name: Patch minSdkVersion to 21
         working-directory: /tmp/build/android/app
         run: |
           if [ -f build.gradle ]; then
             sed -i 's/minSdkVersion flutter\.minSdkVersion/minSdkVersion 21/' build.gradle
-            echo "=== build.gradle (after patch) ===" && cat build.gradle
           fi
           if [ -f build.gradle.kts ]; then
             sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 21/' build.gradle.kts
-            echo "=== build.gradle.kts (after patch) ===" && cat build.gradle.kts
           fi
 
       - name: Get dependencies
@@ -79,10 +56,9 @@ jobs:
         working-directory: /tmp/build
         run: flutter build apk --debug
 
-      - name: Show build output
+      - name: List build output
         run: ls -lh /tmp/build/build/app/outputs/flutter-apk/
 
-      # Single universal APK — works on all Android CPU architectures
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
