@@ -8,24 +8,29 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Pre-built image with Flutter, Android SDK, build-tools, and licenses
-    # all ready to go. Skips ~10 min of setup time.
-    container:
-      image: ghcr.io/cirruslabs/flutter:stable
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      # Container runs as root; mark the checkout dir safe to avoid
-      # "dubious ownership" errors from git inside the container.
-      - name: Mark workspace safe for git
-        run: git config --global --add safe.directory '*'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
 
-      - name: Show tool versions
-        run: |
-          flutter --version
-          echo "ANDROID_HOME=$ANDROID_HOME"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Cache Gradle downloads so re-runs finish in ~3 min instead of ~15
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
 
       - name: Scaffold Flutter project
         timeout-minutes: 3
@@ -53,7 +58,7 @@ jobs:
             sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 21/' build.gradle.kts
           fi
 
-      - name: Resolve Flutter packages
+      - name: Get Flutter packages
         timeout-minutes: 5
         working-directory: /tmp/build
         run: flutter pub get
