@@ -55,7 +55,7 @@ jobs:
             [ -f "$f" ] || continue
             echo "--- Before patch: $f ---"
             grep -E "compileSdk|minSdk|targetSdk" "$f" || echo "(no SDK lines found)"
-            sed -i 's/flutter\.minSdkVersion/23/g'     "$f"
+            sed -i 's/flutter\.minSdkVersion/29/g'     "$f"
             sed -i 's/flutter\.compileSdkVersion/35/g' "$f"
             sed -i 's/flutter\.targetSdkVersion/35/g'  "$f"
             echo "--- After patch: $f ---"
@@ -77,8 +77,8 @@ jobs:
           BUILD_RC=${PIPESTATUS[0]}
           if [ $BUILD_RC -ne 0 ]; then
             echo ""
-            echo "====== BUILD FAILED — last 80 lines ======"
-            tail -80 /tmp/build.log
+            echo "====== BUILD FAILED — last 150 lines ======"
+            tail -150 /tmp/build.log
             exit 1
           fi
 

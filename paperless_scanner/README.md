@@ -62,7 +62,7 @@ lib/
 
 ## Android notes
 
-- `minSdkVersion 21` required by ML Kit
+- `minSdkVersion 29` (Android 10) required by ML Kit Document Scanner
 - The ML Kit model is downloaded on first scan (requires internet)
 
 ## iOS notes
