@@ -64,7 +64,6 @@ class _HomeScreenState extends State<HomeScreen> {
       _scanner?.close();
       _scanner = DocumentScanner(
         options: DocumentScannerOptions(
-          documentFormat: DocumentFormat.jpeg,
           mode: ScannerMode.full,   // ML-enhanced: dewarping, enhancement
           pageLimit: 20,
           isGalleryImport: true,    // also allow picking from gallery
@@ -73,10 +72,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
       final result = await _scanner!.scanDocument();
 
-      if (result.images.isEmpty) return; // user cancelled
+      final images = result.images ?? [];
+      if (images.isEmpty) return; // user cancelled
 
       final session = ScanSession(
-        imagePaths: result.images,
+        imagePaths: images,
         createdAt: DateTime.now(),
       );
 
