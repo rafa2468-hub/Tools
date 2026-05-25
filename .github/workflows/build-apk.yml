@@ -1,0 +1,80 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [claude/mobile-document-scanner-EOLSL, main]
+  workflow_dispatch:   # allows triggering manually from GitHub's UI
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.0'
+          channel: stable
+          cache: true
+
+      # Flutter create generates the Android/iOS boilerplate we don't store in git.
+      # We then overlay our source files on top.
+      - name: Scaffold base Flutter project
+        run: |
+          flutter create \
+            --project-name paperless_scanner \
+            --org com.paperlessscanner \
+            --platforms android \
+            /tmp/build
+
+      - name: Overlay our source files
+        run: |
+          cp -r paperless_scanner/lib        /tmp/build/
+          cp    paperless_scanner/pubspec.yaml /tmp/build/
+          cp    paperless_scanner/android/app/src/main/AndroidManifest.xml \
+                /tmp/build/android/app/src/main/AndroidManifest.xml
+
+      # ML Kit Document Scanner requires minSdk 21.
+      # Flutter 3.22+ defaults to 21, but we patch explicitly to be safe.
+      - name: Set minSdkVersion 21
+        working-directory: /tmp/build
+        run: |
+          # Groovy DSL (build.gradle)
+          sed -i 's/minSdkVersion flutter\.minSdkVersion/minSdkVersion 21/' \
+            android/app/build.gradle 2>/dev/null || true
+          # Kotlin DSL (build.gradle.kts)
+          sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 21/' \
+            android/app/build.gradle.kts 2>/dev/null || true
+
+      - name: Get dependencies
+        working-directory: /tmp/build
+        run: flutter pub get
+
+      - name: Build APK
+        working-directory: /tmp/build
+        run: |
+          flutter build apk --debug --split-per-abi
+          echo "--- Built files ---"
+          ls -lh build/app/outputs/flutter-apk/
+
+      # arm64-v8a covers all modern Android phones (2017+)
+      # The universal APK works on all architectures but is ~3x larger
+      - name: Upload arm64 APK (recommended for modern phones)
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperless-scanner-arm64
+          path: /tmp/build/build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
+          retention-days: 14
+
+      - name: Upload universal APK (older / unknown phones)
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperless-scanner-universal
+          path: /tmp/build/build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 14
