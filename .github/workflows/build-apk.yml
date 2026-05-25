@@ -43,10 +43,13 @@ jobs:
 
       - name: Overlay our source files
         run: |
-          cp -r paperless_scanner/lib          /tmp/build/
-          cp    paperless_scanner/pubspec.yaml  /tmp/build/
-          cp    paperless_scanner/android/app/src/main/AndroidManifest.xml \
-                /tmp/build/android/app/src/main/AndroidManifest.xml
+          cp -r paperless_scanner/lib         /tmp/build/
+          cp    paperless_scanner/pubspec.yaml /tmp/build/
+          # Do NOT replace the generated AndroidManifest.xml — our custom version
+          # references @style/LaunchTheme etc. that only exist in the flutter-create
+          # generated res/ files. Instead, patch camera permission into the generated one.
+          sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>|' \
+            /tmp/build/android/app/src/main/AndroidManifest.xml
 
       - name: Patch minSdkVersion to 21
         working-directory: /tmp/build/android/app
@@ -58,10 +61,13 @@ jobs:
             sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 21/' build.gradle.kts
           fi
 
+      - name: Flutter version
+        run: flutter --version
+
       - name: Get Flutter packages
         timeout-minutes: 5
         working-directory: /tmp/build
-        run: flutter pub get
+        run: flutter pub get --verbose
 
       - name: Build debug APK
         timeout-minutes: 20
