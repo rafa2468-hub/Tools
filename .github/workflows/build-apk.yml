@@ -77,6 +77,10 @@ jobs:
           BUILD_RC=${PIPESTATUS[0]}
           if [ $BUILD_RC -ne 0 ]; then
             echo ""
+            echo "====== CONSTRAINT / AAR ERRORS ======"
+            grep -E "Dependency '|requires 'minSdk|requires 'compileSdk|minimum.*SDK|CheckAarMetadata|minSdkVersion.*required|Execution failed for task" \
+              /tmp/build.log | head -40 || echo "(no constraint patterns found)"
+            echo ""
             echo "====== BUILD FAILED — last 150 lines ======"
             tail -150 /tmp/build.log
             exit 1
