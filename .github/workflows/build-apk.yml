@@ -75,7 +75,7 @@ jobs:
       - name: Build debug APK
         timeout-minutes: 20
         working-directory: /tmp/build
-        run: flutter build apk --debug -- --stacktrace
+        run: flutter build apk --debug
 
       - name: List build output
         run: ls -lh /tmp/build/build/app/outputs/flutter-apk/
