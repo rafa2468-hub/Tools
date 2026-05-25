@@ -51,15 +51,18 @@ jobs:
           sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>|' \
             /tmp/build/android/app/src/main/AndroidManifest.xml
 
-      - name: Patch minSdkVersion to 21
+      - name: Patch minSdkVersion to 21 and compileSdk to 34
         working-directory: /tmp/build/android/app
         run: |
           if [ -f build.gradle ]; then
             sed -i 's/minSdkVersion flutter\.minSdkVersion/minSdkVersion 21/' build.gradle
+            sed -i 's/compileSdkVersion flutter\.compileSdkVersion/compileSdkVersion 34/' build.gradle
           fi
           if [ -f build.gradle.kts ]; then
             sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 21/' build.gradle.kts
+            sed -i 's/compileSdk = flutter\.compileSdkVersion/compileSdk = 34/' build.gradle.kts
           fi
+          echo "=== build.gradle(s) after patch ===" && cat build.gradle 2>/dev/null || cat build.gradle.kts 2>/dev/null
 
       - name: Flutter version
         run: flutter --version
@@ -67,12 +70,12 @@ jobs:
       - name: Get Flutter packages
         timeout-minutes: 5
         working-directory: /tmp/build
-        run: flutter pub get --verbose
+        run: flutter pub get
 
       - name: Build debug APK
         timeout-minutes: 20
         working-directory: /tmp/build
-        run: flutter build apk --debug
+        run: flutter build apk --debug --verbose
 
       - name: List build output
         run: ls -lh /tmp/build/build/app/outputs/flutter-apk/
