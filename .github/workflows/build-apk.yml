@@ -23,6 +23,22 @@ jobs:
           channel: stable
           cache: true
 
+      # Install android-35 if not present — required by google_mlkit_document_scanner
+      - name: Install Android 35 platform
+        run: |
+          echo "Installed platforms:" && ls $ANDROID_HOME/platforms/ 2>/dev/null || true
+          if [ ! -d "$ANDROID_HOME/platforms/android-35" ]; then
+            SDKMANAGER=$(find $ANDROID_HOME/cmdline-tools -name sdkmanager -type f 2>/dev/null | head -1)
+            if [ -n "$SDKMANAGER" ]; then
+              echo "Installing android-35 via $SDKMANAGER"
+              yes | sudo "$SDKMANAGER" "platforms;android-35" 2>&1 | tail -5
+            else
+              echo "sdkmanager not found"
+            fi
+          else
+            echo "android-35 already installed"
+          fi
+
       # Cache Gradle downloads so re-runs finish in ~3 min instead of ~15
       - uses: actions/cache@v4
         with:
@@ -45,27 +61,19 @@ jobs:
         run: |
           cp -r paperless_scanner/lib         /tmp/build/
           cp    paperless_scanner/pubspec.yaml /tmp/build/
-          # Do NOT replace the generated AndroidManifest.xml — our custom version
-          # references @style/LaunchTheme etc. that only exist in the flutter-create
-          # generated res/ files. Instead, patch camera permission into the generated one.
           sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>|' \
             /tmp/build/android/app/src/main/AndroidManifest.xml
 
-      - name: Patch SDK versions
+      # Use broad patterns that match regardless of spacing or Groovy/Kotlin DSL variant
+      - name: Patch SDK versions in build.gradle
         working-directory: /tmp/build/android/app
         run: |
-          if [ -f build.gradle ]; then
-            sed -i 's/minSdkVersion flutter\.minSdkVersion/minSdkVersion 23/' build.gradle
-            sed -i 's/compileSdkVersion flutter\.compileSdkVersion/compileSdkVersion 35/' build.gradle
-          fi
-          if [ -f build.gradle.kts ]; then
-            sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 23/' build.gradle.kts
-            sed -i 's/compileSdk = flutter\.compileSdkVersion/compileSdk = 35/' build.gradle.kts
-          fi
-          echo "=== build.gradle after patch ===" && cat build.gradle 2>/dev/null || cat build.gradle.kts
-
-      - name: Flutter version
-        run: flutter --version
+          for f in build.gradle build.gradle.kts; do
+            [ -f "$f" ] || continue
+            sed -i 's/flutter\.minSdkVersion/23/g'      "$f"
+            sed -i 's/flutter\.compileSdkVersion/35/g'  "$f"
+            echo "=== $f after patch ===" && cat "$f"
+          done
 
       - name: Get Flutter packages
         timeout-minutes: 5
