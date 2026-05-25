@@ -67,21 +67,20 @@ jobs:
         working-directory: /tmp/build
         run: flutter pub get
 
-      # Run flutter build; if Gradle fails, re-run Gradle directly with --info
-      # so the actual error is visible in the log.
+      # Capture full output so we can tail it on failure — errors always appear
+      # near the end of flutter/Gradle output, not the beginning.
       - name: Build debug APK
         timeout-minutes: 20
         working-directory: /tmp/build
         run: |
-          flutter build apk --debug 2>&1 || {
+          flutter build apk --debug 2>&1 | tee /tmp/build.log
+          BUILD_RC=${PIPESTATUS[0]}
+          if [ $BUILD_RC -ne 0 ]; then
             echo ""
-            echo "====== Flutter build failed — re-running Gradle with --info ======"
-            cd android
-            ./gradlew assembleDebug --info 2>&1 | \
-              grep -E "(> |error:|Error:|FAILED|Exception|Could not|minCompile|minSdk|Unable|warning)" | \
-              head -80
+            echo "====== BUILD FAILED — last 80 lines ======"
+            tail -80 /tmp/build.log
             exit 1
-          }
+          fi
 
       - name: List build output
         run: ls -lh /tmp/build/build/app/outputs/flutter-apk/
