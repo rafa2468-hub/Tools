@@ -24,17 +24,18 @@ jobs:
           channel: stable
           cache: true
 
-      # Write known license hashes directly — avoids interactive flutter doctor
-      # prompts that can hang even when piped through `yes`.
+      # Write known license hashes directly. Use sudo tee because $ANDROID_HOME
+      # is owned by root on GitHub-hosted runners.
       - name: Accept Android SDK licenses
         run: |
-          mkdir -p "$ANDROID_HOME/licenses"
-          printf '\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e' \
-            > "$ANDROID_HOME/licenses/android-sdk-license"
-          printf '\n84831b9409646a918e30573bab4c9c91346d8abd' \
-            > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
-          printf '\n33b6137b44d18231e0c4a7b14f4942e76a3d4441' \
-            > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          sudo mkdir -p "$ANDROID_HOME/licenses"
+          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e" \
+            | sudo tee "$ANDROID_HOME/licenses/android-sdk-license" > /dev/null
+          echo -e "84831b9409646a918e30573bab4c9c91346d8abd" \
+            | sudo tee "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license" > /dev/null
+          echo -e "33b6137b44d18231e0c4a7b14f4942e76a3d4441" \
+            | sudo tee "$ANDROID_HOME/licenses/android-sdk-preview-license" > /dev/null
 
       # Helpful for debugging future failures
       - name: Flutter doctor
