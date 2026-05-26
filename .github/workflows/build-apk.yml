@@ -61,19 +61,16 @@ jobs:
           # Force ALL Android subprojects (Flutter plugins such as :printing) to
           # compileSdk 35.  Plugins often ship with old compileSdkVersion values
           # that fail checkDebugAarMetadata against newer AndroidX dependencies.
-          cat >> /tmp/build/android/build.gradle << 'GROOVY'
-
-subprojects {
-    afterEvaluate {
-        if (plugins.hasPlugin('com.android.library') ||
-                plugins.hasPlugin('com.android.application')) {
-            android {
-                compileSdkVersion 35
-            }
-        }
-    }
-}
-GROOVY
+          {
+            echo 'subprojects {'
+            echo '    afterEvaluate {'
+            echo "        if (plugins.hasPlugin('com.android.library') ||"
+            echo "                plugins.hasPlugin('com.android.application')) {"
+            echo '            android { compileSdkVersion 35 }'
+            echo '        }'
+            echo '    }'
+            echo '}'
+          } >> /tmp/build/android/build.gradle
 
       - name: Get Flutter packages
         timeout-minutes: 5
