@@ -14,10 +14,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_1_8
     }
 
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
-
     defaultConfig {
         applicationId = "com.paperlessscanner.paperless_scanner"
         minSdk = 29
@@ -31,6 +27,10 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+}
+
+kotlin {
+    jvmToolchain(17)
 }
 
 flutter {

@@ -78,7 +78,7 @@ jobs:
           tail -50 /tmp/build.log
           echo ""
           echo "=== Constraint / AAR errors (grep) ==="
-          grep -E "Dependency '|requires.*version|Execution failed for task|minSdk|compileSdk" \
+          grep -E "Dependency '|requires.*version|Execution failed for task|error:|Error:|What went wrong|Where:|e: file" \
             /tmp/build.log | head -40 || echo "(no specific patterns matched)"
           exit 1
 
