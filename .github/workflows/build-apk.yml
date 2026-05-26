@@ -43,41 +43,23 @@ jobs:
 
       - name: Overlay our source files
         run: |
-          cp -r paperless_scanner/lib         /tmp/build/
-          cp    paperless_scanner/pubspec.yaml /tmp/build/
+          cp -r paperless_scanner/lib          /tmp/build/
+          cp    paperless_scanner/pubspec.yaml  /tmp/build/
+          # Replace the generated build.gradle.kts with ours (hardcoded SDK versions)
+          cp paperless_scanner/android/build.gradle.kts \
+             /tmp/build/android/app/build.gradle.kts
+          # Add camera permission to the generated manifest
           sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>|' \
             /tmp/build/android/app/src/main/AndroidManifest.xml
-
-      - name: Patch and verify SDK versions
-        working-directory: /tmp/build/android/app
-        run: |
-          for f in build.gradle build.gradle.kts; do
-            [ -f "$f" ] || continue
-            echo "--- Before patch: $f ---"
-            grep -E "compileSdk|minSdk|targetSdk" "$f" || echo "(no SDK lines found)"
-            # Replace flutter.xxx property references
-            sed -i 's/flutter\.minSdkVersion/29/g'     "$f"
-            sed -i 's/flutter\.compileSdkVersion/35/g' "$f"
-            sed -i 's/flutter\.targetSdkVersion/35/g'  "$f"
-            # Also replace any hardcoded numeric values (Kotlin DSL: minSdk = N)
-            sed -i 's/\bminSdk *= *[0-9][0-9]*/minSdk = 29/g'        "$f"
-            sed -i 's/\bcompileSdk *= *[0-9][0-9]*/compileSdk = 35/g' "$f"
-            sed -i 's/\btargetSdk *= *[0-9][0-9]*/targetSdk = 35/g'   "$f"
-            # Groovy DSL variants (minSdkVersion N, no equals sign)
-            sed -i 's/\bminSdkVersion [0-9][0-9]*/minSdkVersion 29/g'        "$f"
-            sed -i 's/\bcompileSdkVersion [0-9][0-9]*/compileSdkVersion 35/g' "$f"
-            sed -i 's/\btargetSdkVersion [0-9][0-9]*/targetSdkVersion 35/g'   "$f"
-            echo "--- After patch: $f ---"
-            grep -E "compileSdk|minSdk|targetSdk" "$f" || echo "(no SDK lines found)"
-          done
+          echo "--- build.gradle.kts after copy ---"
+          grep -E "compileSdk|minSdk|targetSdk|namespace|applicationId" \
+            /tmp/build/android/app/build.gradle.kts
 
       - name: Get Flutter packages
         timeout-minutes: 5
         working-directory: /tmp/build
         run: flutter pub get
 
-      # Capture full output so we can tail it on failure — errors always appear
-      # near the end of flutter/Gradle output, not the beginning.
       - name: Build debug APK
         id: build_apk
         timeout-minutes: 20
@@ -87,22 +69,17 @@ jobs:
           flutter build apk --debug 2>&1 | tee /tmp/build.log
           exit ${PIPESTATUS[0]}
 
-      # Separate step so it appears as its own expandable section in the UI.
-      # Ordered so the most useful info is at the BOTTOM (visible on mobile).
+      # Runs only on failure; ordered so the most useful info is at the BOTTOM
+      # (visible without scrolling up on a small screen).
       - name: Diagnose build failure
         if: steps.build_apk.outcome == 'failure'
         run: |
-          echo "=== Last 40 lines of build log ==="
-          tail -40 /tmp/build.log
+          echo "=== Last 50 lines of build log ==="
+          tail -50 /tmp/build.log
           echo ""
-          echo "=== Constraint / version errors (grep) ==="
+          echo "=== Constraint / AAR errors (grep) ==="
           grep -E "Dependency '|requires.*version|Execution failed for task|minSdk|compileSdk" \
             /tmp/build.log | head -40 || echo "(no specific patterns matched)"
-          echo ""
-          echo "=== Patched build.gradle(.kts) — scroll here to verify SDK values ==="
-          cat /tmp/build/android/app/build.gradle.kts 2>/dev/null \
-            || cat /tmp/build/android/app/build.gradle 2>/dev/null \
-            || echo "(file not found)"
           exit 1
 
       - name: List build output
