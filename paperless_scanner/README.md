@@ -37,7 +37,7 @@ flutter run
 
 | Concern | Package |
 |---|---|
-| Document scanning | `google_mlkit_document_scanner` |
+| Document scanning | `cunning_document_scanner` |
 | PDF generation | `pdf` + `printing` |
 | HTTP client | `http` |
 | Secure storage | `flutter_secure_storage` |

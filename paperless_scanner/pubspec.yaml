@@ -10,8 +10,10 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # ML Kit document scanner (edge detection, perspective correction, auto-capture)
-  google_mlkit_document_scanner: ^0.4.0
+  # Document scanner (edge detection, perspective correction, multi-page)
+  # — Android: Google ML Kit Document Scanner (wrapped)
+  # — iOS:     VisionKit VNDocumentCameraViewController (built-in to iOS 13+)
+  cunning_document_scanner: ^1.2.0
 
   # PDF generation
   pdf: ^3.10.8

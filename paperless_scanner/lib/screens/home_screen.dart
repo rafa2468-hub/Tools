@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:google_mlkit_document_scanner/google_mlkit_document_scanner.dart';
+import 'package:cunning_document_scanner/cunning_document_scanner.dart';
 import '../models/scan_session.dart';
 import '../services/storage_service.dart';
 import 'preview_screen.dart';
@@ -15,18 +15,10 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _storage = StorageService();
   bool _isScanning = false;
-  DocumentScanner? _scanner;
-
-  @override
-  void dispose() {
-    _scanner?.close();
-    super.dispose();
-  }
 
   Future<void> _startScan() async {
     if (_isScanning) return;
 
-    // Prompt to configure if not yet set up
     final configured = await _storage.isConfigured();
     if (!configured && mounted) {
       final go = await showDialog<bool>(
@@ -61,22 +53,15 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _isScanning = true);
 
     try {
-      _scanner?.close();
-      _scanner = DocumentScanner(
-        options: DocumentScannerOptions(
-          mode: ScannerMode.full,   // ML-enhanced: dewarping, enhancement
-          pageLimit: 20,
-          isGalleryImport: true,    // also allow picking from gallery
-        ),
+      final pictures = await CunningDocumentScanner.getPictures(
+        noOfPages: 20,
+        isGalleryImportAllowed: true,
       );
 
-      final result = await _scanner!.scanDocument();
-
-      final images = result.images ?? [];
-      if (images.isEmpty) return; // user cancelled
+      if (pictures == null || pictures.isEmpty) return; // user cancelled
 
       final session = ScanSession(
-        imagePaths: images,
+        imagePaths: pictures,
         createdAt: DateTime.now(),
       );
 
