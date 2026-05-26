@@ -52,8 +52,12 @@ jobs:
           sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>|' \
             /tmp/build/android/app/src/main/AndroidManifest.xml
           echo "--- build.gradle.kts after copy ---"
-          grep -E "compileSdk|minSdk|targetSdk|namespace|applicationId" \
+          grep -E "compileSdk|minSdk|targetSdk|namespace|applicationId|kotlinOptions|jvmTarget" \
             /tmp/build/android/app/build.gradle.kts
+          # Suppress Kotlin/Java JVM-target consistency check (turn ERROR → WARNING).
+          # Flutter's plugin sets Kotlin to JVM 17; Java compileOptions stays at 1.8.
+          echo "kotlin.jvm.target.validation.mode=WARNING" \
+            >> /tmp/build/android/gradle.properties
 
       - name: Get Flutter packages
         timeout-minutes: 5
