@@ -14,12 +14,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_1_8
     }
 
-    // Match JVM target to what Flutter's Gradle plugin configures internally (17).
-    // Uses the KGP 1.x API (valid through KGP 2.0 as a deprecated-but-functional path).
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     defaultConfig {
         applicationId = "com.paperlessscanner.paperless_scanner"
         minSdk = 29
