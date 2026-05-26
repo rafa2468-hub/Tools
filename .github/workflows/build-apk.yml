@@ -58,6 +58,22 @@ jobs:
           # Flutter's plugin sets Kotlin to JVM 17; Java compileOptions stays at 1.8.
           echo "kotlin.jvm.target.validation.mode=WARNING" \
             >> /tmp/build/android/gradle.properties
+          # Force ALL Android subprojects (Flutter plugins such as :printing) to
+          # compileSdk 35.  Plugins often ship with old compileSdkVersion values
+          # that fail checkDebugAarMetadata against newer AndroidX dependencies.
+          cat >> /tmp/build/android/build.gradle << 'GROOVY'
+
+subprojects {
+    afterEvaluate {
+        if (plugins.hasPlugin('com.android.library') ||
+                plugins.hasPlugin('com.android.application')) {
+            android {
+                compileSdkVersion 35
+            }
+        }
+    }
+}
+GROOVY
 
       - name: Get Flutter packages
         timeout-minutes: 5
