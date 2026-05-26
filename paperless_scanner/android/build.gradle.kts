@@ -7,7 +7,6 @@ plugins {
 android {
     namespace = "com.paperlessscanner.paperless_scanner"
     compileSdk = 35
-    ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8

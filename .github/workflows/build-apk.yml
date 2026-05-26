@@ -82,8 +82,13 @@ jobs:
           tail -50 /tmp/build.log
           echo ""
           echo "=== Constraint / AAR errors (grep) ==="
-          grep -E "Dependency '|requires.*version|Execution failed for task|error:|Error:|What went wrong|Where:|e: file" \
-            /tmp/build.log | head -40 || echo "(no specific patterns matched)"
+          grep -E "currently compiled against|compiled against version|requires.*compiled|minSdkVersion.*required" \
+            /tmp/build.log | head -20 || echo "(no specific patterns matched)"
+          echo ""
+          echo "=== First 10 failing dependencies ==="
+          grep -A 2 "^      [0-9]*\. Dependency" /tmp/build.log | head -60 \
+            || grep -A 2 "Dependency '.*' requires" /tmp/build.log | head -60 \
+            || echo "(no dependency failure patterns matched)"
           exit 1
 
       - name: List build output
