@@ -19,6 +19,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _tokenVisible = false;
   bool _isTesting = false;
   bool _isSaving = false;
+  bool _allowInsecure = false;
   String? _testResult;
   bool _testPassed = false;
 
@@ -38,9 +39,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _loadSaved() async {
     final url = await _storage.getServerUrl();
     final token = await _storage.getToken();
+    final allowInsecure = await _storage.getAllowInsecure();
     if (mounted) {
       _urlController.text = url ?? '';
       _tokenController.text = token ?? '';
+      setState(() => _allowInsecure = allowInsecure);
     }
   }
 
@@ -51,6 +54,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _storage.saveSettings(
       serverUrl: _urlController.text,
       token: _tokenController.text,
+      allowInsecure: _allowInsecure,
     );
 
     setState(() {
@@ -75,6 +79,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _storage.saveSettings(
       serverUrl: _urlController.text,
       token: _tokenController.text,
+      allowInsecure: _allowInsecure,
     );
     if (!mounted) return;
     setState(() => _isSaving = false);
@@ -154,7 +159,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 validator: (v) =>
                     (v == null || v.trim().isEmpty) ? 'Required' : null,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 8),
+
+              // ── Self-signed cert toggle ──────────────────────────────
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _allowInsecure,
+                onChanged: (v) => setState(() => _allowInsecure = v),
+                title: const Text('Allow self-signed certificates'),
+                subtitle: Text(
+                  'Enable for home labs with private CAs or self-signed TLS certs.',
+                  style: TextStyle(color: cs.onSurface.withOpacity(0.6)),
+                ),
+                secondary: Icon(
+                  _allowInsecure ? Icons.lock_open_outlined : Icons.lock_outline,
+                  color: _allowInsecure ? cs.tertiary : cs.primary,
+                ),
+              ),
+              const SizedBox(height: 16),
 
               // ── Test connection ──────────────────────────────────────
               OutlinedButton.icon(
