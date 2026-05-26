@@ -1,0 +1,53 @@
+// ── android/app/build.gradle ─────────────────────────────────────────────────
+// This is the app-level build.gradle. The key requirements for ML Kit
+// Document Scanner are:
+//   - minSdkVersion 21 (Android 5.0+)
+//   - Google Play Services available on device
+
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace "com.example.paperless_scanner"
+    compileSdk flutter.compileSdkVersion
+    ndkVersion flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    defaultConfig {
+        applicationId "com.example.paperless_scanner"
+        // ML Kit Document Scanner requires API 21+
+        minSdk 21
+        targetSdk flutter.targetSdkVersion
+        versionCode flutter.versionCode
+        versionName flutter.versionName
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+flutter {
+    source "../.."
+}
+
+dependencies {
+    // ML Kit Document Scanner (pulled transitively via Flutter plugin,
+    // listed here for clarity and version pinning)
+    implementation "com.google.android.gms:play-services-mlkit-document-scanner:16.0.0-beta1"
+}
