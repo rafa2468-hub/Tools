@@ -973,13 +973,15 @@ const state = {
   source: 'local',     // 'local' | 'jellyfin'
   search: '',          // lowercased current search query (empty = no filter)
   sleep: { expiresAt: 0, intervalId: 0 },
-  playlists: [],       // local-only; loaded from PLAYLIST_STORE on boot
+  playlists: [],       // reference to state.local.playlists or state.jellyfin.playlists
   currentPlaylist: null, // playlist record when view === 'playlist-detail'
-  local: { tracks: [] },
+  local: { tracks: [], playlists: [] },
   jellyfin: {
     tracks: [],
+    playlists: [],
     config: { serverUrl: '', accessToken: '', userId: '', username: '', deviceId: '' },
     lastSync: 0,
+    playlistsLoaded: false,
     syncing: false,
   },
 };
@@ -1324,6 +1326,115 @@ const JF = {
     });
     return `${this.trimUrl(config.serverUrl)}/Audio/${itemId}/universal?${params}`;
   },
+
+  /* ---- Jellyfin playlists ---- */
+  async fetchPlaylists(config) {
+    const params = new URLSearchParams({
+      IncludeItemTypes: 'Playlist',
+      Recursive: 'true',
+      Fields: 'ChildCount',
+      SortBy: 'SortName',
+      SortOrder: 'Ascending',
+      Limit: '1000',
+    });
+    const url = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/Items?${params}`;
+    const res = await fetch(url, {
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Playlists fetch failed (HTTP ${res.status})`);
+    const json = await res.json();
+    // Only audio playlists make sense here. Jellyfin sometimes returns a
+    // mixed MediaType, sometimes not — accept both null and 'Audio'.
+    return (json.Items || []).filter(p => !p.MediaType || p.MediaType === 'Audio');
+  },
+  async fetchPlaylistItems(config, playlistId) {
+    const params = new URLSearchParams({
+      UserId: config.userId,
+      Fields: 'AlbumId,Album,Artists,AlbumArtist,RunTimeTicks',
+      Limit: '5000',
+    });
+    const url = `${this.trimUrl(config.serverUrl)}/Playlists/${playlistId}/Items?${params}`;
+    const res = await fetch(url, {
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Playlist items fetch failed (HTTP ${res.status})`);
+    const json = await res.json();
+    return json.Items || [];
+  },
+  async createPlaylistOnServer(config, name, trackItemIds) {
+    const params = new URLSearchParams({
+      Name: name,
+      UserId: config.userId,
+      MediaType: 'Audio',
+    });
+    if (trackItemIds && trackItemIds.length) params.set('Ids', trackItemIds.join(','));
+    const url = `${this.trimUrl(config.serverUrl)}/Playlists?${params}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Create playlist failed (HTTP ${res.status})`);
+    return await res.json(); // { Id: 'playlistId' }
+  },
+  async addToServerPlaylist(config, playlistId, trackItemIds) {
+    if (!trackItemIds || !trackItemIds.length) return;
+    const params = new URLSearchParams({
+      Ids: trackItemIds.join(','),
+      UserId: config.userId,
+    });
+    const url = `${this.trimUrl(config.serverUrl)}/Playlists/${playlistId}/Items?${params}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Add to playlist failed (HTTP ${res.status})`);
+  },
+  async removeFromServerPlaylist(config, playlistId, entryIds) {
+    if (!entryIds || !entryIds.length) return;
+    const params = new URLSearchParams({ EntryIds: entryIds.join(',') });
+    const url = `${this.trimUrl(config.serverUrl)}/Playlists/${playlistId}/Items?${params}`;
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Remove from playlist failed (HTTP ${res.status})`);
+  },
+  async movePlaylistItemOnServer(config, playlistId, entryId, newIndex) {
+    const url = `${this.trimUrl(config.serverUrl)}/Playlists/${playlistId}/Items/${entryId}/Move/${newIndex}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Move playlist item failed (HTTP ${res.status})`);
+  },
+  async deletePlaylistOnServer(config, playlistId) {
+    const url = `${this.trimUrl(config.serverUrl)}/Items/${playlistId}`;
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Delete playlist failed (HTTP ${res.status})`);
+  },
+  async renamePlaylistOnServer(config, playlistId, newName) {
+    // Jellyfin's item-update endpoint expects the full BaseItemDto. Fetch first.
+    const getUrl = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/Items/${playlistId}`;
+    const getRes = await fetch(getUrl, {
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!getRes.ok) throw new Error(`Fetch playlist failed (HTTP ${getRes.status})`);
+    const item = await getRes.json();
+    item.Name = newName;
+    const postUrl = `${this.trimUrl(config.serverUrl)}/Items/${playlistId}`;
+    const postRes = await fetch(postUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId),
+      },
+      body: JSON.stringify(item),
+    });
+    if (!postRes.ok) throw new Error(`Rename playlist failed (HTTP ${postRes.status})`);
+  },
 };
 
 function jfItemToTrack(item, config) {
@@ -1364,12 +1475,34 @@ async function syncJellyfin(showFeedback) {
     const tracks = items.map(it => jfItemToTrack(it, cfg));
     state.jellyfin.tracks = tracks;
     state.jellyfin.lastSync = Date.now();
+    // Re-fetch playlists on a manual refresh too; track ids may have shifted
+    // and new server-side playlists may have been created elsewhere.
+    try {
+      const pls = await JF.fetchPlaylists(cfg);
+      state.jellyfin.playlists.length = 0;
+      for (const it of pls) {
+        state.jellyfin.playlists.push({
+          id: it.Id,
+          name: it.Name || '(unnamed)',
+          trackIds: [],
+          entryIds: [],
+          trackCount: typeof it.ChildCount === 'number' ? it.ChildCount : 0,
+          source: 'jellyfin',
+          loaded: false,
+        });
+      }
+      state.jellyfin.playlistsLoaded = true;
+    } catch (e) {
+      console.warn('Jellyfin playlists refresh failed', e);
+    }
     if (state.source === 'jellyfin') {
       state.tracks = state.jellyfin.tracks;
+      state.playlists = state.jellyfin.playlists;
       // Reset current view + playback bookkeeping
       state.currentIndex = -1;
       state.queue = [];
       state.queuePos = -1;
+      state.currentPlaylist = null;
       render();
     }
     if (showFeedback) showToast(`Loaded ${tracks.length} Jellyfin track${tracks.length === 1 ? '' : 's'}`);
@@ -1401,6 +1534,7 @@ async function setActiveSource(nextSource, opts) {
   state.queuePos = -1;
   state.view = 'albums';
   state.currentAlbum = null;
+  state.currentPlaylist = null;
   setNowPlayingArt(null);
   titleEl.textContent = 'No track loaded';
 
@@ -1409,8 +1543,10 @@ async function setActiveSource(nextSource, opts) {
 
   if (nextSource === 'local') {
     state.tracks = state.local.tracks;
+    state.playlists = state.local.playlists;
     subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
   } else if (nextSource === 'jellyfin') {
+    state.playlists = state.jellyfin.playlists;
     if (!state.jellyfin.config.accessToken) {
       state.tracks = [];
       subtitleEl.textContent = 'Tap the gear to connect to Jellyfin';
@@ -1428,6 +1564,27 @@ async function setActiveSource(nextSource, opts) {
       if (!ok) {
         subtitleEl.textContent = 'Could not reach Jellyfin';
         return;
+      }
+    }
+    // Fetch playlists once per session (Refresh re-fetches).
+    if (!state.jellyfin.playlistsLoaded) {
+      try {
+        const items = await JF.fetchPlaylists(state.jellyfin.config);
+        state.jellyfin.playlists.length = 0;
+        for (const it of items) {
+          state.jellyfin.playlists.push({
+            id: it.Id,
+            name: it.Name || '(unnamed)',
+            trackIds: [],
+            entryIds: [],
+            trackCount: typeof it.ChildCount === 'number' ? it.ChildCount : 0,
+            source: 'jellyfin',
+            loaded: false,
+          });
+        }
+        state.jellyfin.playlistsLoaded = true;
+      } catch (e) {
+        console.warn('Jellyfin playlists fetch failed', e);
       }
     }
     state.tracks = state.jellyfin.tracks;
@@ -1542,10 +1699,6 @@ function render() {
   // Hide tabs on detail views (replaced by back-row)
   const isDetail = state.view === 'album-detail' || state.view === 'playlist-detail';
   tabs.style.display = isDetail ? 'none' : '';
-  // Playlists are local-only
-  const tabPlaylists = document.getElementById('tab-playlists');
-  if (tabPlaylists) tabPlaylists.hidden = state.source !== 'local';
-
   if (state.view === 'playlists') { renderPlaylistsList(); return; }
   if (state.view === 'playlist-detail') { renderPlaylistDetail(); return; }
 
@@ -1645,13 +1798,21 @@ function renderPlaylistsList() {
     ? all.filter(p => p.name.toLowerCase().includes(state.search))
     : all;
   const cards = filtered.map(p => {
-    const indices = playlistTracks(p);
+    // For Jellyfin playlists that haven't been opened yet, trust the server's
+    // ChildCount instead of trying to resolve trackIds (which are empty until
+    // the playlist is loaded on demand).
+    let count;
+    if (p.source === 'jellyfin' && !p.loaded) {
+      count = p.trackCount || 0;
+    } else {
+      count = playlistTracks(p).length;
+    }
     return `
       <div class="track" data-playlist-id="${p.id}">
         <span class="track-num">♬</span>
         <div class="track-info">
           <div class="track-name">${escapeHtml(p.name)}</div>
-          <div class="track-album-sub">${indices.length} track${indices.length === 1 ? '' : 's'}</div>
+          <div class="track-album-sub">${count} track${count === 1 ? '' : 's'}</div>
         </div>
       </div>
     `;
@@ -1684,10 +1845,12 @@ function renderPlaylistDetail() {
     return;
   }
   state.currentPlaylist = p; // refresh reference
-  const allIndices = playlistTracks(p);
+  const isLoading = p.source === 'jellyfin' && !p.loaded;
+  const allIndices = isLoading ? [] : playlistTracks(p);
   const indices = state.search
     ? allIndices.filter(i => trackMatchesSearch(state.tracks[i]))
     : allIndices;
+  const totalCount = isLoading ? (p.trackCount || 0) : allIndices.length;
   const header = `
     <div class="back-row">
       <button class="back-btn" id="back" type="button" aria-label="Back">
@@ -1695,7 +1858,7 @@ function renderPlaylistDetail() {
       </button>
       <div class="back-title">
         <h2>${escapeHtml(p.name)}</h2>
-        <div class="meta">${allIndices.length} track${allIndices.length === 1 ? '' : 's'}${state.search && indices.length !== allIndices.length ? ` · ${indices.length} shown` : ''}</div>
+        <div class="meta">${totalCount} track${totalCount === 1 ? '' : 's'}${state.search && indices.length !== allIndices.length ? ` · ${indices.length} shown` : ''}</div>
       </div>
       <button class="play-album-btn" id="play-playlist" type="button">
         <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play
@@ -1705,9 +1868,11 @@ function renderPlaylistDetail() {
       </button>
     </div>
   `;
-  const list = indices.length > 0
-    ? indices.map((i, n) => playlistTrackRow(i, allIndices.indexOf(i))).join('')
-    : '<div class="empty">' + (state.search ? 'No matches.' : 'Empty playlist. Add tracks from the Albums or Songs tabs.') + '</div>';
+  const list = isLoading
+    ? '<div class="empty">Loading…</div>'
+    : (indices.length > 0
+        ? indices.map((i, n) => playlistTrackRow(i, allIndices.indexOf(i))).join('')
+        : '<div class="empty">' + (state.search ? 'No matches.' : 'Empty playlist. Add tracks from the Albums or Songs tabs.') + '</div>');
   view.innerHTML = header + list;
 }
 
@@ -1944,6 +2109,8 @@ async function handleSettingsAction(act) {
     await JF.logout(state.jellyfin.config);
     clearJellyfinConfig();
     state.jellyfin.tracks = [];
+    state.jellyfin.playlists.length = 0;
+    state.jellyfin.playlistsLoaded = false;
     state.jellyfin.lastSync = 0;
     if (state.source === 'jellyfin') {
       await setActiveSource('local');
@@ -2117,15 +2284,36 @@ async function persistTrack(t) {
   }
 }
 
-/* ---------- Playlists ---------- */
+/* ---------- Playlists (source-aware dispatch) ---------- */
 async function createPlaylist(name) {
   const trimmed = (name || '').trim();
   if (!trimmed) return null;
-  const record = { name: trimmed, trackIds: [], createdAt: Date.now() };
+  if (state.source === 'jellyfin') {
+    try {
+      const result = await JF.createPlaylistOnServer(state.jellyfin.config, trimmed, []);
+      const record = {
+        id: result.Id,
+        name: trimmed,
+        trackIds: [],
+        entryIds: [],
+        trackCount: 0,
+        source: 'jellyfin',
+        loaded: true,
+      };
+      state.jellyfin.playlists.push(record);
+      return record;
+    } catch (e) {
+      console.error('Jellyfin create playlist failed', e);
+      showToast('Could not create playlist');
+      return null;
+    }
+  }
+  // Local
+  const record = { name: trimmed, trackIds: [], createdAt: Date.now(), source: 'local' };
   try {
     const id = await idbAddPlaylist(state.db, record);
     record.id = id;
-    state.playlists.push(record);
+    state.local.playlists.push(record);
     return record;
   } catch (e) {
     console.error('Create playlist failed', e);
@@ -2134,15 +2322,60 @@ async function createPlaylist(name) {
   }
 }
 
-async function addTrackToPlaylist(playlist, localTrackId) {
-  if (playlist.trackIds.includes(localTrackId)) return false;
-  playlist.trackIds.push(localTrackId);
+async function ensurePlaylistLoaded(playlist) {
+  if (playlist.source !== 'jellyfin' || playlist.loaded) return;
+  try {
+    const items = await JF.fetchPlaylistItems(state.jellyfin.config, playlist.id);
+    playlist.trackIds = items.map(it => 'jf:' + it.Id);
+    playlist.entryIds = items.map(it => it.PlaylistItemId);
+    playlist.trackCount = items.length;
+    playlist.loaded = true;
+  } catch (e) {
+    console.error('Load playlist items failed', e);
+    showToast('Could not load playlist');
+  }
+}
+
+async function addTrackToPlaylist(playlist, trackId) {
+  if (playlist.trackIds.includes(trackId)) return false;
+  if (playlist.source === 'jellyfin') {
+    // Resolve trackId 'jf:xxx' back to raw Jellyfin item id
+    const rawId = typeof trackId === 'string' && trackId.startsWith('jf:') ? trackId.slice(3) : trackId;
+    try {
+      await JF.addToServerPlaylist(state.jellyfin.config, playlist.id, [rawId]);
+      // Refetch items to get the new PlaylistItemId for the added entry
+      const items = await JF.fetchPlaylistItems(state.jellyfin.config, playlist.id);
+      playlist.trackIds = items.map(it => 'jf:' + it.Id);
+      playlist.entryIds = items.map(it => it.PlaylistItemId);
+      playlist.trackCount = items.length;
+      return true;
+    } catch (e) {
+      console.error('Jellyfin add failed', e);
+      return false;
+    }
+  }
+  // Local
+  playlist.trackIds.push(trackId);
   try { await idbPutPlaylist(state.db, playlist); return true; }
   catch (e) { console.error(e); return false; }
 }
 
 async function removeTrackFromPlaylist(playlist, positionInPlaylist) {
   if (positionInPlaylist < 0 || positionInPlaylist >= playlist.trackIds.length) return;
+  if (playlist.source === 'jellyfin') {
+    const entryId = playlist.entryIds[positionInPlaylist];
+    if (!entryId) return;
+    try {
+      await JF.removeFromServerPlaylist(state.jellyfin.config, playlist.id, [entryId]);
+      playlist.trackIds.splice(positionInPlaylist, 1);
+      playlist.entryIds.splice(positionInPlaylist, 1);
+      playlist.trackCount = playlist.trackIds.length;
+    } catch (e) {
+      console.error('Jellyfin remove failed', e);
+      showToast('Could not remove from playlist');
+    }
+    return;
+  }
   playlist.trackIds.splice(positionInPlaylist, 1);
   try { await idbPutPlaylist(state.db, playlist); } catch (e) { console.error(e); }
 }
@@ -2150,6 +2383,21 @@ async function removeTrackFromPlaylist(playlist, positionInPlaylist) {
 async function movePlaylistTrack(playlist, fromPos, toPos) {
   if (fromPos < 0 || fromPos >= playlist.trackIds.length) return;
   if (toPos < 0 || toPos >= playlist.trackIds.length) return;
+  if (playlist.source === 'jellyfin') {
+    const entryId = playlist.entryIds[fromPos];
+    if (!entryId) return;
+    try {
+      await JF.movePlaylistItemOnServer(state.jellyfin.config, playlist.id, entryId, toPos);
+      const [tid] = playlist.trackIds.splice(fromPos, 1);
+      const [eid] = playlist.entryIds.splice(fromPos, 1);
+      playlist.trackIds.splice(toPos, 0, tid);
+      playlist.entryIds.splice(toPos, 0, eid);
+    } catch (e) {
+      console.error('Jellyfin move failed', e);
+      showToast('Could not reorder');
+    }
+    return;
+  }
   const [item] = playlist.trackIds.splice(fromPos, 1);
   playlist.trackIds.splice(toPos, 0, item);
   try { await idbPutPlaylist(state.db, playlist); } catch (e) { console.error(e); }
@@ -2158,13 +2406,32 @@ async function movePlaylistTrack(playlist, fromPos, toPos) {
 async function renamePlaylist(playlist, newName) {
   const trimmed = (newName || '').trim();
   if (!trimmed || trimmed === playlist.name) return;
+  if (playlist.source === 'jellyfin') {
+    try {
+      await JF.renamePlaylistOnServer(state.jellyfin.config, playlist.id, trimmed);
+      playlist.name = trimmed;
+    } catch (e) {
+      console.error('Jellyfin rename failed', e);
+      showToast('Could not rename playlist');
+    }
+    return;
+  }
   playlist.name = trimmed;
   try { await idbPutPlaylist(state.db, playlist); } catch (e) { console.error(e); }
 }
 
 async function deletePlaylist(playlistId) {
-  try { await idbDeletePlaylist(state.db, playlistId); } catch (e) { console.error(e); }
-  state.playlists = state.playlists.filter(p => p.id !== playlistId);
+  const list = state.playlists;
+  const idx = list.findIndex(p => p.id === playlistId);
+  if (idx < 0) return;
+  const playlist = list[idx];
+  if (playlist.source === 'jellyfin') {
+    try { await JF.deletePlaylistOnServer(state.jellyfin.config, playlistId); }
+    catch (e) { console.error(e); showToast('Could not delete'); return; }
+  } else {
+    try { await idbDeletePlaylist(state.db, playlistId); } catch (e) { console.error(e); }
+  }
+  list.splice(idx, 1);
 }
 
 /* ---------- Playback ---------- */
@@ -2525,10 +2792,13 @@ async function restoreLibrary() {
       }
     }
     try {
-      state.playlists = await idbAllPlaylists(state.db);
+      const loaded = await idbAllPlaylists(state.db);
+      // Tag with source for the dispatcher
+      for (const p of loaded) p.source = 'local';
+      state.local.playlists.length = 0;
+      for (const p of loaded) state.local.playlists.push(p);
     } catch (e) {
       console.warn('Could not load playlists', e);
-      state.playlists = [];
     }
     await setActiveSource(state.source, { force: true });
     if (state.source === 'local' && state.tracks.length > 0) {
@@ -2753,13 +3023,18 @@ view.addEventListener('click', e => {
   // Playlist row in playlists list
   const plRow = e.target.closest('[data-playlist-id]');
   if (plRow) {
-    const pid = Number(plRow.dataset.playlistId);
+    const raw = plRow.dataset.playlistId;
+    // Local playlists use integer IDB ids; Jellyfin uses string GUIDs.
+    const pid = /^\d+$/.test(raw) ? Number(raw) : raw;
     const p = state.playlists.find(p => p.id === pid);
     if (p) {
       state.currentPlaylist = p;
       state.view = 'playlist-detail';
       view.scrollTop = 0;
       render();
+      if (p.source === 'jellyfin' && !p.loaded) {
+        ensurePlaylistLoaded(p).then(() => render());
+      }
     }
     return;
   }
@@ -2851,9 +3126,15 @@ async function handleAddToPlaylistAction(playlistTarget, kind, payload) {
     playlist = await createPlaylist(name);
     if (!playlist) { closeSheet(); return; }
   } else {
-    const id = Number(playlistTarget);
+    // Local playlists use integer IDB ids; Jellyfin uses string GUIDs.
+    const id = /^\d+$/.test(playlistTarget) ? Number(playlistTarget) : playlistTarget;
     playlist = state.playlists.find(p => p.id === id);
     if (!playlist) { closeSheet(); return; }
+    // For Jellyfin playlists we need entryIds for future remove/reorder, so
+    // make sure the items are loaded before we start adding.
+    if (playlist.source === 'jellyfin' && !playlist.loaded) {
+      await ensurePlaylistLoaded(playlist);
+    }
   }
   let added = 0, skipped = 0;
   if (kind === 'track') {
@@ -3098,6 +3379,7 @@ applyRepeatVisual();
 loadJellyfinConfig();
 loadSavedSource();
 state.tracks = state.local.tracks;
+state.playlists = state.local.playlists;
 applySourceUI();
 document.getElementById('lib-footer').textContent = `Music Player v${APP_VERSION}`;
 restoreLibrary();
