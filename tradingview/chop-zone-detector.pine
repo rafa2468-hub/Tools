@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 indicator("Chop Zone Detector [No-Trade Zones]", shorttitle = "Chop Zones", overlay = true, max_boxes_count = 250, max_labels_count = 250)
 
 // ════════════════════════════════════════════════════════════════════

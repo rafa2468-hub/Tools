@@ -1,6 +1,6 @@
 # Chop Zone Detector — TradingView Indicator
 
-A Pine Script v5 overlay indicator that identifies choppy, range-bound price
+A Pine Script v6 overlay indicator that identifies choppy, range-bound price
 action and shades it on the chart as a **no-trade zone**, so you stop selling
 into support and buying into resistance during consolidation.
 
