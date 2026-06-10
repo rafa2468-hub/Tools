@@ -1,0 +1,147 @@
+//@version=5
+indicator("Chop Zone Detector [No-Trade Zones]", shorttitle = "Chop Zones", overlay = true, max_boxes_count = 250, max_labels_count = 250)
+
+// ════════════════════════════════════════════════════════════════════
+//  Identifies sideways / choppy price action and shades it on the
+//  chart as a "no-trade zone" box. The top of the box is the local
+//  resistance, the bottom is the local support. Triangle warnings
+//  fire when price pushes into either edge of an active chop zone —
+//  exactly the spots where buying into resistance or selling into
+//  support gets punished.
+//
+//  Detection combines two independent regime filters:
+//    1. Choppiness Index  — above ~61.8 means price is consolidating
+//    2. ADX               — below ~22 means there is no real trend
+// ════════════════════════════════════════════════════════════════════
+
+// ── Inputs: detection ───────────────────────────────────────────────
+grpDetect  = "Detection"
+chopLen    = input.int(14,     "Choppiness Index length",                 minval = 2,                group = grpDetect)
+chopThresh = input.float(61.8, "Choppiness threshold (above = choppy)",   minval = 40, maxval = 80,  group = grpDetect)
+adxLen     = input.int(14,     "ADX length",                              minval = 2,                group = grpDetect)
+adxThresh  = input.float(20,   "ADX threshold (below = no trend)",        minval = 10, maxval = 40,  group = grpDetect)
+sigMode    = input.string("Both agree", "Signal mode", options = ["Both agree", "Either one"],       group = grpDetect,
+     tooltip = "Both agree = fewer, higher-confidence zones. Either one = catches more chop but flags more borderline action.")
+minBars    = input.int(4, "Bars to confirm a chop zone",  minval = 1, group = grpDetect,
+     tooltip = "Consecutive choppy bars required before a zone is drawn. Higher = fewer false zones, but later warning.")
+graceBars  = input.int(3, "Bars to confirm chop has ended", minval = 1, group = grpDetect,
+     tooltip = "Trending bars required before a zone is closed. Prevents a single breakout bar from ending the zone too early.")
+
+// ── Inputs: higher timeframes ───────────────────────────────────────
+grpHtf     = "Higher timeframes"
+useHtf     = input.bool(true, "Check higher timeframes for chop", group = grpHtf,
+     tooltip = "Runs the same chop detection on two higher timeframes and shows the result in the dashboard. A clean entry chart inside HTF chop is still a no-trade.")
+htf1       = input.timeframe("11", "Higher timeframe 1", group = grpHtf)
+htf2       = input.timeframe("60", "Higher timeframe 2", group = grpHtf)
+
+// ── Inputs: display ─────────────────────────────────────────────────
+grpDisp    = "Display"
+showBoxes  = input.bool(true,  "Draw chop zone boxes",                    group = grpDisp)
+showBg     = input.bool(true,  "Tint background while chop is active",    group = grpDisp)
+showEdges  = input.bool(true,  "Show edge warnings (don't fade S/R)",     group = grpDisp)
+showDash   = input.bool(true,  "Show status dashboard",                   group = grpDisp)
+edgePct    = input.float(20,   "Edge warning band (% of zone height)",    minval = 5, maxval = 50, group = grpDisp) / 100
+zoneColor  = input.color(color.new(color.orange, 80), "Zone fill",        group = grpDisp)
+edgeColor  = input.color(color.new(color.orange, 40), "Zone border",      group = grpDisp)
+
+// ── Regime metrics ──────────────────────────────────────────────────
+f_regime() =>
+    atrSum  = math.sum(ta.tr(true), chopLen)
+    hhll    = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
+    ci      = hhll > 0 ? 100 * math.log10(atrSum / hhll) / math.log10(chopLen) : na
+    [_, _, ax] = ta.dmi(adxLen, adxLen)
+    cSig    = ci > chopThresh
+    aSig    = ax < adxThresh
+    choppy  = sigMode == "Both agree" ? (cSig and aSig) : (cSig or aSig)
+    [ci, ax, cSig, aSig, choppy]
+
+[chopIdx, adxVal, chopSignal, adxSignal, isChoppy] = f_regime()
+
+// Same detection on the higher timeframes (dashboard only — boxes stay on the chart TF)
+[_, _, _, _, htf1Choppy] = request.security(syminfo.tickerid, htf1, f_regime(), barmerge.gaps_off, barmerge.lookahead_off)
+[_, _, _, _, htf2Choppy] = request.security(syminfo.tickerid, htf2, f_regime(), barmerge.gaps_off, barmerge.lookahead_off)
+
+// ── Zone state machine ──────────────────────────────────────────────
+var bool inZone    = false
+var int  chopCount = 0
+var int  calmCount = 0
+var box  zone      = na
+
+zoneStarted = false
+zoneEnded   = false
+
+if isChoppy
+    chopCount += 1
+    calmCount := 0
+else
+    calmCount += 1
+
+if not inZone
+    if chopCount >= minBars
+        inZone      := true
+        zoneStarted := true
+        if showBoxes
+            // Backfill the box to where the chop actually began
+            zone := box.new(bar_index - chopCount + 1, ta.highest(high, chopCount), bar_index, ta.lowest(low, chopCount), border_color = edgeColor, border_width = 1, bgcolor = zoneColor)
+else
+    if isChoppy and not na(zone)
+        // Extend the zone and let support/resistance widen with price
+        box.set_right(zone, bar_index)
+        box.set_top(zone, math.max(box.get_top(zone), high))
+        box.set_bottom(zone, math.min(box.get_bottom(zone), low))
+    if calmCount >= graceBars
+        inZone    := false
+        zoneEnded := true
+        zone      := na
+
+if not isChoppy
+    chopCount := 0
+
+// ── Edge warnings: don't buy resistance, don't sell support ─────────
+zTop    = inZone and not na(zone) ? box.get_top(zone) : na
+zBot    = inZone and not na(zone) ? box.get_bottom(zone) : na
+zHeight = zTop - zBot
+nearRes = showEdges and inZone and not na(zHeight) and zHeight > 0 and close >= zTop - zHeight * edgePct
+nearSup = showEdges and inZone and not na(zHeight) and zHeight > 0 and close <= zBot + zHeight * edgePct
+
+plotshape(nearRes, "At chop resistance — don't buy",  shape.triangledown, location.abovebar, color.new(color.red, 0),   size = size.tiny)
+plotshape(nearSup, "At chop support — don't sell",    shape.triangleup,   location.belowbar, color.new(color.green, 0), size = size.tiny)
+
+// ── Background tint + zone label ────────────────────────────────────
+bgcolor(showBg and inZone ? color.new(color.orange, 90) : na, title = "Chop background")
+
+if zoneStarted and showBoxes
+    label.new(bar_index, high, "CHOP", style = label.style_label_down, color = color.new(color.orange, 20), textcolor = color.white, size = size.small)
+
+// ── Dashboard ───────────────────────────────────────────────────────
+htfWarning = useHtf and (htf1Choppy or htf2Choppy)
+
+f_tfLabel(tf) =>
+    sec = timeframe.in_seconds(tf)
+    sec % 3600 == 0 ? str.tostring(sec / 3600) + "h" : sec % 60 == 0 ? str.tostring(sec / 60) + "m" : tf
+
+var table dash = table.new(position.top_right, 2, 5, border_width = 1)
+if showDash and barstate.islast
+    regimeTxt = inZone ? "CHOP — STAND ASIDE" : htfWarning ? "CAUTION — HTF CHOP" : "TRADEABLE"
+    regimeCol = inZone ? color.new(color.red, 20) : htfWarning ? color.new(color.orange, 20) : color.new(color.green, 20)
+    hdrCol    = color.new(color.gray, 30)
+    table.cell(dash, 0, 0, "Regime", text_color = color.white, bgcolor = hdrCol, text_size = size.small)
+    table.cell(dash, 1, 0, regimeTxt, text_color = color.white, bgcolor = regimeCol, text_size = size.small)
+    table.cell(dash, 0, 1, "Choppiness", text_color = color.white, bgcolor = hdrCol, text_size = size.small)
+    table.cell(dash, 1, 1, str.tostring(chopIdx, "#.#") + " / " + str.tostring(chopThresh, "#.#"), text_color = color.white, bgcolor = chopSignal ? color.new(color.red, 50) : color.new(color.green, 50), text_size = size.small)
+    table.cell(dash, 0, 2, "ADX", text_color = color.white, bgcolor = hdrCol, text_size = size.small)
+    table.cell(dash, 1, 2, str.tostring(adxVal, "#.#") + " / " + str.tostring(adxThresh, "#.#"), text_color = color.white, bgcolor = adxSignal ? color.new(color.red, 50) : color.new(color.green, 50), text_size = size.small)
+    if useHtf
+        table.cell(dash, 0, 3, f_tfLabel(htf1), text_color = color.white, bgcolor = hdrCol, text_size = size.small)
+        table.cell(dash, 1, 3, htf1Choppy ? "CHOP" : "CLEAR", text_color = color.white, bgcolor = htf1Choppy ? color.new(color.red, 50) : color.new(color.green, 50), text_size = size.small)
+        table.cell(dash, 0, 4, f_tfLabel(htf2), text_color = color.white, bgcolor = hdrCol, text_size = size.small)
+        table.cell(dash, 1, 4, htf2Choppy ? "CHOP" : "CLEAR", text_color = color.white, bgcolor = htf2Choppy ? color.new(color.red, 50) : color.new(color.green, 50), text_size = size.small)
+
+// ── Alerts ──────────────────────────────────────────────────────────
+alertcondition(zoneStarted,                 "Chop zone started",        "Chop zone started on {{ticker}} {{interval}} — stand aside.")
+alertcondition(zoneEnded,                   "Chop zone ended",          "Chop zone ended on {{ticker}} {{interval}} — trend conditions returning.")
+alertcondition(nearRes and not nearRes[1],  "Price at chop resistance", "{{ticker}} {{interval}}: price is at the TOP of a chop zone — don't buy into resistance.")
+alertcondition(nearSup and not nearSup[1],  "Price at chop support",    "{{ticker}} {{interval}}: price is at the BOTTOM of a chop zone — don't sell into support.")
+
+allTfChoppy = inZone and useHtf and htf1Choppy and htf2Choppy
+alertcondition(allTfChoppy and not allTfChoppy[1], "Choppy on all timeframes", "{{ticker}}: entry AND both higher timeframes are choppy — full stand-aside conditions.")
