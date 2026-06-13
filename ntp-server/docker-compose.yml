@@ -1,0 +1,14 @@
+services:
+  ntp-server:
+    build: .
+    image: ntp-server:latest
+    container_name: ntp-server
+    restart: unless-stopped
+    ports:
+      - "123:123/udp"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    user: "1000:1000"

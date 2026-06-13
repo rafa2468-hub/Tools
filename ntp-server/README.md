@@ -83,6 +83,81 @@ For each incoming client request the server:
 The "reference timestamp" (last time the local clock was set) is recorded
 once at startup.
 
+## Deploying on TrueNAS SCALE
+
+A `Dockerfile` and `docker-compose.yml` are included for running the
+server as a container on TrueNAS SCALE.
+
+### 1. Check that UDP/123 is free on the host
+
+TrueNAS SCALE itself runs `chronyd` for system time sync. It normally
+doesn't bind UDP/123, but verify before mapping the port:
+
+```sh
+ss -ulnp | grep :123
+```
+
+If something is already listening, either stop it (only if you understand
+the impact on the host's own time sync) or map a different host port for
+testing, e.g. `1230:123/udp`.
+
+### 2. Build the image
+
+Either build directly on the TrueNAS host (enable SSH under *System
+Settings > Services* and log in), or build on another machine and push to
+a registry (Docker Hub, GHCR, or a local registry) that the TrueNAS host
+can pull from.
+
+```sh
+cd ntp-server
+docker build -t ntp-server:latest .
+```
+
+The result is a `scratch`-based image containing only the ~1 MB static
+binary.
+
+### 3. Deploy as a Custom App
+
+In the TrueNAS SCALE UI: **Apps > Discover Apps > Custom App** (the exact
+label depends on your SCALE version).
+
+- **Image repository**: `ntp-server`, **tag**: `latest`
+- **Image pull policy**: `Never` (if you built the image locally on the
+  host) or `IfNotPresent`/`Always` if pulling from a registry
+- **Container entrypoint args** (optional, defaults shown):
+  `-a 0.0.0.0 -p 123 -s 1 -r LOCL`
+- **Port forwarding**: container port `123/udp` -> host port `123/udp`
+  (or `1230/udp` if testing alongside an existing service)
+- **Capabilities**: drop `ALL`, add `NET_BIND_SERVICE` (needed to bind
+  port 123 as a non-root user)
+- **User**: a non-root UID such as `1000:1000`
+- **Storage**: none required; the container is stateless
+
+The included `docker-compose.yml` mirrors this configuration if your
+SCALE version supports compose-based custom apps, or if you'd rather run
+it via `docker compose up -d` directly from a shell on the host.
+
+### 4. Test it
+
+From another machine on the network:
+
+```sh
+python3 - <<'EOF'
+import socket, struct, time
+NTP_DELTA = 2208988800
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(2)
+pkt = bytearray(48); pkt[0] = 0x23
+s.sendto(pkt, ("<truenas-ip>", 123))
+data, _ = s.recvfrom(48)
+secs = struct.unpack_from("!Q", data, 40)[0] >> 32
+print("server time:", time.ctime(secs - NTP_DELTA))
+EOF
+```
+
+or point a real NTP/SNTP client (`chronyd`, `ntpdate`, `w32tm`, etc.) at
+the TrueNAS host's IP.
+
 ## Limitations
 
 - IPv4 only.
