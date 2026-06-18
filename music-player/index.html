@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1517,21 +1517,37 @@ function jfItemToTrack(item, config) {
   };
 }
 
-async function syncJellyfin(showFeedback) {
+async function syncJellyfin(opts) {
+  opts = opts || {};
+  const feedback = !!opts.feedback;
+  const silent = !!opts.silent;       // no spinner, no error toast
+  const debounceMs = opts.debounceMs || 0;
+
   const cfg = state.jellyfin.config;
   if (!cfg.serverUrl || !cfg.accessToken || !cfg.userId) {
-    if (showFeedback) showToast('Not connected to Jellyfin');
+    if (feedback) showToast('Not connected to Jellyfin');
     return false;
   }
+  if (state.jellyfin.syncing) return false;
+  if (debounceMs > 0 && Date.now() - (state.jellyfin.lastSync || 0) < debounceMs) return false;
+
   state.jellyfin.syncing = true;
-  updateRefreshSpin(true);
+  if (!silent) updateRefreshSpin(true);
+
+  // Capture playback state before we swap the tracks array out from under it.
+  // We re-resolve by track id afterward so a refresh doesn't kill the queue.
+  const playingId = state.currentIndex >= 0 ? (state.tracks[state.currentIndex] || {}).id : null;
+  const queueIds = state.queue
+    .map(qi => (state.tracks[qi] || {}).id)
+    .filter(id => id != null);
+  const playlistDetailId = (state.currentPlaylist && !state.currentPlaylist.smart) ? state.currentPlaylist.id : null;
+  const wasOnFavorites = !!(state.currentPlaylist && state.currentPlaylist.smart);
+
   try {
     const items = await JF.fetchAllAudio(cfg);
     const tracks = items.map(it => jfItemToTrack(it, cfg));
     state.jellyfin.tracks = tracks;
     state.jellyfin.lastSync = Date.now();
-    // Re-fetch playlists on a manual refresh too; track ids may have shifted
-    // and new server-side playlists may have been created elsewhere.
     try {
       const pls = await JF.fetchPlaylists(cfg);
       state.jellyfin.playlists.length = 0;
@@ -1553,22 +1569,43 @@ async function syncJellyfin(showFeedback) {
     if (state.source === 'jellyfin') {
       state.tracks = state.jellyfin.tracks;
       state.playlists = state.jellyfin.playlists;
-      // Reset current view + playback bookkeeping
-      state.currentIndex = -1;
-      state.queue = [];
-      state.queuePos = -1;
-      state.currentPlaylist = null;
+      // Re-resolve playback state by id (handles new/removed tracks and
+      // re-orderings gracefully)
+      if (playingId != null) {
+        const newIdx = state.tracks.findIndex(t => t.id === playingId);
+        state.currentIndex = newIdx;
+      } else {
+        state.currentIndex = -1;
+      }
+      state.queue = queueIds
+        .map(id => state.tracks.findIndex(t => t.id === id))
+        .filter(i => i >= 0);
+      if (state.currentIndex >= 0) {
+        const pos = state.queue.indexOf(state.currentIndex);
+        state.queuePos = pos >= 0 ? pos : -1;
+      } else {
+        state.queuePos = -1;
+      }
+      // Re-resolve current playlist reference
+      if (playlistDetailId != null) {
+        const matched = state.playlists.find(p => p.id === playlistDetailId);
+        state.currentPlaylist = matched || null;
+        if (!matched && state.view === 'playlist-detail') state.view = 'playlists';
+      } else if (wasOnFavorites) {
+        state.currentPlaylist = favoritesSmartPlaylist();
+      }
+      updateFavoriteUI();
       render();
     }
-    if (showFeedback) showToast(`Loaded ${tracks.length} Jellyfin track${tracks.length === 1 ? '' : 's'}`);
+    if (feedback) showToast(`Loaded ${tracks.length} Jellyfin track${tracks.length === 1 ? '' : 's'}`);
     return true;
   } catch (err) {
     console.error('Jellyfin sync failed', err);
-    showToast(`Jellyfin: ${err.message || 'sync failed'}`);
+    if (!silent) showToast(`Jellyfin: ${err.message || 'sync failed'}`);
     return false;
   } finally {
     state.jellyfin.syncing = false;
-    updateRefreshSpin(false);
+    if (!silent) updateRefreshSpin(false);
   }
 }
 
@@ -1615,7 +1652,7 @@ async function setActiveSource(nextSource, opts) {
       subtitleEl.textContent = 'Loading your Jellyfin library…';
       render();
       applySourceUI();
-      const ok = await syncJellyfin(false);
+      const ok = await syncJellyfin({ feedback: false });
       if (!ok) {
         subtitleEl.textContent = 'Could not reach Jellyfin';
         return;
@@ -2243,7 +2280,7 @@ async function handleSettingsAction(act) {
   }
   if (act === 'refresh') {
     closeSheet();
-    await syncJellyfin(true);
+    await syncJellyfin({ feedback: true });
     return;
   }
   if (act === 'connect') {
@@ -3183,6 +3220,16 @@ audio.addEventListener('pause', () => {
   saveResume(true);
 });
 window.addEventListener('pagehide', () => saveResume(true));
+
+// When the app returns to the foreground, silently re-sync the Jellyfin
+// library so favourites toggled elsewhere and new tracks added on the server
+// show up without the user having to tap Refresh. Debounced to once per
+// minute and gated to Jellyfin source.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (state.source !== 'jellyfin') return;
+  syncJellyfin({ feedback: false, silent: true, debounceMs: 60000 });
+});
 audio.addEventListener('ended', () => nextTrack(true));
 audio.addEventListener('error', () => {
   showToast('Playback error — skipping');
@@ -3490,7 +3537,7 @@ document.getElementById('source-toggle').addEventListener('click', e => {
   setActiveSource(pill.dataset.src);
 });
 document.getElementById('settings-btn').addEventListener('click', openSettingsSheet);
-document.getElementById('jf-refresh').addEventListener('click', () => syncJellyfin(true));
+document.getElementById('jf-refresh').addEventListener('click', () => syncJellyfin({ feedback: true }));
 document.getElementById('favorite-btn').addEventListener('click', () => {
   if (state.currentIndex >= 0) toggleFavorite(state.currentIndex);
 });
