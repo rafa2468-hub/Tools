@@ -105,7 +105,23 @@
     align-items: center;
     text-align: center;
     gap: 14px;
+    position: relative;
   }
+  .fav-btn {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 6px;
+    cursor: pointer;
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+  }
+  .fav-btn svg { width: 22px; height: 22px; fill: currentColor; opacity: 0.7; }
+  .fav-btn.active { color: var(--danger); }
+  .fav-btn.active svg { opacity: 1; }
+  .fav-btn:active { transform: scale(0.92); }
   .artwork {
     width: min(58vw, 260px);
     aspect-ratio: 1 / 1;
@@ -762,6 +778,9 @@
       <p class="track-title" id="title">No track loaded</p>
       <p class="track-sub" id="subtitle">Tap "Add files" to load music</p>
     </div>
+    <button class="fav-btn" id="favorite-btn" type="button" aria-label="Favorite" hidden>
+      <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+    </button>
   </section>
 
   <div class="progress-wrap">
@@ -821,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1318,7 +1337,7 @@ const JF = {
     const params = new URLSearchParams({
       IncludeItemTypes: 'Audio',
       Recursive: 'true',
-      Fields: 'AlbumId,Album,Artists,AlbumArtist,ParentIndexNumber,IndexNumber,RunTimeTicks,Path',
+      Fields: 'AlbumId,Album,Artists,AlbumArtist,ParentIndexNumber,IndexNumber,RunTimeTicks,Path,UserData',
       SortBy: 'AlbumArtist,Album,ParentIndexNumber,IndexNumber,SortName',
       SortOrder: 'Ascending',
       Limit: '10000',
@@ -1377,7 +1396,7 @@ const JF = {
   async fetchPlaylistItems(config, playlistId) {
     const params = new URLSearchParams({
       UserId: config.userId,
-      Fields: 'AlbumId,Album,Artists,AlbumArtist,RunTimeTicks',
+      Fields: 'AlbumId,Album,Artists,AlbumArtist,RunTimeTicks,UserData',
       Limit: '5000',
     });
     const url = `${this.trimUrl(config.serverUrl)}/Playlists/${playlistId}/Items?${params}`;
@@ -1442,6 +1461,14 @@ const JF = {
     });
     if (!res.ok) throw new Error(`Delete playlist failed (HTTP ${res.status})`);
   },
+  async setFavorite(config, itemId, isFavorite) {
+    const url = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/FavoriteItems/${itemId}`;
+    const res = await fetch(url, {
+      method: isFavorite ? 'POST' : 'DELETE',
+      headers: { 'X-Emby-Authorization': this.authHeader(config.accessToken, config.deviceId) },
+    });
+    if (!res.ok) throw new Error(`Favorite update failed (HTTP ${res.status})`);
+  },
   async renamePlaylistOnServer(config, playlistId, newName) {
     // Jellyfin's item-update endpoint expects the full BaseItemDto. Fetch first.
     const getUrl = `${this.trimUrl(config.serverUrl)}/Users/${config.userId}/Items/${playlistId}`;
@@ -1486,6 +1513,7 @@ function jfItemToTrack(item, config) {
     parentIndexNumber: item.ParentIndexNumber || 0,
     durationSec: item.RunTimeTicks ? Math.round(item.RunTimeTicks / 1e7) : 0,
     tagsRead: true,
+    isFavorite: !!(item.UserData && item.UserData.IsFavorite),
   };
 }
 
@@ -1810,11 +1838,32 @@ function renderSongsList() {
 }
 
 function playlistTracks(playlist) {
-  // Resolve playlist trackIds to current state.tracks indices. Missing tracks
-  // (since clear / removal) are filtered out.
+  // Smart "Favorites" playlist on Jellyfin: built from track.isFavorite, not
+  // from a stored trackIds list.
+  if (playlist && playlist.id === '__favorites__') {
+    return state.tracks
+      .map((t, i) => t.isFavorite ? i : -1)
+      .filter(i => i >= 0);
+  }
+  // Regular playlist: resolve trackIds to current state.tracks indices.
+  // Missing tracks (since clear / removal) are filtered out.
   return playlist.trackIds
     .map(id => state.tracks.findIndex(t => t.id === id))
     .filter(i => i >= 0);
+}
+
+function favoritesSmartPlaylist() {
+  // Synthesized on the fly each render; not persisted.
+  const count = state.tracks.reduce((n, t) => n + (t.isFavorite ? 1 : 0), 0);
+  return {
+    id: '__favorites__',
+    name: 'Favorites',
+    source: 'jellyfin',
+    smart: true,
+    trackIds: [], // unused — playlistTracks() short-circuits on the id
+    trackCount: count,
+    loaded: true,
+  };
 }
 
 function renderPlaylistsList() {
@@ -1822,6 +1871,22 @@ function renderPlaylistsList() {
   const filtered = state.search
     ? all.filter(p => p.name.toLowerCase().includes(state.search))
     : all;
+  // Prepend the synthetic Favorites smart playlist on Jellyfin source.
+  let smartHtml = '';
+  if (state.source === 'jellyfin') {
+    const fav = favoritesSmartPlaylist();
+    if (!state.search || fav.name.toLowerCase().includes(state.search)) {
+      smartHtml = `
+        <div class="track" data-playlist-id="__favorites__" style="border-left-color: var(--danger)">
+          <span class="track-num" style="color:var(--danger)">♥</span>
+          <div class="track-info">
+            <div class="track-name">${fav.name}</div>
+            <div class="track-album-sub">${fav.trackCount} track${fav.trackCount === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+      `;
+    }
+  }
   const cards = filtered.map(p => {
     // For Jellyfin playlists that haven't been opened yet, trust the server's
     // ChildCount instead of trying to resolve trackIds (which are empty until
@@ -1848,21 +1913,26 @@ function renderPlaylistsList() {
       <div class="track-info"><div class="track-name" style="color: var(--accent-2)">New playlist</div></div>
     </div>
   `;
-  if (filtered.length === 0 && !state.search) {
+  if (filtered.length === 0 && !state.search && !smartHtml) {
     view.innerHTML = newBtn + '<div class="empty">No playlists yet.<div class="hint">Open a track\'s menu and tap "Add to playlist…" to start one.</div></div>';
     return;
   }
-  if (filtered.length === 0 && state.search) {
+  if (filtered.length === 0 && state.search && !smartHtml) {
     view.innerHTML = newBtn + '<div class="empty">No matches.</div>';
     return;
   }
-  view.innerHTML = newBtn + cards;
+  view.innerHTML = newBtn + smartHtml + cards;
 }
 
 function renderPlaylistDetail() {
-  const p = state.currentPlaylist
-    ? state.playlists.find(pl => pl.id === state.currentPlaylist.id)
-    : null;
+  const cur = state.currentPlaylist;
+  let p;
+  if (cur && cur.id === '__favorites__') {
+    // Smart playlist: re-synthesize so the count reflects current favorites.
+    p = favoritesSmartPlaylist();
+  } else {
+    p = cur ? state.playlists.find(pl => pl.id === cur.id) : null;
+  }
   if (!p) {
     state.view = 'playlists';
     state.currentPlaylist = null;
@@ -1870,27 +1940,31 @@ function renderPlaylistDetail() {
     return;
   }
   state.currentPlaylist = p; // refresh reference
-  const isLoading = p.source === 'jellyfin' && !p.loaded;
+  const isSmart = !!p.smart;
+  const isLoading = p.source === 'jellyfin' && !p.loaded && !isSmart;
   const allIndices = isLoading ? [] : playlistTracks(p);
   const indices = state.search
     ? allIndices.filter(i => trackMatchesSearch(state.tracks[i]))
     : allIndices;
   const totalCount = isLoading ? (p.trackCount || 0) : allIndices.length;
+  const menuBtnHtml = isSmart ? '' : `
+      <button class="back-btn" id="playlist-menu" type="button" aria-label="Playlist menu">
+        <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+      </button>
+  `;
   const header = `
     <div class="back-row">
       <button class="back-btn" id="back" type="button" aria-label="Back">
         <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
       </button>
       <div class="back-title">
-        <h2>${escapeHtml(p.name)}</h2>
+        <h2>${isSmart ? '♥ ' : ''}${escapeHtml(p.name)}</h2>
         <div class="meta">${totalCount} track${totalCount === 1 ? '' : 's'}${state.search && indices.length !== allIndices.length ? ` · ${indices.length} shown` : ''}</div>
       </div>
       <button class="play-album-btn" id="play-playlist" type="button">
         <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Play
       </button>
-      <button class="back-btn" id="playlist-menu" type="button" aria-label="Playlist menu">
-        <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
-      </button>
+      ${menuBtnHtml}
     </div>
   `;
   const list = isLoading
@@ -1956,7 +2030,9 @@ function trackRow(trackIndex, number, showAlbumSub) {
 function openTrackSheet(trackIndex) {
   const t = state.tracks[trackIndex];
   if (!t) return;
-  const isLocal = (t.source || 'local') === 'local';
+  const source = t.source || 'local';
+  const isLocal = source === 'local';
+  const isJellyfin = source === 'jellyfin';
   const localActions = `
     <button class="sheet-action" data-act="add-to-playlist">Add to playlist…</button>
     <button class="sheet-action" data-act="rename">Rename track…</button>
@@ -1964,10 +2040,15 @@ function openTrackSheet(trackIndex) {
     <div class="sheet-divider"></div>
     <button class="sheet-action danger" data-act="remove">Remove from library</button>
   `;
+  const jellyfinActions = `
+    <button class="sheet-action" data-act="add-to-playlist">Add to playlist…</button>
+    <button class="sheet-action" data-act="favorite">${t.isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}</button>
+  `;
   sheetBody.innerHTML = `
     <div class="sheet-title">${escapeHtml(t.title)}</div>
     <button class="sheet-action" data-act="play">Play</button>
     ${isLocal ? localActions : ''}
+    ${isJellyfin ? jellyfinActions : ''}
     <button class="sheet-action" data-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
   `;
   sheetBackdrop.classList.add('visible');
@@ -1993,21 +2074,38 @@ function openAddToPlaylistSheet(kind, payload) {
 function openPlaylistTrackSheet(positionInPlaylist) {
   const p = state.currentPlaylist;
   if (!p) return;
-  const trackId = p.trackIds[positionInPlaylist];
-  const trackIdx = state.tracks.findIndex(t => t.id === trackId);
+  const isSmart = !!p.smart;
+  let trackIdx;
+  if (isSmart) {
+    const indices = playlistTracks(p);
+    trackIdx = indices[positionInPlaylist];
+  } else {
+    const trackId = p.trackIds[positionInPlaylist];
+    trackIdx = state.tracks.findIndex(t => t.id === trackId);
+  }
   const t = trackIdx >= 0 ? state.tracks[trackIdx] : null;
   const title = t ? t.title : '(missing track)';
-  const isFirst = positionInPlaylist === 0;
-  const isLast = positionInPlaylist === p.trackIds.length - 1;
-  sheetBody.innerHTML = `
-    <div class="sheet-title">${escapeHtml(title)}</div>
-    <button class="sheet-action" data-plt-act="play">Play</button>
-    <button class="sheet-action" data-plt-act="move-up" ${isFirst ? 'disabled style="opacity:0.4"' : ''}>Move up</button>
-    <button class="sheet-action" data-plt-act="move-down" ${isLast ? 'disabled style="opacity:0.4"' : ''}>Move down</button>
-    <div class="sheet-divider"></div>
-    <button class="sheet-action danger" data-plt-act="remove">Remove from playlist</button>
-    <button class="sheet-action" data-plt-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
-  `;
+  if (isSmart) {
+    sheetBody.innerHTML = `
+      <div class="sheet-title">${escapeHtml(title)}</div>
+      <button class="sheet-action" data-plt-act="play">Play</button>
+      <div class="sheet-divider"></div>
+      <button class="sheet-action danger" data-plt-act="unfavorite">Remove from Favorites</button>
+      <button class="sheet-action" data-plt-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
+    `;
+  } else {
+    const isFirst = positionInPlaylist === 0;
+    const isLast = positionInPlaylist === p.trackIds.length - 1;
+    sheetBody.innerHTML = `
+      <div class="sheet-title">${escapeHtml(title)}</div>
+      <button class="sheet-action" data-plt-act="play">Play</button>
+      <button class="sheet-action" data-plt-act="move-up" ${isFirst ? 'disabled style="opacity:0.4"' : ''}>Move up</button>
+      <button class="sheet-action" data-plt-act="move-down" ${isLast ? 'disabled style="opacity:0.4"' : ''}>Move down</button>
+      <div class="sheet-divider"></div>
+      <button class="sheet-action danger" data-plt-act="remove">Remove from playlist</button>
+      <button class="sheet-action" data-plt-act="cancel" style="text-align:center;color:var(--muted)">Cancel</button>
+    `;
+  }
   sheetBackdrop.classList.add('visible');
   sheetBackdrop.dataset.playlistPos = String(positionInPlaylist);
 }
@@ -2295,6 +2393,9 @@ async function handleSheetAction(act, trackIndex) {
     removeTrack(trackIndex);
   } else if (act === 'add-to-playlist') {
     openAddToPlaylistSheet('track', trackIndex);
+  } else if (act === 'favorite') {
+    closeSheet();
+    toggleFavorite(trackIndex);
   } else {
     closeSheet();
   }
@@ -2537,7 +2638,47 @@ function loadTrack(index, autoplay) {
   durationEl.textContent = track.durationSec > 0 ? formatTime(track.durationSec) : '0:00';
   render();
   updateMediaSession();
+  updateFavoriteUI();
   if (autoplay) playWithFallback('loadTrack');
+}
+
+function updateFavoriteUI() {
+  const btn = document.getElementById('favorite-btn');
+  if (!btn) return;
+  const t = state.tracks[state.currentIndex];
+  // Heart is meaningful only for Jellyfin (server-side favorites). Hide on
+  // local tracks until we add a local equivalent.
+  if (!t || (t.source || 'local') !== 'jellyfin') {
+    btn.hidden = true;
+    return;
+  }
+  btn.hidden = false;
+  btn.classList.toggle('active', !!t.isFavorite);
+  btn.setAttribute('aria-pressed', String(!!t.isFavorite));
+  btn.title = t.isFavorite ? 'Unfavorite' : 'Add to Favorites';
+}
+
+async function toggleFavorite(trackIndex) {
+  const t = state.tracks[trackIndex];
+  if (!t || (t.source || 'local') !== 'jellyfin') return;
+  if (!t.itemId) return;
+  const newVal = !t.isFavorite;
+  // Optimistic update for snappy feedback; revert on failure.
+  t.isFavorite = newVal;
+  if (trackIndex === state.currentIndex) updateFavoriteUI();
+  try {
+    await JF.setFavorite(state.jellyfin.config, t.itemId, newVal);
+    showToast(newVal ? 'Added to Favorites' : 'Removed from Favorites');
+    // If the user is currently viewing the Favorites smart playlist, re-render
+    // so the row appears/disappears immediately.
+    if (state.view === 'playlist-detail' && state.currentPlaylist && state.currentPlaylist.id === '__favorites__') render();
+    else if (state.view === 'playlists') render();
+  } catch (e) {
+    console.error('Favorite toggle failed', e);
+    t.isFavorite = !newVal; // revert
+    if (trackIndex === state.currentIndex) updateFavoriteUI();
+    showToast('Could not update favorite');
+  }
 }
 
 function subtitleFor(track) {
@@ -3083,6 +3224,14 @@ view.addEventListener('click', e => {
   const plRow = e.target.closest('[data-playlist-id]');
   if (plRow) {
     const raw = plRow.dataset.playlistId;
+    // Smart Favorites tile (synthesized, not in state.playlists).
+    if (raw === '__favorites__') {
+      state.currentPlaylist = favoritesSmartPlaylist();
+      state.view = 'playlist-detail';
+      view.scrollTop = 0;
+      render();
+      return;
+    }
     // Local playlists use integer IDB ids; Jellyfin uses string GUIDs.
     const pid = /^\d+$/.test(raw) ? Number(raw) : raw;
     const p = state.playlists.find(p => p.id === pid);
@@ -3225,10 +3374,21 @@ async function handlePlaylistTrackAction(act, positionInPlaylist) {
     closeSheet();
     const indices = playlistTracks(p);
     if (indices.length === 0) return;
-    const targetTrackIdx = state.tracks.findIndex(t => t.id === p.trackIds[positionInPlaylist]);
-    if (targetTrackIdx < 0) return;
+    // For smart playlists (Favorites), positionInPlaylist indexes into the
+    // computed list, not a stored trackIds array.
+    const targetTrackIdx = p.smart
+      ? indices[positionInPlaylist]
+      : state.tracks.findIndex(t => t.id === p.trackIds[positionInPlaylist]);
+    if (targetTrackIdx == null || targetTrackIdx < 0) return;
     setQueue(indices, targetTrackIdx);
     loadTrack(targetTrackIdx, true);
+    return;
+  }
+  if (act === 'unfavorite') {
+    closeSheet();
+    const indices = playlistTracks(p);
+    const trackIdx = indices[positionInPlaylist];
+    if (trackIdx >= 0) await toggleFavorite(trackIdx);
     return;
   }
   if (act === 'move-up') {
@@ -3331,6 +3491,9 @@ document.getElementById('source-toggle').addEventListener('click', e => {
 });
 document.getElementById('settings-btn').addEventListener('click', openSettingsSheet);
 document.getElementById('jf-refresh').addEventListener('click', () => syncJellyfin(true));
+document.getElementById('favorite-btn').addEventListener('click', () => {
+  if (state.currentIndex >= 0) toggleFavorite(state.currentIndex);
+});
 
 {
   const searchBtn = document.getElementById('search-btn');
