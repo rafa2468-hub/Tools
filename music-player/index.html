@@ -821,7 +821,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.2.0';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -973,6 +973,9 @@ const state = {
   source: 'local',     // 'local' | 'jellyfin'
   search: '',          // lowercased current search query (empty = no filter)
   sleep: { expiresAt: 0, intervalId: 0 },
+  volumeBoost: 1,      // 1× = passthrough (audio element only); > 1 routes through Web Audio gain
+  audioContext: null,  // lazily created on first boost > 1 OR play with saved boost
+  audioGain: null,
   playlists: [],       // reference to state.local.playlists or state.jellyfin.playlists
   currentPlaylist: null, // playlist record when view === 'playlist-detail'
   local: { tracks: [], playlists: [] },
@@ -1043,6 +1046,9 @@ function loadPrefs() {
       state.repeat = p.repeat;
       applyRepeatVisual();
     }
+    if (typeof p.volumeBoost === 'number' && isFinite(p.volumeBoost)) {
+      state.volumeBoost = Math.max(1, Math.min(3, p.volumeBoost));
+    }
   } catch (e) { /* ignore */ }
 }
 
@@ -1052,6 +1058,7 @@ function savePrefs() {
       volume: audio.volume,
       shuffle: state.shuffle,
       repeat: state.repeat,
+      volumeBoost: state.volumeBoost,
     }));
   } catch (e) { /* ignore */ }
 }
@@ -2073,7 +2080,16 @@ function openSettingsSheet() {
     const active = (m === 0 && sleepActiveMin === 0) || (m > 0 && sleepActiveMin > 0 && sleepActiveMin <= m && sleepActiveMin > (m - 15));
     return `<button class="sleep-btn${active ? ' active' : ''}" data-sleep="${m}" type="button">${label}</button>`;
   }).join('');
+  const boostOptions = [1, 1.25, 1.5, 2, 2.5, 3];
+  const boostHtml = boostOptions.map(v => {
+    const active = Math.abs(state.volumeBoost - v) < 0.01;
+    const label = v === 1 ? 'Off' : `${v}×`;
+    return `<button class="sleep-btn${active ? ' active' : ''}" data-boost="${v}" type="button">${label}</button>`;
+  }).join('');
   sheetBody.innerHTML = `
+    <div class="sheet-section-title">Volume boost</div>
+    <div class="sleep-grid">${boostHtml}</div>
+    <div class="sheet-divider"></div>
     <div class="sheet-section-title">Sleep timer</div>
     <div class="sleep-grid">${sleepHtml}</div>
     <div class="sheet-divider"></div>
@@ -2439,7 +2455,49 @@ async function deletePlaylist(playlistId) {
 // audio-focus interruptions (Bluetooth, navigation prompts in the car, phone
 // calls), transient network errors, etc. Track which url we were trying to
 // start; if a retry would attempt to play a different track, drop it.
+// Lazy-build a Web Audio chain: audio element → GainNode → destination.
+// The chain is only created when the user actually wants > 1× boost, and
+// once created persists for the rest of the session (createMediaElementSource
+// is one-shot per element). For Jellyfin streams to play through this chain
+// the audio element needs `crossorigin="anonymous"` AND Jellyfin must allow
+// CORS on stream responses — otherwise Web Audio mutes the cross-origin audio
+// for security reasons. We don't toggle crossorigin dynamically because doing
+// so requires reloading the current track. If Jellyfin streams come up muted,
+// reverting to 1× and reloading the page restores normal playback.
+function ensureAudioGain() {
+  if (state.audioGain) return state.audioGain;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    const ctx = new Ctx();
+    const source = ctx.createMediaElementSource(audio);
+    const gain = ctx.createGain();
+    gain.gain.value = 1;
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    state.audioContext = ctx;
+    state.audioGain = gain;
+    return gain;
+  } catch (e) {
+    console.warn('Web Audio setup failed', e);
+    return null;
+  }
+}
+
+function applyVolumeBoost() {
+  if (state.volumeBoost <= 1 && !state.audioGain) return;
+  const gain = ensureAudioGain();
+  if (!gain) return;
+  gain.gain.value = state.volumeBoost;
+  if (state.audioContext && state.audioContext.state === 'suspended') {
+    state.audioContext.resume().catch(() => {});
+  }
+}
+
 async function playWithFallback(reason) {
+  // If the user has a saved boost setting from a previous session, this is
+  // the first user-gesture-driven moment we can wire up the AudioContext.
+  applyVolumeBoost();
   const startedSrc = audio.src;
   try {
     await audio.play();
@@ -3233,6 +3291,16 @@ sheetBackdrop.addEventListener('click', e => {
     setSleepTimer(minutes);
     showToast(minutes > 0 ? `Sleep in ${minutes} min` : 'Sleep timer off');
     // Re-render the settings sheet so the active pill updates
+    openSettingsSheet();
+    return;
+  }
+  const boostBtn = e.target.closest('[data-boost]');
+  if (boostBtn) {
+    const value = Number(boostBtn.dataset.boost);
+    state.volumeBoost = value;
+    applyVolumeBoost();
+    savePrefs();
+    showToast(value === 1 ? 'Volume boost off' : `Volume boost ${value}×`);
     openSettingsSheet();
     return;
   }
