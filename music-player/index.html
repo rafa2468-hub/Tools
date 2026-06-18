@@ -821,7 +821,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3.0';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -958,6 +958,33 @@ const PREFS_KEY = 'music-player-prefs';
 /* ---------- State ---------- */
 const JF_CONFIG_KEY = 'music-player-jf';
 const SOURCE_KEY = 'music-player-source';
+const RESUME_KEY = 'music-player-resume';
+
+function loadResume() {
+  try {
+    const raw = localStorage.getItem(RESUME_KEY);
+    if (!raw) return null;
+    const r = JSON.parse(raw);
+    if (!r || typeof r !== 'object') return null;
+    return r;
+  } catch (e) { return null; }
+}
+let lastResumeSavedAt = 0;
+function saveResume(force) {
+  if (state.currentIndex < 0) return;
+  const t = state.tracks[state.currentIndex];
+  if (!t || t.id == null) return;
+  const now = Date.now();
+  if (!force && now - lastResumeSavedAt < 4000) return;
+  lastResumeSavedAt = now;
+  try {
+    localStorage.setItem(RESUME_KEY, JSON.stringify({
+      source: state.source,
+      trackId: t.id,
+      position: Math.max(0, audio.currentTime || 0),
+    }));
+  } catch (e) { /* ignore */ }
+}
 
 const state = {
   tracks: [],          // active library — points to state.local.tracks or state.jellyfin.tracks
@@ -1589,9 +1616,7 @@ async function setActiveSource(nextSource, opts) {
     }
     state.tracks = state.jellyfin.tracks;
     if (state.tracks.length > 0) {
-      const indices = state.tracks.map((_, i) => i);
-      setQueue(indices, indices[0]);
-      loadTrack(indices[0], false);
+      bootPlaybackTrack(false);
     } else {
       subtitleEl.textContent = 'No tracks found';
     }
@@ -2463,6 +2488,39 @@ async function playWithFallback(reason) {
   }
 }
 
+// Boot helper: load the first track to display in the now-playing area when
+// the app starts or the source changes. If a recent resume entry matches the
+// current source and references a track that still exists in the library,
+// use it (and seek to the saved playback position once metadata is ready);
+// otherwise fall back to the first track in the queue.
+function bootPlaybackTrack(autoplay) {
+  if (state.tracks.length === 0) return;
+  const resume = loadResume();
+  const indices = state.tracks.map((_, i) => i);
+  let startIdx = indices[0];
+  let seekTo = 0;
+  if (resume && resume.source === state.source) {
+    const idx = state.tracks.findIndex(t => t.id === resume.trackId);
+    if (idx >= 0) {
+      startIdx = idx;
+      const dur = state.tracks[idx].durationSec || 0;
+      // Skip if within ~5s of the end — would auto-trigger 'ended' instantly.
+      if (resume.position > 0 && (dur === 0 || resume.position < dur - 5)) {
+        seekTo = resume.position;
+      }
+    }
+  }
+  setQueue(indices, startIdx);
+  loadTrack(startIdx, !!autoplay);
+  if (seekTo > 0) {
+    const handler = () => {
+      try { audio.currentTime = seekTo; } catch (e) { /* ignore */ }
+      audio.removeEventListener('loadedmetadata', handler);
+    };
+    audio.addEventListener('loadedmetadata', handler);
+  }
+}
+
 function loadTrack(index, autoplay) {
   if (index < 0 || index >= state.tracks.length) return;
   state.currentIndex = index;
@@ -2802,9 +2860,7 @@ async function restoreLibrary() {
     }
     await setActiveSource(state.source, { force: true });
     if (state.source === 'local' && state.tracks.length > 0) {
-      const indices = state.tracks.map((_, i) => i);
-      setQueue(indices, indices[0]);
-      loadTrack(indices[0], false);
+      bootPlaybackTrack(false);
     }
     if (state.source === 'local') backfillTags();
   } catch (err) {
@@ -2968,6 +3024,7 @@ audio.addEventListener('timeupdate', () => {
       });
     } catch (e) { /* iOS may reject */ }
   }
+  saveResume(false); // throttled internally
 });
 audio.addEventListener('emptied', resetTimeDisplay);
 audio.addEventListener('loadstart', resetTimeDisplay);
@@ -2982,7 +3039,9 @@ audio.addEventListener('play', () => {
 audio.addEventListener('pause', () => {
   playIcon.innerHTML = PLAY_ICON;
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  saveResume(true);
 });
+window.addEventListener('pagehide', () => saveResume(true));
 audio.addEventListener('ended', () => nextTrack(true));
 audio.addEventListener('error', () => {
   showToast('Playback error — skipping');
