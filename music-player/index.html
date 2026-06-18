@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1550,16 +1550,25 @@ async function syncJellyfin(opts) {
     state.jellyfin.lastSync = Date.now();
     try {
       const pls = await JF.fetchPlaylists(cfg);
+      // Preserve loaded items across a silent refresh so the playlist-detail
+      // view doesn't flash "Loading…" every time the app comes back to the
+      // foreground. Only mark a playlist unloaded if the server's ChildCount
+      // disagrees with our cached size (rough but reliable signal that the
+      // playlist contents have changed on the server).
+      const oldById = new Map(state.jellyfin.playlists.map(p => [p.id, p]));
       state.jellyfin.playlists.length = 0;
       for (const it of pls) {
+        const old = oldById.get(it.Id);
+        const childCount = typeof it.ChildCount === 'number' ? it.ChildCount : 0;
+        const keepCache = old && old.loaded && Array.isArray(old.trackIds) && old.trackIds.length === childCount;
         state.jellyfin.playlists.push({
           id: it.Id,
           name: it.Name || '(unnamed)',
-          trackIds: [],
-          entryIds: [],
-          trackCount: typeof it.ChildCount === 'number' ? it.ChildCount : 0,
+          trackIds: keepCache ? old.trackIds : [],
+          entryIds: keepCache ? old.entryIds : [],
+          trackCount: childCount,
           source: 'jellyfin',
-          loaded: false,
+          loaded: !!keepCache,
         });
       }
       state.jellyfin.playlistsLoaded = true;
@@ -1979,6 +1988,16 @@ function renderPlaylistDetail() {
   state.currentPlaylist = p; // refresh reference
   const isSmart = !!p.smart;
   const isLoading = p.source === 'jellyfin' && !p.loaded && !isSmart;
+  // Safety net: if we landed here with an unloaded Jellyfin playlist (e.g.
+  // after a silent auto-refresh that invalidated the cache), kick off the
+  // fetch directly from render. ensurePlaylistLoaded re-entry-guards itself.
+  if (isLoading) {
+    ensurePlaylistLoaded(p).then(() => {
+      if (state.view === 'playlist-detail' && state.currentPlaylist && state.currentPlaylist.id === p.id) {
+        render();
+      }
+    });
+  }
   const allIndices = isLoading ? [] : playlistTracks(p);
   const indices = state.search
     ? allIndices.filter(i => trackMatchesSearch(state.tracks[i]))
@@ -2487,6 +2506,8 @@ async function createPlaylist(name) {
 
 async function ensurePlaylistLoaded(playlist) {
   if (playlist.source !== 'jellyfin' || playlist.loaded) return;
+  if (playlist.loading) return; // re-entry guard so render+click can't double-fetch
+  playlist.loading = true;
   try {
     const items = await JF.fetchPlaylistItems(state.jellyfin.config, playlist.id);
     playlist.trackIds = items.map(it => 'jf:' + it.Id);
@@ -2496,6 +2517,8 @@ async function ensurePlaylistLoaded(playlist) {
   } catch (e) {
     console.error('Load playlist items failed', e);
     showToast('Could not load playlist');
+  } finally {
+    playlist.loading = false;
   }
 }
 
