@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.6.1';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -990,14 +990,15 @@ function loadResume() {
 }
 let lastResumeSavedAt = 0;
 function saveResume(force) {
-  const t = state.playingTrack;
+  if (state.currentIndex < 0) return;
+  const t = state.tracks[state.currentIndex];
   if (!t || t.id == null) return;
   const now = Date.now();
   if (!force && now - lastResumeSavedAt < 4000) return;
   lastResumeSavedAt = now;
   try {
     localStorage.setItem(RESUME_KEY, JSON.stringify({
-      source: state.playingSource || 'local',
+      source: state.source,
       trackId: t.id,
       position: Math.max(0, audio.currentTime || 0),
     }));
@@ -1005,27 +1006,21 @@ function saveResume(force) {
 }
 
 const state = {
-  // --- Browse view (which library is being looked at) ---
-  source: 'local',        // 'local' | 'jellyfin' — what the source toggle shows as active
-  tracks: [],             // browse source's tracks (reference to state.local.tracks or state.jellyfin.tracks)
-  playlists: [],          // browse source's playlists
-  view: 'albums',         // current view in the library tabs
-  currentAlbum: null,
-  currentPlaylist: null,  // playlist record when view === 'playlist-detail'
-  search: '',
-
-  // --- Playback (which track is actually playing, independent of browse) ---
-  playingTrack: null,     // track object currently loaded in the audio element (or null)
-  playingSource: null,    // 'local' | 'jellyfin' — where playingTrack came from
-  queue: [],              // array of track IDs within playingSource (NOT indices)
-  queuePos: -1,
+  tracks: [],          // active library — points to state.local.tracks or state.jellyfin.tracks
+  currentIndex: -1,
   shuffle: false,
   repeat: 'off',
-
-  // --- Misc ---
+  queue: [],
+  queuePos: -1,
   seeking: false,
+  view: 'albums',
+  currentAlbum: null,
   db: null,
+  source: 'local',     // 'local' | 'jellyfin'
+  search: '',          // lowercased current search query (empty = no filter)
   sleep: { expiresAt: 0, intervalId: 0 },
+  playlists: [],       // reference to state.local.playlists or state.jellyfin.playlists
+  currentPlaylist: null, // playlist record when view === 'playlist-detail'
   local: { tracks: [], playlists: [] },
   jellyfin: {
     tracks: [],
@@ -1036,18 +1031,6 @@ const state = {
     syncing: false,
   },
 };
-
-// Resolve a track id to its track record in the playback-source's library.
-function findPlayingTrackById(id) {
-  const src = state.playingSource === 'jellyfin' ? state.jellyfin.tracks : state.local.tracks;
-  return src.find(t => t.id === id) || null;
-}
-function playingSourceTracks() {
-  return state.playingSource === 'jellyfin' ? state.jellyfin.tracks : state.local.tracks;
-}
-function isPlayingId(id) {
-  return !!state.playingTrack && state.playingTrack.id === id;
-}
 
 function loadJellyfinConfig() {
   try {
@@ -1226,10 +1209,9 @@ function tagString(v) {
   return String(v).trim();
 }
 
-function albumArtUrlFor(albumName, sourceTracks) {
-  const list = sourceTracks || state.tracks;
-  if (isMixedArtistAlbum(albumName, list)) return null;
-  for (const t of list) {
+function albumArtUrlFor(albumName) {
+  if (isMixedArtistAlbum(albumName)) return null;
+  for (const t of state.tracks) {
     if (albumOf(t) === albumName && t.pictureUrl) return t.pictureUrl;
   }
   return null;
@@ -1238,25 +1220,15 @@ function albumArtUrlFor(albumName, sourceTracks) {
 // True when the album groups songs from more than one named artist — in that
 // case the first-track's cover art is not representative, so we'd rather show
 // the generic gradient than mislead by reusing one song's art for the others.
-function isMixedArtistAlbum(albumName, sourceTracks) {
-  const list = sourceTracks || state.tracks;
+function isMixedArtistAlbum(albumName) {
   const seen = new Set();
-  for (const t of list) {
+  for (const t of state.tracks) {
     if (albumOf(t) !== albumName) continue;
     const a = (t.artist || '').trim();
     if (a) seen.add(a);
     if (seen.size > 1) return true;
   }
   return false;
-}
-
-// Like albumArtUrlFor, but resolves against the track's own source library so
-// it stays accurate after the user switches browse source mid-playback.
-function albumArtForPlayingTrack(track) {
-  if (!track) return null;
-  if (track.pictureUrl) return track.pictureUrl;
-  const src = (track.source || 'local') === 'jellyfin' ? state.jellyfin.tracks : state.local.tracks;
-  return albumArtUrlFor(albumOf(track), src);
 }
 
 /* ---------- Jellyfin API client ---------- */
@@ -1562,11 +1534,12 @@ async function syncJellyfin(opts) {
   state.jellyfin.syncing = true;
   if (!silent) updateRefreshSpin(true);
 
-  // Queue is now keyed by track id (not index), so the refresh swap doesn't
-  // invalidate it. Just remember what was playing so we can refresh the
-  // playingTrack reference to the new track record (which has updated favorite
-  // status etc).
-  const playingId = (state.playingSource === 'jellyfin' && state.playingTrack) ? state.playingTrack.id : null;
+  // Capture playback state before we swap the tracks array out from under it.
+  // We re-resolve by track id afterward so a refresh doesn't kill the queue.
+  const playingId = state.currentIndex >= 0 ? (state.tracks[state.currentIndex] || {}).id : null;
+  const queueIds = state.queue
+    .map(qi => (state.tracks[qi] || {}).id)
+    .filter(id => id != null);
   const playlistDetailId = (state.currentPlaylist && !state.currentPlaylist.smart) ? state.currentPlaylist.id : null;
   const wasOnFavorites = !!(state.currentPlaylist && state.currentPlaylist.smart);
 
@@ -1605,26 +1578,24 @@ async function syncJellyfin(opts) {
     if (state.source === 'jellyfin') {
       state.tracks = state.jellyfin.tracks;
       state.playlists = state.jellyfin.playlists;
-    }
-    // Refresh the playingTrack pointer to the new record (so updated
-    // isFavorite shows up in the now-playing UI without a reload). Prune
-    // queue ids that no longer exist server-side; reposition queuePos.
-    if (playingId != null) {
-      const refreshed = state.jellyfin.tracks.find(t => t.id === playingId);
-      if (refreshed) state.playingTrack = refreshed;
-    }
-    if (state.playingSource === 'jellyfin') {
-      const validIds = new Set(state.jellyfin.tracks.map(t => t.id));
-      state.queue = state.queue.filter(id => validIds.has(id));
-      if (state.playingTrack) {
-        const pos = state.queue.indexOf(state.playingTrack.id);
+      // Re-resolve playback state by id (handles new/removed tracks and
+      // re-orderings gracefully)
+      if (playingId != null) {
+        const newIdx = state.tracks.findIndex(t => t.id === playingId);
+        state.currentIndex = newIdx;
+      } else {
+        state.currentIndex = -1;
+      }
+      state.queue = queueIds
+        .map(id => state.tracks.findIndex(t => t.id === id))
+        .filter(i => i >= 0);
+      if (state.currentIndex >= 0) {
+        const pos = state.queue.indexOf(state.currentIndex);
         state.queuePos = pos >= 0 ? pos : -1;
       } else {
-        state.queuePos = state.queue.length > 0 ? 0 : -1;
+        state.queuePos = -1;
       }
-    }
-    if (state.source === 'jellyfin') {
-      // Re-resolve the currently-browsed playlist detail (if any)
+      // Re-resolve current playlist reference
       if (playlistDetailId != null) {
         const matched = state.playlists.find(p => p.id === playlistDetailId);
         state.currentPlaylist = matched || null;
@@ -1654,45 +1625,45 @@ function updateRefreshSpin(spinning) {
   if (svg) svg.classList.toggle('spin', !!spinning);
 }
 
-// Switch the BROWSE source. By default this does NOT touch audio, the queue,
-// or state.playingTrack — playback continues uninterrupted while the user
-// browses the other library. opts.initial = true is set only by the boot path
-// (restoreLibrary), which uses it to wire up the first track via
-// bootPlaybackTrack.
 async function setActiveSource(nextSource, opts) {
   if (state.source === nextSource && !(opts && opts.force)) return;
-  const initial = !!(opts && opts.initial);
-
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  state.currentIndex = -1;
+  state.queue = [];
+  state.queuePos = -1;
   state.view = 'albums';
   state.currentAlbum = null;
   state.currentPlaylist = null;
+  setNowPlayingArt(null);
+  titleEl.textContent = 'No track loaded';
+
   state.source = nextSource;
   saveSource();
 
   if (nextSource === 'local') {
     state.tracks = state.local.tracks;
     state.playlists = state.local.playlists;
-    if (initial && !state.playingTrack) {
-      subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
-    }
+    subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
   } else if (nextSource === 'jellyfin') {
     state.playlists = state.jellyfin.playlists;
     if (!state.jellyfin.config.accessToken) {
       state.tracks = [];
-      if (initial && !state.playingTrack) subtitleEl.textContent = 'Tap the gear to connect to Jellyfin';
+      subtitleEl.textContent = 'Tap the gear to connect to Jellyfin';
       render();
       applySourceUI();
-      if (initial) openSettingsSheet();
+      openSettingsSheet();
       return;
     }
     if (state.jellyfin.tracks.length === 0) {
       state.tracks = [];
-      if (initial && !state.playingTrack) subtitleEl.textContent = 'Loading your Jellyfin library…';
+      subtitleEl.textContent = 'Loading your Jellyfin library…';
       render();
       applySourceUI();
       const ok = await syncJellyfin({ feedback: false });
       if (!ok) {
-        if (initial && !state.playingTrack) subtitleEl.textContent = 'Could not reach Jellyfin';
+        subtitleEl.textContent = 'Could not reach Jellyfin';
         return;
       }
     }
@@ -1718,9 +1689,10 @@ async function setActiveSource(nextSource, opts) {
       }
     }
     state.tracks = state.jellyfin.tracks;
-    if (initial) {
-      if (state.tracks.length > 0) bootPlaybackTrack(false);
-      else if (!state.playingTrack) subtitleEl.textContent = 'No tracks found';
+    if (state.tracks.length > 0) {
+      bootPlaybackTrack(false);
+    } else {
+      subtitleEl.textContent = 'No tracks found';
     }
   }
   render();
@@ -1769,25 +1741,26 @@ function groupedAlbums() {
   return names.map(name => ({ name, indices: map.get(name) }));
 }
 
-/* ---------- Queue management (track-id based) ---------- */
-// state.queue holds track IDs (within state.playingSource), not state.tracks
-// indices. This means switching browse source mid-playback doesn't invalidate
-// the queue.
-function setQueue(ids, startId) {
-  let queue = ids.slice();
+/* ---------- Queue management ---------- */
+function setQueue(indices, startIndex) {
+  // indices: array of track indices into state.tracks
+  // startIndex: which track to play first (a value present in indices)
+  let queue = indices.slice();
   if (state.shuffle) {
     for (let i = queue.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [queue[i], queue[j]] = [queue[j], queue[i]];
     }
-    if (startId !== undefined && startId !== null) {
-      const pos = queue.indexOf(startId);
-      if (pos > 0) [queue[0], queue[pos]] = [queue[pos], queue[0]];
+    if (startIndex !== undefined && startIndex !== null) {
+      const pos = queue.indexOf(startIndex);
+      if (pos > 0) {
+        [queue[0], queue[pos]] = [queue[pos], queue[0]];
+      }
     }
   }
   state.queue = queue;
-  if (startId !== undefined && startId !== null) {
-    state.queuePos = queue.indexOf(startId);
+  if (startIndex !== undefined && startIndex !== null) {
+    state.queuePos = queue.indexOf(startIndex);
   } else {
     state.queuePos = queue.length > 0 ? 0 : -1;
   }
@@ -1796,35 +1769,21 @@ function setQueue(ids, startId) {
 function reshuffleQueueKeepingCurrent() {
   if (state.queue.length === 0) return;
   const current = state.queuePos >= 0 ? state.queue[state.queuePos] : null;
-  const ids = state.queue.slice();
+  const indices = state.queue.slice();
   if (state.shuffle) {
-    for (let i = ids.length - 1; i > 0; i--) {
+    for (let i = indices.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [ids[i], ids[j]] = [ids[j], ids[i]];
+      [indices[i], indices[j]] = [indices[j], indices[i]];
     }
     if (current !== null) {
-      const pos = ids.indexOf(current);
-      if (pos > 0) [ids[0], ids[pos]] = [ids[pos], ids[0]];
+      const pos = indices.indexOf(current);
+      if (pos > 0) [indices[0], indices[pos]] = [indices[pos], indices[0]];
     }
   } else {
-    // Restore source-natural order: look each id up in the playing source's
-    // track list and sort by that index.
-    const sourceTracks = playingSourceTracks();
-    const orderMap = new Map();
-    sourceTracks.forEach((t, i) => orderMap.set(t.id, i));
-    ids.sort((a, b) => (orderMap.get(a) ?? 0) - (orderMap.get(b) ?? 0));
+    indices.sort((a, b) => a - b);
   }
-  state.queue = ids;
-  if (current !== null) state.queuePos = ids.indexOf(current);
-}
-
-// Returns the list of track IDs for a playlist (regular or smart Favorites).
-function playlistTrackIdList(playlist) {
-  if (!playlist) return [];
-  if (playlist.id === '__favorites__') {
-    return state.tracks.filter(t => t.isFavorite).map(t => t.id);
-  }
-  return playlist.trackIds.slice();
+  state.queue = indices;
+  if (current !== null) state.queuePos = indices.indexOf(current);
 }
 
 /* ---------- View rendering ---------- */
@@ -2074,7 +2033,7 @@ function renderPlaylistDetail() {
 
 function playlistTrackRow(trackIndex, positionInPlaylist) {
   const t = state.tracks[trackIndex];
-  const playing = !!state.playingTrack && state.playingTrack.id === t.id;
+  const playing = trackIndex === state.currentIndex;
   const artist = artistOf(t);
   const album = albumOf(t);
   const subText = artist && album !== UNSORTED ? `${artist} · ${album}`
@@ -2097,7 +2056,7 @@ function playlistTrackRow(trackIndex, positionInPlaylist) {
 
 function trackRow(trackIndex, number, showAlbumSub) {
   const t = state.tracks[trackIndex];
-  const playing = !!state.playingTrack && state.playingTrack.id === t.id;
+  const playing = trackIndex === state.currentIndex;
   let subText = '';
   if (showAlbumSub) {
     const artist = artistOf(t);
@@ -2408,9 +2367,10 @@ async function removeAlbum(albumName) {
   state.tracks.forEach((t, i) => { if (albumOf(t) === albumName) indices.push(i); });
   if (indices.length === 0) return;
 
+  // Remember the currently-playing track by id so we can find its new index after splicing.
+  const currentId = state.currentIndex !== -1 ? state.tracks[state.currentIndex].id : null;
   const removedIds = new Set(indices.map(i => state.tracks[i].id));
-  const playingId = state.playingTrack ? state.playingTrack.id : null;
-  const playingRemoved = playingId !== null && state.playingSource === 'local' && removedIds.has(playingId);
+  const playingRemoved = currentId !== null && removedIds.has(currentId);
 
   // Splice descending so earlier indices stay valid.
   for (const i of indices.slice().sort((a, b) => b - a)) {
@@ -2421,26 +2381,28 @@ async function removeAlbum(albumName) {
     state.tracks.splice(i, 1);
   }
 
-  // Prune the queue (only meaningful if playback source is local)
-  if (state.playingSource === 'local') {
-    state.queue = state.queue.filter(id => !removedIds.has(id));
-    if (playingId != null) state.queuePos = state.queue.indexOf(playingId);
-  }
-
+  const remaining = state.tracks.map((_, i) => i);
   if (playingRemoved) {
     audio.pause();
     audio.removeAttribute('src');
     audio.load();
-    state.playingTrack = null;
+    state.currentIndex = -1;
     titleEl.textContent = 'No track loaded';
     subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
-    if (state.queue.length > 0) {
-      const nextId = state.queue[0];
-      state.queuePos = 0;
-      const t = findPlayingTrackById(nextId);
-      if (t) loadTrack(t, false);
+    if (remaining.length > 0) {
+      setQueue(remaining, remaining[0]);
+      loadTrack(remaining[0], false);
     } else {
+      state.queue = [];
       state.queuePos = -1;
+    }
+  } else if (currentId !== null) {
+    state.currentIndex = state.tracks.findIndex(t => t.id === currentId);
+    if (state.currentIndex !== -1) {
+      setQueue(remaining, state.currentIndex);
+    } else {
+      state.queue = remaining;
+      state.queuePos = remaining.length > 0 ? 0 : -1;
     }
   }
 
@@ -2466,10 +2428,7 @@ async function handleSheetAction(act, trackIndex) {
       if (trimmed) {
         t.title = trimmed;
         await persistTrack(t);
-        if (state.playingTrack && state.playingTrack.id === t.id) {
-          state.playingTrack.title = trimmed;
-          titleEl.textContent = trimmed;
-        }
+        if (trackIndex === state.currentIndex) titleEl.textContent = trimmed;
         render();
       }
     }
@@ -2698,25 +2657,22 @@ async function playWithFallback(reason) {
 function bootPlaybackTrack(autoplay) {
   if (state.tracks.length === 0) return;
   const resume = loadResume();
-  const ids = state.tracks.map(t => t.id);
-  let startId = ids[0];
-  let startTrack = state.tracks[0];
+  const indices = state.tracks.map((_, i) => i);
+  let startIdx = indices[0];
   let seekTo = 0;
   if (resume && resume.source === state.source) {
-    const t = state.tracks.find(t => t.id === resume.trackId);
-    if (t) {
-      startId = t.id;
-      startTrack = t;
-      const dur = t.durationSec || 0;
+    const idx = state.tracks.findIndex(t => t.id === resume.trackId);
+    if (idx >= 0) {
+      startIdx = idx;
+      const dur = state.tracks[idx].durationSec || 0;
       // Skip if within ~5s of the end — would auto-trigger 'ended' instantly.
       if (resume.position > 0 && (dur === 0 || resume.position < dur - 5)) {
         seekTo = resume.position;
       }
     }
   }
-  state.playingSource = state.source;
-  setQueue(ids, startId);
-  loadTrack(startTrack, !!autoplay);
+  setQueue(indices, startIdx);
+  loadTrack(startIdx, !!autoplay);
   if (seekTo > 0) {
     const handler = () => {
       try { audio.currentTime = seekTo; } catch (e) { /* ignore */ }
@@ -2726,22 +2682,14 @@ function bootPlaybackTrack(autoplay) {
   }
 }
 
-// Load a track into the audio element. Accepts either a track object (preferred)
-// or a track id — the id form resolves against playingSource so we can use it
-// from the queue. Sets state.playingTrack and state.playingSource.
-function loadTrack(trackOrId, autoplay) {
-  let track = trackOrId;
-  if (track == null) return;
-  if (typeof track === 'string' || typeof track === 'number') {
-    track = findPlayingTrackById(trackOrId);
-  }
-  if (!track) return;
-  state.playingTrack = track;
-  state.playingSource = track.source || 'local';
+function loadTrack(index, autoplay) {
+  if (index < 0 || index >= state.tracks.length) return;
+  state.currentIndex = index;
+  const track = state.tracks[index];
   audio.src = track.url;
   titleEl.textContent = track.title;
   subtitleEl.textContent = subtitleFor(track);
-  setNowPlayingArt(albumArtForPlayingTrack(track));
+  setNowPlayingArt(track.pictureUrl || albumArtUrlFor(albumOf(track)));
   // Reset the seek/time display; loadedmetadata will refresh once the audio
   // header is parsed, but for Jellyfin transcodes the metadata duration is
   // already known up-front so prefer it.
@@ -2757,7 +2705,7 @@ function loadTrack(trackOrId, autoplay) {
 function updateFavoriteUI() {
   const btn = document.getElementById('favorite-btn');
   if (!btn) return;
-  const t = state.playingTrack;
+  const t = state.tracks[state.currentIndex];
   // Heart is meaningful only for Jellyfin (server-side favorites). Hide on
   // local tracks until we add a local equivalent.
   if (!t || (t.source || 'local') !== 'jellyfin') {
@@ -2770,26 +2718,25 @@ function updateFavoriteUI() {
   btn.title = t.isFavorite ? 'Unfavorite' : 'Add to Favorites';
 }
 
-// Toggle favorite on a specific track. Accepts a track object or, for legacy
-// call sites, a numeric index into state.tracks (browse source).
-async function toggleFavorite(trackOrIdx) {
-  let t = trackOrIdx;
-  if (typeof t === 'number') t = state.tracks[t];
+async function toggleFavorite(trackIndex) {
+  const t = state.tracks[trackIndex];
   if (!t || (t.source || 'local') !== 'jellyfin') return;
   if (!t.itemId) return;
   const newVal = !t.isFavorite;
   // Optimistic update for snappy feedback; revert on failure.
   t.isFavorite = newVal;
-  if (state.playingTrack && state.playingTrack.id === t.id) updateFavoriteUI();
+  if (trackIndex === state.currentIndex) updateFavoriteUI();
   try {
     await JF.setFavorite(state.jellyfin.config, t.itemId, newVal);
     showToast(newVal ? 'Added to Favorites' : 'Removed from Favorites');
+    // If the user is currently viewing the Favorites smart playlist, re-render
+    // so the row appears/disappears immediately.
     if (state.view === 'playlist-detail' && state.currentPlaylist && state.currentPlaylist.id === '__favorites__') render();
     else if (state.view === 'playlists') render();
   } catch (e) {
     console.error('Favorite toggle failed', e);
     t.isFavorite = !newVal; // revert
-    if (state.playingTrack && state.playingTrack.id === t.id) updateFavoriteUI();
+    if (trackIndex === state.currentIndex) updateFavoriteUI();
     showToast('Could not update favorite');
   }
 }
@@ -2812,7 +2759,7 @@ function subtitleFor(track) {
 }
 
 function refreshNowPlayingSubtitle() {
-  const t = state.playingTrack;
+  const t = state.tracks[state.currentIndex];
   if (t) subtitleEl.textContent = subtitleFor(t);
 }
 
@@ -2855,43 +2802,38 @@ function setNowPlayingArt(url) {
   }
 }
 
-// User tapped a track row in any browse view: build the queue from that view,
-// switch playback source to the browse source, and start playing the track.
-// This is the key place where browse and playback become linked again.
 function playTrackFromCurrentView(trackIndex) {
-  const startTrack = state.tracks[trackIndex];
-  if (!startTrack) return;
-  state.playingSource = state.source; // playback now follows browse
-  let ids;
+  // Queue depends on the current view.
   if (state.view === 'album-detail' && state.currentAlbum) {
-    ids = state.tracks
-      .filter(t => albumOf(t) === state.currentAlbum)
-      .map(t => t.id);
+    const album = state.currentAlbum;
+    const indices = state.tracks
+      .map((t, i) => albumOf(t) === album ? i : -1)
+      .filter(i => i !== -1);
+    setQueue(indices, trackIndex);
   } else if (state.view === 'playlist-detail' && state.currentPlaylist) {
-    ids = playlistTrackIdList(state.currentPlaylist);
+    const indices = playlistTracks(state.currentPlaylist);
+    setQueue(indices, trackIndex);
   } else {
-    ids = state.tracks.map(t => t.id);
+    // Songs view or albums grid play-all: queue all tracks
+    const indices = state.tracks.map((_, i) => i);
+    setQueue(indices, trackIndex);
   }
-  setQueue(ids, startTrack.id);
-  loadTrack(startTrack, true);
+  loadTrack(trackIndex, true);
 }
 
 function playPause() {
-  // No track loaded yet, but the browse library has something — start it.
-  if (!state.playingTrack && state.tracks.length > 0) {
-    state.playingSource = state.source;
-    const ids = state.tracks.map(t => t.id);
-    setQueue(ids, ids[0]);
-    loadTrack(state.tracks[0], true);
+  if (state.currentIndex === -1 && state.tracks.length > 0) {
+    const indices = state.tracks.map((_, i) => i);
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
     return;
   }
-  if (!state.playingTrack) return;
   if (audio.paused) playWithFallback('playPause');
   else audio.pause();
 }
 
 function nextTrack(auto) {
-  if (!state.playingTrack || state.queue.length === 0) return;
+  if (state.tracks.length === 0 || state.queue.length === 0) return;
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
     playWithFallback('repeatOne');
@@ -2908,21 +2850,16 @@ function nextTrack(auto) {
     }
   }
   state.queuePos = pos;
-  const nextId = state.queue[pos];
-  const track = findPlayingTrackById(nextId);
-  if (track) loadTrack(track, true);
-  else nextTrack(true); // dangling id (track removed); skip ahead
+  loadTrack(state.queue[pos], true);
 }
 
 function prevTrack() {
-  if (!state.playingTrack || state.queue.length === 0) return;
+  if (state.tracks.length === 0 || state.queue.length === 0) return;
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
   let pos = state.queuePos - 1;
   if (pos < 0) pos = state.queue.length - 1;
   state.queuePos = pos;
-  const prevId = state.queue[pos];
-  const track = findPlayingTrackById(prevId);
-  if (track) loadTrack(track, true);
+  loadTrack(state.queue[pos], true);
 }
 
 /* ---------- File ingestion ---------- */
@@ -3001,10 +2938,9 @@ async function addFiles(files) {
   }
   render();
   if (startedEmpty && state.tracks.length > 0) {
-    state.playingSource = 'local';
-    const ids = state.tracks.map(t => t.id);
-    setQueue(ids, ids[0]);
-    loadTrack(state.tracks[0], false);
+    const indices = state.tracks.map((_, i) => i);
+    setQueue(indices, indices[0]);
+    loadTrack(indices[0], false);
   }
   if (failed > 0) {
     showToast(`Added ${added} · ${failed} couldn't be saved`);
@@ -3019,42 +2955,33 @@ async function removeTrack(index) {
   if (state.source !== 'local') return;
   if (index < 0 || index >= state.tracks.length) return;
   const track = state.tracks[index];
-  const removedId = track.id;
-  const wasPlaying = state.playingTrack && state.playingTrack.id === removedId && !audio.paused;
-  const wasCurrent = state.playingTrack && state.playingTrack.id === removedId;
+  const wasPlaying = index === state.currentIndex && !audio.paused;
+  const wasCurrent = index === state.currentIndex;
 
-  try { await idbDelete(state.db, removedId); } catch (e) { /* ignore */ }
+  try { await idbDelete(state.db, track.id); } catch (e) { /* ignore */ }
   URL.revokeObjectURL(track.url);
   if (track.pictureUrl) URL.revokeObjectURL(track.pictureUrl);
   state.tracks.splice(index, 1);
 
-  // Drop the removed id from the queue if the playback source is local.
-  if (state.playingSource === 'local') {
-    const oldPos = state.queuePos;
-    state.queue = state.queue.filter(id => id !== removedId);
-    if (state.playingTrack && state.playingTrack.id !== removedId) {
-      state.queuePos = state.queue.indexOf(state.playingTrack.id);
-    } else {
-      // Was current; will be re-resolved below
-      state.queuePos = Math.min(oldPos, state.queue.length - 1);
-    }
-  }
-
+  // Fix up state.currentIndex and queue indices after removal.
+  state.queue = state.queue.filter(i => i !== index).map(i => i > index ? i - 1 : i);
   if (wasCurrent) {
     audio.pause();
     audio.removeAttribute('src');
     audio.load();
-    state.playingTrack = null;
+    state.currentIndex = -1;
     titleEl.textContent = 'No track loaded';
     subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
     if (state.queue.length > 0) {
+      state.queuePos = Math.min(state.queuePos, state.queue.length - 1);
       if (state.queuePos < 0) state.queuePos = 0;
-      const nextId = state.queue[state.queuePos];
-      const t = findPlayingTrackById(nextId);
-      if (t) loadTrack(t, wasPlaying);
+      loadTrack(state.queue[state.queuePos], wasPlaying);
     } else {
       state.queuePos = -1;
     }
+  } else if (state.currentIndex > index) {
+    state.currentIndex--;
+    // queuePos refers to position within queue, not affected by reindexing tracks
   }
   render();
 }
@@ -3067,19 +2994,15 @@ async function clearPlaylist() {
   }
   state.local.tracks.length = 0;
   state.tracks = state.local.tracks;
-  // Only blow away playback if we were playing from local
-  if (state.playingSource === 'local') {
-    state.queue = [];
-    state.queuePos = -1;
-    state.playingTrack = null;
-    state.playingSource = null;
-    audio.pause();
-    audio.removeAttribute('src');
-    audio.load();
-    titleEl.textContent = 'No track loaded';
-    subtitleEl.textContent = 'Tap "Add files" to load music';
-  }
+  state.currentIndex = -1;
+  state.queue = [];
+  state.queuePos = -1;
   try { await idbClear(state.db); } catch (e) { /* ignore */ }
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  titleEl.textContent = 'No track loaded';
+  subtitleEl.textContent = 'Tap "Add files" to load music';
   setNowPlayingArt(null);
   state.view = 'albums';
   state.currentAlbum = null;
@@ -3088,9 +3011,9 @@ async function clearPlaylist() {
 
 function updateMediaSession() {
   if (!('mediaSession' in navigator)) return;
-  const track = state.playingTrack;
+  const track = state.tracks[state.currentIndex];
   if (!track) { navigator.mediaSession.metadata = null; return; }
-  const artUrl = albumArtForPlayingTrack(track);
+  const artUrl = track.pictureUrl || albumArtUrlFor(albumOf(track));
   const artwork = artUrl
     ? [{
         src: artUrl,
@@ -3136,7 +3059,7 @@ async function restoreLibrary() {
     } catch (e) {
       console.warn('Could not load playlists', e);
     }
-    await setActiveSource(state.source, { force: true, initial: true });
+    await setActiveSource(state.source, { force: true });
     if (state.source === 'local' && state.tracks.length > 0) {
       bootPlaybackTrack(false);
     }
@@ -3191,17 +3114,12 @@ async function backfillTags() {
   }
   if (updated > 0) {
     render();
-    // If the currently-playing track was one of the updated local tracks,
-    // refresh its display fields.
-    if (state.playingTrack && state.playingSource === 'local') {
-      const refreshed = state.local.tracks.find(x => x.id === state.playingTrack.id);
-      if (refreshed) {
-        state.playingTrack = refreshed;
-        titleEl.textContent = refreshed.title;
-        subtitleEl.textContent = subtitleFor(refreshed);
-        setNowPlayingArt(albumArtForPlayingTrack(refreshed));
-        updateMediaSession();
-      }
+    if (state.currentIndex !== -1) {
+      const t = state.tracks[state.currentIndex];
+      titleEl.textContent = t.title;
+      subtitleEl.textContent = subtitleFor(t);
+      setNowPlayingArt(t.pictureUrl || albumArtUrlFor(albumOf(t)));
+      updateMediaSession();
     }
     showToast(`Read tags from ${updated} track${updated === 1 ? '' : 's'}`);
   }
@@ -3225,24 +3143,22 @@ shuffleBtn.addEventListener('click', () => {
   state.shuffle = !state.shuffle;
   shuffleBtn.classList.toggle('active', state.shuffle);
   shuffleBtn.setAttribute('aria-pressed', String(state.shuffle));
-  // Re-scope to album/playlist only when browse source matches playback source
-  // (or nothing is currently playing). Otherwise toggling shuffle from inside
-  // a different-source view would yank the user's current playback away — just
-  // reshuffle the existing queue instead.
-  const sameSource = !state.playingTrack || state.playingSource === state.source;
-  let scopedIds = null;
-  if (sameSource && state.view === 'album-detail' && state.currentAlbum) {
-    scopedIds = state.tracks
-      .filter(t => albumOf(t) === state.currentAlbum)
-      .map(t => t.id);
-  } else if (sameSource && state.view === 'playlist-detail' && state.currentPlaylist) {
-    scopedIds = playlistTrackIdList(state.currentPlaylist);
+  // If the user is inside an album-detail or playlist-detail view, scope the
+  // queue to that folder/playlist so shuffle stays within it. Otherwise just
+  // reshuffle whatever queue is currently active.
+  let scopedIndices = null;
+  if (state.view === 'album-detail' && state.currentAlbum) {
+    const album = state.currentAlbum;
+    scopedIndices = state.tracks
+      .map((t, i) => albumOf(t) === album ? i : -1)
+      .filter(i => i !== -1);
+  } else if (state.view === 'playlist-detail' && state.currentPlaylist) {
+    scopedIndices = playlistTracks(state.currentPlaylist);
   }
-  if (scopedIds && scopedIds.length > 0) {
-    state.playingSource = state.source;
-    const playingId = state.playingTrack ? state.playingTrack.id : null;
-    const startId = scopedIds.includes(playingId) ? playingId : scopedIds[0];
-    setQueue(scopedIds, startId);
+  if (scopedIndices && scopedIndices.length > 0) {
+    const playingIdx = state.queuePos >= 0 ? state.queue[state.queuePos] : -1;
+    const startIdx = scopedIndices.includes(playingIdx) ? playingIdx : scopedIndices[0];
+    setQueue(scopedIndices, startIdx);
     savePrefs();
     return;
   }
@@ -3267,7 +3183,7 @@ volume.addEventListener('input', () => {
 // audio.duration ends up Infinity).
 function effectiveDuration() {
   if (isFinite(audio.duration) && audio.duration > 0) return audio.duration;
-  const t = state.playingTrack;
+  const t = state.tracks[state.currentIndex];
   if (t && t.durationSec > 0) return t.durationSec;
   return 0;
 }
@@ -3282,7 +3198,7 @@ seek.addEventListener('change', () => {
 function resetTimeDisplay() {
   seek.value = '0';
   currentEl.textContent = '0:00';
-  const t = state.playingTrack;
+  const t = state.tracks[state.currentIndex];
   if (t && t.durationSec > 0) durationEl.textContent = formatTime(t.durationSec);
   else durationEl.textContent = '0:00';
 }
@@ -3428,12 +3344,12 @@ view.addEventListener('click', e => {
   }
   if (e.target.closest('#play-album')) {
     const album = state.currentAlbum;
-    const albumTracks = state.tracks.filter(t => albumOf(t) === album);
-    if (albumTracks.length === 0) return;
-    state.playingSource = state.source;
-    const ids = albumTracks.map(t => t.id);
-    setQueue(ids, ids[0]);
-    loadTrack(albumTracks[0], true);
+    const indices = state.tracks
+      .map((t, i) => albumOf(t) === album ? i : -1)
+      .filter(i => i !== -1);
+    if (indices.length === 0) return;
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
     return;
   }
   if (e.target.closest('#album-menu')) {
@@ -3442,12 +3358,10 @@ view.addEventListener('click', e => {
   }
   if (e.target.closest('#play-playlist')) {
     if (!state.currentPlaylist) return;
-    const ids = playlistTrackIdList(state.currentPlaylist);
-    if (ids.length === 0) return;
-    state.playingSource = state.source;
-    setQueue(ids, ids[0]);
-    const t = findPlayingTrackById(ids[0]);
-    if (t) loadTrack(t, true);
+    const indices = playlistTracks(state.currentPlaylist);
+    if (indices.length === 0) return;
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
     return;
   }
   if (e.target.closest('#playlist-menu')) {
@@ -3459,12 +3373,12 @@ view.addEventListener('click', e => {
 async function handleAlbumSheetAction(act, albumName) {
   if (act === 'play') {
     closeSheet();
-    const albumTracks = state.tracks.filter(t => albumOf(t) === albumName);
-    if (albumTracks.length === 0) return;
-    state.playingSource = state.source;
-    const ids = albumTracks.map(t => t.id);
-    setQueue(ids, ids[0]);
-    loadTrack(albumTracks[0], true);
+    const indices = state.tracks
+      .map((t, i) => albumOf(t) === albumName ? i : -1)
+      .filter(i => i !== -1);
+    if (indices.length === 0) return;
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
   } else if (act === 'rename') {
     closeSheet();
     const next = prompt(`Rename album "${albumName}" to:`, albumName);
@@ -3528,22 +3442,23 @@ async function handlePlaylistTrackAction(act, positionInPlaylist) {
   if (act === 'cancel') { closeSheet(); return; }
   if (act === 'play') {
     closeSheet();
-    const ids = playlistTrackIdList(p);
-    if (ids.length === 0) return;
-    const targetId = ids[positionInPlaylist];
-    if (targetId == null) return;
-    state.playingSource = state.source;
-    setQueue(ids, targetId);
-    const t = findPlayingTrackById(targetId);
-    if (t) loadTrack(t, true);
+    const indices = playlistTracks(p);
+    if (indices.length === 0) return;
+    // For smart playlists (Favorites), positionInPlaylist indexes into the
+    // computed list, not a stored trackIds array.
+    const targetTrackIdx = p.smart
+      ? indices[positionInPlaylist]
+      : state.tracks.findIndex(t => t.id === p.trackIds[positionInPlaylist]);
+    if (targetTrackIdx == null || targetTrackIdx < 0) return;
+    setQueue(indices, targetTrackIdx);
+    loadTrack(targetTrackIdx, true);
     return;
   }
   if (act === 'unfavorite') {
     closeSheet();
-    const ids = playlistTrackIdList(p);
-    const targetId = ids[positionInPlaylist];
-    const track = state.tracks.find(t => t.id === targetId);
-    if (track) await toggleFavorite(track);
+    const indices = playlistTracks(p);
+    const trackIdx = indices[positionInPlaylist];
+    if (trackIdx >= 0) await toggleFavorite(trackIdx);
     return;
   }
   if (act === 'move-up') {
@@ -3572,12 +3487,10 @@ async function handlePlaylistMenuAction(act) {
   if (act === 'cancel') { closeSheet(); return; }
   if (act === 'play') {
     closeSheet();
-    const ids = playlistTrackIdList(p);
-    if (ids.length === 0) return;
-    state.playingSource = state.source;
-    setQueue(ids, ids[0]);
-    const t = findPlayingTrackById(ids[0]);
-    if (t) loadTrack(t, true);
+    const indices = playlistTracks(p);
+    if (indices.length === 0) return;
+    setQueue(indices, indices[0]);
+    loadTrack(state.queue[0], true);
     return;
   }
   if (act === 'rename') {
@@ -3649,7 +3562,7 @@ document.getElementById('source-toggle').addEventListener('click', e => {
 document.getElementById('settings-btn').addEventListener('click', openSettingsSheet);
 document.getElementById('jf-refresh').addEventListener('click', () => syncJellyfin({ feedback: true }));
 document.getElementById('favorite-btn').addEventListener('click', () => {
-  if (state.playingTrack) toggleFavorite(state.playingTrack);
+  if (state.currentIndex >= 0) toggleFavorite(state.currentIndex);
 });
 
 {
