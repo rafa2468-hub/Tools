@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.6.2';
+const APP_VERSION = '1.6.3';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1600,6 +1600,13 @@ async function syncJellyfin(opts) {
         const matched = state.playlists.find(p => p.id === playlistDetailId);
         state.currentPlaylist = matched || null;
         if (!matched && state.view === 'playlist-detail') state.view = 'playlists';
+        // If the open playlist's cache was invalidated by this refresh, fetch
+        // its items once here (NOT from render) so the detail view repopulates.
+        if (matched && state.view === 'playlist-detail' && !matched.loaded && !matched.loading) {
+          ensurePlaylistLoaded(matched).then(() => {
+            if (state.view === 'playlist-detail' && state.currentPlaylist && state.currentPlaylist.id === matched.id) render();
+          });
+        }
       } else if (wasOnFavorites) {
         state.currentPlaylist = favoritesSmartPlaylist();
       }
@@ -1988,20 +1995,12 @@ function renderPlaylistDetail() {
   state.currentPlaylist = p; // refresh reference
   const isSmart = !!p.smart;
   const loadFailed = !!p.loadFailed;
+  // render() must stay PURE — it never triggers a fetch. Loading a Jellyfin
+  // playlist's items is the job of the click handler (and syncJellyfin for the
+  // refresh case). A render-side fetch trigger here previously created an
+  // async render→fetch→render loop that froze the UI when the fetch failed.
   const isLoading = p.source === 'jellyfin' && !p.loaded && !isSmart && !loadFailed;
-  // Safety net: if we landed here with an unloaded Jellyfin playlist (e.g.
-  // after a silent auto-refresh that invalidated the cache), kick off the
-  // fetch directly from render. ensurePlaylistLoaded re-entry-guards itself
-  // and won't re-fetch if a previous attempt failed (which would otherwise
-  // make this safety net spin in a hot loop on a blocked/unreachable server).
-  if (isLoading) {
-    ensurePlaylistLoaded(p).then(() => {
-      if (state.view === 'playlist-detail' && state.currentPlaylist && state.currentPlaylist.id === p.id) {
-        render();
-      }
-    });
-  }
-  const allIndices = isLoading ? [] : playlistTracks(p);
+  const allIndices = (isLoading || loadFailed) ? [] : playlistTracks(p);
   const indices = state.search
     ? allIndices.filter(i => trackMatchesSearch(state.tracks[i]))
     : allIndices;
@@ -3319,10 +3318,16 @@ view.addEventListener('click', e => {
       state.currentPlaylist = p;
       state.view = 'playlist-detail';
       view.scrollTop = 0;
-      render();
+      // Kick off the fetch BEFORE the first render so the view shows "Loading…"
+      // instead of briefly flashing an empty state. ensurePlaylistLoaded sets
+      // p.loading synchronously and resolves whether it succeeds or fails.
       if (p.source === 'jellyfin' && !p.loaded) {
-        ensurePlaylistLoaded(p).then(() => render());
+        ensurePlaylistLoaded(p).then(() => {
+          // Only re-render if the user is still on this playlist.
+          if (state.view === 'playlist-detail' && state.currentPlaylist && state.currentPlaylist.id === p.id) render();
+        });
       }
+      render();
     }
     return;
   }

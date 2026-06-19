@@ -1,5 +1,5 @@
 // Bump this string to force clients to fetch the new app shell.
-const CACHE_VERSION = 'music-player-v30';
+const CACHE_VERSION = 'music-player-v31';
 
 const APP_SHELL = [
   './',
