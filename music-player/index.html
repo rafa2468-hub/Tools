@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.6.2';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1987,10 +1987,13 @@ function renderPlaylistDetail() {
   }
   state.currentPlaylist = p; // refresh reference
   const isSmart = !!p.smart;
-  const isLoading = p.source === 'jellyfin' && !p.loaded && !isSmart;
+  const loadFailed = !!p.loadFailed;
+  const isLoading = p.source === 'jellyfin' && !p.loaded && !isSmart && !loadFailed;
   // Safety net: if we landed here with an unloaded Jellyfin playlist (e.g.
   // after a silent auto-refresh that invalidated the cache), kick off the
-  // fetch directly from render. ensurePlaylistLoaded re-entry-guards itself.
+  // fetch directly from render. ensurePlaylistLoaded re-entry-guards itself
+  // and won't re-fetch if a previous attempt failed (which would otherwise
+  // make this safety net spin in a hot loop on a blocked/unreachable server).
   if (isLoading) {
     ensurePlaylistLoaded(p).then(() => {
       if (state.view === 'playlist-detail' && state.currentPlaylist && state.currentPlaylist.id === p.id) {
@@ -2023,11 +2026,13 @@ function renderPlaylistDetail() {
       ${menuBtnHtml}
     </div>
   `;
-  const list = isLoading
-    ? '<div class="empty">Loading…</div>'
-    : (indices.length > 0
-        ? indices.map((i, n) => playlistTrackRow(i, allIndices.indexOf(i))).join('')
-        : '<div class="empty">' + (state.search ? 'No matches.' : 'Empty playlist. Add tracks from the Albums or Songs tabs.') + '</div>');
+  const list = loadFailed
+    ? '<div class="empty">Could not reach Jellyfin to load this playlist.<div class="hint">Tap back and try again, or check the server URL in settings.</div></div>'
+    : (isLoading
+        ? '<div class="empty">Loading…</div>'
+        : (indices.length > 0
+            ? indices.map((i, n) => playlistTrackRow(i, allIndices.indexOf(i))).join('')
+            : '<div class="empty">' + (state.search ? 'No matches.' : 'Empty playlist. Add tracks from the Albums or Songs tabs.') + '</div>'));
   view.innerHTML = header + list;
 }
 
@@ -2506,7 +2511,8 @@ async function createPlaylist(name) {
 
 async function ensurePlaylistLoaded(playlist) {
   if (playlist.source !== 'jellyfin' || playlist.loaded) return;
-  if (playlist.loading) return; // re-entry guard so render+click can't double-fetch
+  if (playlist.loadFailed) return; // don't hammer a server we know is unreachable
+  if (playlist.loading) return;    // re-entry guard so render+click can't double-fetch
   playlist.loading = true;
   try {
     const items = await JF.fetchPlaylistItems(state.jellyfin.config, playlist.id);
@@ -2514,9 +2520,11 @@ async function ensurePlaylistLoaded(playlist) {
     playlist.entryIds = items.map(it => it.PlaylistItemId);
     playlist.trackCount = items.length;
     playlist.loaded = true;
+    playlist.loadFailed = false;
   } catch (e) {
     console.error('Load playlist items failed', e);
-    showToast('Could not load playlist');
+    playlist.loadFailed = true; // breaks the renderPlaylistDetail retry loop
+    showToast('Could not load playlist — check Jellyfin connection');
   } finally {
     playlist.loading = false;
   }
@@ -3306,6 +3314,8 @@ view.addEventListener('click', e => {
     const pid = /^\d+$/.test(raw) ? Number(raw) : raw;
     const p = state.playlists.find(p => p.id === pid);
     if (p) {
+      // A new tap into the playlist resets any prior failure so we retry once.
+      if (p.loadFailed) p.loadFailed = false;
       state.currentPlaylist = p;
       state.view = 'playlist-detail';
       view.scrollTop = 0;
