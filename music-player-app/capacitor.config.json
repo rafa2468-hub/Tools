@@ -1,0 +1,11 @@
+{
+  "appId": "com.brokis.musicplayer",
+  "appName": "Music Player",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#0b0b10"
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

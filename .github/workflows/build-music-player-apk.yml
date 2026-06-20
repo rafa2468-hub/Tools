@@ -1,0 +1,97 @@
+name: Build Music Player APK
+
+on:
+  push:
+    branches: [claude/music-player-apk, main]
+    paths:
+      - 'music-player/**'
+      - 'music-player-app/**'
+      - '.github/workflows/build-music-player-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      # Cache Gradle downloads so re-runs finish faster
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('music-player-app/package.json') }}
+          restore-keys: gradle-
+
+      - name: Install Capacitor deps
+        working-directory: music-player-app
+        run: npm install
+
+      - name: Stage web assets into www/
+        working-directory: music-player-app
+        run: |
+          rm -rf www && mkdir -p www
+          cp -r ../music-player/. www/
+          echo "--- www contents ---"
+          ls -la www
+
+      - name: Add Android platform
+        working-directory: music-player-app
+        run: npx cap add android
+
+      - name: Generate launcher icons from the PWA icon (best-effort)
+        working-directory: music-player-app
+        continue-on-error: true
+        run: |
+          mkdir -p resources
+          cp ../music-player/icons/icon-512.png resources/icon.png
+          npx @capacitor/assets generate --android \
+            --iconBackgroundColor '#0b0b10' \
+            --iconBackgroundColorDark '#0b0b10'
+
+      - name: Sync web assets into the Android project
+        working-directory: music-player-app
+        run: npx cap sync android
+
+      - name: Build debug APK
+        id: build_apk
+        working-directory: music-player-app/android
+        continue-on-error: true
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon 2>&1 | tee /tmp/build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Diagnose build failure
+        if: steps.build_apk.outcome == 'failure'
+        run: |
+          echo "=== Last 80 lines of build log ==="
+          tail -80 /tmp/build.log
+          echo ""
+          echo "=== Error / SDK lines ==="
+          grep -E "error:|Error:|FAILED|Exception|compileSdk|minSdk|Could not|not found" /tmp/build.log | head -40 || echo "(no patterns matched)"
+          exit 1
+
+      - name: Stage APK artifact
+        run: cp music-player-app/android/app/build/outputs/apk/debug/app-debug.apk music-player-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: music-player-apk
+          path: music-player-debug.apk
+          retention-days: 30
