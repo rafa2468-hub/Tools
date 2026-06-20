@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.6.6';
+const APP_VERSION = '1.6.7';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1139,6 +1139,20 @@ function titleFromName(name) {
   return stripped.replace(/^\d+[\s._-]+/, '').trim() || name;
 }
 
+// Derive artist/title from a "Artist - Title" filename when ID3 tags are
+// unavailable (the common case in the WebView wrapper, where tag reading can
+// fail on content:// files). Falls back to title-only when there's no " - ".
+function parseNameMeta(name) {
+  const base = name.replace(/\.[^.]+$/, '').replace(/^\d+[\s._-]+/, '').trim();
+  const parts = base.split(/\s+-\s+/);
+  if (parts.length >= 2) {
+    const artist = parts[0].trim();
+    const title = parts.slice(1).join(' - ').trim();
+    if (artist && title) return { artist, title };
+  }
+  return { artist: '', title: base };
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -1171,9 +1185,15 @@ function albumOf(track) { return track.album || UNSORTED; }
 function artistOf(track) { return track.artist || ''; }
 
 /* ---------- ID3 / metadata tag reading via jsmediatags ---------- */
-function readTags(file) {
+async function readTags(file) {
+  if (typeof window.jsmediatags === 'undefined') return null;
+  // In the Android WebView wrapper, picked files are backed by a content:// URI
+  // that jsmediatags can't slice — tag reading fails even though playback works
+  // (playback uses a blob URL). Materialize to an in-memory blob first so the
+  // library reads from plain bytes. Harmless on desktop.
+  let src = file;
+  try { src = new Blob([await file.arrayBuffer()]); } catch (e) { /* fall back to original */ }
   return new Promise((resolve) => {
-    if (typeof window.jsmediatags === 'undefined') { resolve(null); return; }
     // jsmediatags can silently hang on malformed tag headers in some files
     // (notably newer iTunes M4A variants). Cap the wait so a bad file can't
     // stall the whole import.
@@ -1181,7 +1201,7 @@ function readTags(file) {
     const finish = (val) => { if (done) return; done = true; clearTimeout(timer); resolve(val); };
     const timer = setTimeout(() => finish(null), 2500);
     try {
-      window.jsmediatags.read(file, {
+      window.jsmediatags.read(src, {
         onSuccess: (result) => finish(result && result.tags ? result.tags : null),
         onError: () => finish(null),
       });
@@ -2937,11 +2957,13 @@ async function addFiles(files) {
     const tagArtist = tags ? tagString(tags.artist) : '';
     const tagAlbum = tags ? tagString(tags.album) : '';
     const pictureBlob = tags ? pictureToBlob(tags.picture) : null;
+    // Fall back to "Artist - Title" parsed from the filename when tags are missing.
+    const nameMeta = parseNameMeta(file.name);
 
     const record = {
       name: file.name,
-      title: tagTitle || titleFromName(file.name),
-      artist: tagArtist || null,
+      title: tagTitle || nameMeta.title || titleFromName(file.name),
+      artist: tagArtist || nameMeta.artist || null,
       album: chooseAlbumName(file, tagAlbum),
       type: file.type || 'audio/mpeg',
       size: file.size,
@@ -2949,7 +2971,9 @@ async function addFiles(files) {
       blob: file,
       pictureBlob: pictureBlob || undefined,
       pictureMime: pictureBlob ? pictureBlob.type : undefined,
-      tagsRead: true,
+      // If tag reading failed, leave this false so backfillTags retries from the
+      // stored (plain) blob on a later launch — that read isn't content:// bound.
+      tagsRead: tags != null,
     };
     try {
       const id = await idbAdd(state.db, record);
