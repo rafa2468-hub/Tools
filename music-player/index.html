@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.6.5';
+const APP_VERSION = '1.6.6';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1623,32 +1623,30 @@ function updateRefreshSpin(spinning) {
 }
 
 async function setActiveSource(nextSource, opts) {
+  const initial = !!(opts && opts.initial);
   if (state.source === nextSource && !(opts && opts.force)) return;
-  audio.pause();
-  audio.removeAttribute('src');
-  audio.load();
-  state.playingTrack = null;
-  state.playingSource = null;
-  state.queue = [];
-  state.queuePos = -1;
+
+  // Switching the browse source changes only the library on screen — it does
+  // NOT interrupt playback. You can browse Local while a Jellyfin track keeps
+  // playing (and vice-versa); only tapping a track changes what's playing. The
+  // now-playing area is left untouched whenever a track is loaded.
+  state.source = nextSource;
+  saveSource();
   state.view = 'albums';
   state.currentAlbum = null;
   state.currentPlaylist = null;
-  setNowPlayingArt(null);
-  titleEl.textContent = 'No track loaded';
-
-  state.source = nextSource;
-  saveSource();
 
   if (nextSource === 'local') {
     state.tracks = state.local.tracks;
     state.playlists = state.local.playlists;
-    subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
+    if (!state.playingTrack) {
+      subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'Tap "Add files" to load music';
+    }
   } else if (nextSource === 'jellyfin') {
     state.playlists = state.jellyfin.playlists;
     if (!state.jellyfin.config.accessToken) {
       state.tracks = [];
-      subtitleEl.textContent = 'Tap the gear to connect to Jellyfin';
+      if (!state.playingTrack) subtitleEl.textContent = 'Tap the gear to connect to Jellyfin';
       render();
       applySourceUI();
       openSettingsSheet();
@@ -1656,12 +1654,12 @@ async function setActiveSource(nextSource, opts) {
     }
     if (state.jellyfin.tracks.length === 0) {
       state.tracks = [];
-      subtitleEl.textContent = 'Loading your Jellyfin library…';
+      if (!state.playingTrack) subtitleEl.textContent = 'Loading your Jellyfin library…';
       render();
       applySourceUI();
       const ok = await syncJellyfin({ feedback: false });
       if (!ok) {
-        subtitleEl.textContent = 'Could not reach Jellyfin';
+        if (!state.playingTrack) subtitleEl.textContent = 'Could not reach Jellyfin';
         return;
       }
     }
@@ -1687,12 +1685,17 @@ async function setActiveSource(nextSource, opts) {
       }
     }
     state.tracks = state.jellyfin.tracks;
-    if (state.tracks.length > 0) {
-      bootPlaybackTrack(false);
-    } else {
-      subtitleEl.textContent = 'No tracks found';
+    if (!state.playingTrack) {
+      subtitleEl.textContent = state.tracks.length ? 'Tap a track to play' : 'No tracks found';
     }
   }
+
+  // Only the initial app boot wires the first/resume track into the now-playing
+  // area. A user-initiated source switch never starts playback on its own.
+  if (initial && !state.playingTrack && state.tracks.length > 0) {
+    bootPlaybackTrack(false);
+  }
+
   render();
   applySourceUI();
 }
@@ -2305,6 +2308,18 @@ async function handleSettingsAction(act) {
     state.jellyfin.playlists.length = 0;
     state.jellyfin.playlistsLoaded = false;
     state.jellyfin.lastSync = 0;
+    // A playing Jellyfin track just lost its stream token — stop it.
+    if (state.playingSource === 'jellyfin') {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      state.playingTrack = null;
+      state.playingSource = null;
+      state.queue = [];
+      state.queuePos = -1;
+      titleEl.textContent = 'No track loaded';
+      setNowPlayingArt(null);
+    }
     if (state.source === 'jellyfin') {
       await setActiveSource('local');
     }
@@ -2849,7 +2864,7 @@ function playPause() {
 }
 
 function nextTrack(auto) {
-  if (state.tracks.length === 0 || state.queue.length === 0) return;
+  if (state.queue.length === 0) return;
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
     playWithFallback('repeatOne');
@@ -2870,7 +2885,7 @@ function nextTrack(auto) {
 }
 
 function prevTrack() {
-  if (state.tracks.length === 0 || state.queue.length === 0) return;
+  if (state.queue.length === 0) return;
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
   let pos = state.queuePos - 1;
   if (pos < 0) pos = state.queue.length - 1;
@@ -2953,7 +2968,7 @@ async function addFiles(files) {
     }
   }
   render();
-  if (startedEmpty && state.tracks.length > 0) {
+  if (startedEmpty && state.tracks.length > 0 && !state.playingTrack) {
     const indices = state.tracks.map((_, i) => i);
     setQueue(indices, indices[0]);
     loadQueueCurrent(false);
@@ -3078,10 +3093,7 @@ async function restoreLibrary() {
     } catch (e) {
       console.warn('Could not load playlists', e);
     }
-    await setActiveSource(state.source, { force: true });
-    if (state.source === 'local' && state.tracks.length > 0) {
-      bootPlaybackTrack(false);
-    }
+    await setActiveSource(state.source, { force: true, initial: true });
     if (state.source === 'local') backfillTags();
   } catch (err) {
     console.error('Failed to open library', err);
@@ -3165,13 +3177,18 @@ shuffleBtn.addEventListener('click', () => {
   // If the user is inside an album-detail or playlist-detail view, scope the
   // queue to that folder/playlist so shuffle stays within it. Otherwise just
   // reshuffle whatever queue is currently active.
+  // Only scope shuffle to the browsed album/playlist when it belongs to the
+  // playing source (or nothing is playing yet). Otherwise scoping would yank
+  // playback over to whatever you're browsing — instead just reshuffle the
+  // existing queue in place.
+  const canScope = !state.playingSource || state.source === state.playingSource;
   let scopedIndices = null;
-  if (state.view === 'album-detail' && state.currentAlbum) {
+  if (canScope && state.view === 'album-detail' && state.currentAlbum) {
     const album = state.currentAlbum;
     scopedIndices = state.tracks
       .map((t, i) => albumOf(t) === album ? i : -1)
       .filter(i => i !== -1);
-  } else if (state.view === 'playlist-detail' && state.currentPlaylist) {
+  } else if (canScope && state.view === 'playlist-detail' && state.currentPlaylist) {
     scopedIndices = playlistTracks(state.currentPlaylist);
   }
   if (scopedIndices && scopedIndices.length > 0) {
