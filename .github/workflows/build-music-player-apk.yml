@@ -37,6 +37,16 @@ jobs:
           key: gradle-${{ hashFiles('music-player-app/package.json') }}
           restore-keys: gradle-
 
+      - name: Use the committed debug keystore (stable signature across builds)
+        run: |
+          if [ -f music-player-app/debug.keystore ]; then
+            mkdir -p "$HOME/.android"
+            cp music-player-app/debug.keystore "$HOME/.android/debug.keystore"
+            echo "Using committed debug keystore — builds share one signature."
+          else
+            echo "No committed keystore; Gradle will generate an ephemeral one (signature will differ per run)."
+          fi
+
       - name: Install Capacitor deps
         working-directory: music-player-app
         run: npm install
