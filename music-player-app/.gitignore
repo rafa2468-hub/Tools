@@ -1,0 +1,7 @@
+# Capacitor wrapper — everything below is generated at build time in CI.
+node_modules/
+www/
+android/
+resources/
+*.apk
+*.aab

@@ -1,0 +1,13 @@
+{
+  "name": "music-player-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor Android wrapper for the Music Player PWA",
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2"
+  }
+}
