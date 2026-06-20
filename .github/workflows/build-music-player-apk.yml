@@ -37,15 +37,27 @@ jobs:
           key: gradle-${{ hashFiles('music-player-app/package.json') }}
           restore-keys: gradle-
 
-      - name: Use the committed debug keystore (stable signature across builds)
+      - name: Force debug signing to the committed keystore (stable signature)
         run: |
-          if [ -f music-player-app/debug.keystore ]; then
-            mkdir -p "$HOME/.android"
-            cp music-player-app/debug.keystore "$HOME/.android/debug.keystore"
-            echo "Using committed debug keystore — builds share one signature."
-          else
-            echo "No committed keystore; Gradle will generate an ephemeral one (signature will differ per run)."
-          fi
+          # A Gradle init script explicitly points the debug signingConfig at our
+          # committed keystore. Copying it to ~/.android/debug.keystore is NOT
+          # reliable (Gradle/AGP signs with a fresh key), which breaks in-place
+          # updates. This applies to whichever app module AGP builds.
+          KS="$GITHUB_WORKSPACE/music-player-app/debug.keystore"
+          mkdir -p "$HOME/.gradle/init.d"
+          {
+            echo "allprojects {"
+            echo "  afterEvaluate { project ->"
+            echo "    if (project.plugins.hasPlugin('com.android.application')) {"
+            echo "      project.android.signingConfigs.debug.storeFile = file('$KS')"
+            echo "      project.android.signingConfigs.debug.storePassword = 'android'"
+            echo "      project.android.signingConfigs.debug.keyAlias = 'androiddebugkey'"
+            echo "      project.android.signingConfigs.debug.keyPassword = 'android'"
+            echo "    }"
+            echo "  }"
+            echo "}"
+          } > "$HOME/.gradle/init.d/debug-signing.gradle"
+          echo "--- debug-signing.gradle ---"; cat "$HOME/.gradle/init.d/debug-signing.gradle"
 
       - name: Install Capacitor deps
         working-directory: music-player-app
