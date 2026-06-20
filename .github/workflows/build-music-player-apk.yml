@@ -63,6 +63,14 @@ jobs:
         working-directory: music-player-app
         run: npx cap add android
 
+      - name: Apply custom MainActivity (enables media auto-advance)
+        working-directory: music-player-app
+        run: |
+          dest="android/app/src/main/java/com/brokis/musicplayer"
+          mkdir -p "$dest"
+          cp MainActivity.java "$dest/MainActivity.java"
+          echo "--- MainActivity.java ---"; cat "$dest/MainActivity.java"
+
       - name: Generate launcher icons from the PWA icon (best-effort)
         working-directory: music-player-app
         continue-on-error: true
