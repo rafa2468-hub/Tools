@@ -37,28 +37,6 @@ jobs:
           key: gradle-${{ hashFiles('music-player-app/package.json') }}
           restore-keys: gradle-
 
-      - name: Force debug signing to the committed keystore (stable signature)
-        run: |
-          # A Gradle init script explicitly points the debug signingConfig at our
-          # committed keystore. Copying it to ~/.android/debug.keystore is NOT
-          # reliable (Gradle/AGP signs with a fresh key), which breaks in-place
-          # updates. This applies to whichever app module AGP builds.
-          KS="$GITHUB_WORKSPACE/music-player-app/debug.keystore"
-          mkdir -p "$HOME/.gradle/init.d"
-          {
-            echo "allprojects {"
-            echo "  afterEvaluate { project ->"
-            echo "    if (project.plugins.hasPlugin('com.android.application')) {"
-            echo "      project.android.signingConfigs.debug.storeFile = file('$KS')"
-            echo "      project.android.signingConfigs.debug.storePassword = 'android'"
-            echo "      project.android.signingConfigs.debug.keyAlias = 'androiddebugkey'"
-            echo "      project.android.signingConfigs.debug.keyPassword = 'android'"
-            echo "    }"
-            echo "  }"
-            echo "}"
-          } > "$HOME/.gradle/init.d/debug-signing.gradle"
-          echo "--- debug-signing.gradle ---"; cat "$HOME/.gradle/init.d/debug-signing.gradle"
-
       - name: Install Capacitor deps
         working-directory: music-player-app
         run: npm install
@@ -116,8 +94,27 @@ jobs:
           grep -E "error:|Error:|FAILED|Exception|compileSdk|minSdk|Could not|not found" /tmp/build.log | head -40 || echo "(no patterns matched)"
           exit 1
 
+      - name: Re-sign APK with the committed keystore (deterministic signature)
+        run: |
+          APK="music-player-app/android/app/build/outputs/apk/debug/app-debug.apk"
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          APKSIGNER=$(ls "$SDK"/build-tools/*/apksigner | sort -V | tail -1)
+          echo "Using $APKSIGNER"
+          # Strip Gradle's per-run debug signature and re-sign with OUR fixed key.
+          # apksigner is deterministic: same keystore in -> same signing cert out,
+          # so updates install in place across every build.
+          "$APKSIGNER" sign \
+            --ks "$GITHUB_WORKSPACE/music-player-app/debug.keystore" \
+            --ks-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --key-pass pass:android \
+            "$APK"
+          echo "--- signing cert (must be identical across builds) ---"
+          "$APKSIGNER" verify --print-certs "$APK" | grep -iE "certificate (SHA-256|DN)" || "$APKSIGNER" verify --print-certs "$APK"
+          cp "$APK" music-player-debug.apk
+
       - name: Stage APK artifact
-        run: cp music-player-app/android/app/build/outputs/apk/debug/app-debug.apk music-player-debug.apk
+        run: test -f music-player-debug.apk && echo "APK staged"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
