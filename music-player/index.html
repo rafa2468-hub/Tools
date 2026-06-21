@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.2';
+const APP_VERSION = '1.7.3';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -2693,6 +2693,7 @@ async function playWithFallback(reason) {
       return true;
     } catch (err2) {
       console.warn('audio.play() retry rejected:', err2 && err2.name, err2 && err2.message);
+      nativeSetPlaybackState('paused');
       if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
       playIcon.innerHTML = PLAY_ICON;
       showToast('Playback paused — tap play to resume');
@@ -3067,9 +3068,39 @@ async function clearPlaylist() {
   render();
 }
 
+// Native media session (Android app only). Establishes a real Android media
+// session so playback keeps advancing while the screen is locked and song info
+// shows on the lock screen / car. Deliberately MINIMAL — only metadata and
+// playback state, no rapid position updates or control-button callbacks (those
+// crashed in the fuller v1.7.0 attempt). The PWA keeps using navigator.mediaSession.
+function nativeMS() {
+  const C = window.Capacitor;
+  if (C && C.isNativePlatform && C.isNativePlatform() && C.Plugins && C.Plugins.MediaSession) {
+    return C.Plugins.MediaSession;
+  }
+  return null;
+}
+function nativeSetMetadata(track) {
+  const n = nativeMS();
+  if (!n) return;
+  try {
+    n.setMetadata({
+      title: track ? (track.title || '') : '',
+      artist: track ? artistOf(track) : '',
+      album: track && albumOf(track) !== UNSORTED ? albumOf(track) : '',
+    }).catch(() => {});
+  } catch (e) { /* ignore */ }
+}
+function nativeSetPlaybackState(s) {
+  const n = nativeMS();
+  if (!n) return;
+  try { n.setPlaybackState({ playbackState: s }).catch(() => {}); } catch (e) { /* ignore */ }
+}
+
 function updateMediaSession() {
-  if (!('mediaSession' in navigator)) return;
   const track = state.playingTrack;
+  nativeSetMetadata(track);
+  if (!('mediaSession' in navigator)) return;
   if (!track) { navigator.mediaSession.metadata = null; return; }
   const artUrl = track.pictureUrl || albumArtUrlFor(albumOf(track));
   const artwork = artUrl
@@ -3299,10 +3330,12 @@ audio.addEventListener('loadedmetadata', () => {
 });
 audio.addEventListener('play', () => {
   playIcon.innerHTML = PAUSE_ICON;
+  nativeSetPlaybackState('playing');
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
 });
 audio.addEventListener('pause', () => {
   playIcon.innerHTML = PLAY_ICON;
+  nativeSetPlaybackState('paused');
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
   saveResume(true);
 });
