@@ -3735,6 +3735,21 @@ if ('mediaSession' in navigator) {
   } catch (e) { /* optional */ }
 }
 
+// Native media controls (Android app): route lock-screen / Android Auto /
+// Bluetooth / hardware media buttons to the player. The native plugin owns the
+// system session in the app, so these are what the car talks to.
+(function registerNativeMediaControls() {
+  const n = nativeMS();
+  if (!n) return;
+  const set = (action, handler) => {
+    try { n.setActionHandler({ action }, handler).catch(() => {}); } catch (e) { /* ignore */ }
+  };
+  set('play', () => { console.log('[DIAG action play]'); playWithFallback('mediaSession'); });
+  set('pause', () => { console.log('[DIAG action pause]'); audio.pause(); });
+  set('previoustrack', () => { console.log('[DIAG action prev]'); prevTrack(); });
+  set('nexttrack', () => { console.log('[DIAG action next]'); nextTrack(false); });
+})();
+
 /* ---------- Service worker + install prompt ---------- */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
