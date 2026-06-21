@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.3';
+const APP_VERSION = '1.7.4';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -3083,11 +3083,17 @@ function nativeMS() {
 function nativeSetMetadata(track) {
   const n = nativeMS();
   if (!n) return;
+  // The plugin REQUIRES an artwork array — omitting it makes its native
+  // setMetadata call .toList() on null and crash. Always pass one. Native can't
+  // load blob: art (local files), so only pass http(s) art (Jellyfin).
+  let artUrl = track ? (track.pictureUrl || albumArtUrlFor(albumOf(track))) : null;
+  if (artUrl && artUrl.indexOf('blob:') === 0) artUrl = null;
   try {
     n.setMetadata({
       title: track ? (track.title || '') : '',
       artist: track ? artistOf(track) : '',
       album: track && albumOf(track) !== UNSORTED ? albumOf(track) : '',
+      artwork: artUrl ? [{ src: artUrl, sizes: '512x512', type: (track && track.pictureMime) || 'image/jpeg' }] : [],
     }).catch(() => {});
   } catch (e) { /* ignore */ }
 }
