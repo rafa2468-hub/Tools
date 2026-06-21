@@ -61,6 +61,15 @@ jobs:
           cp MainActivity.java "$dest/MainActivity.java"
           echo "--- MainActivity.java ---"; cat "$dest/MainActivity.java"
 
+      - name: Add media-playback foreground-service permissions to manifest
+        working-directory: music-player-app
+        run: |
+          M="android/app/src/main/AndroidManifest.xml"
+          # The media-session plugin runs a foregroundServiceType=mediaPlayback
+          # service; Android 14 (targetSdk 34) requires these permissions declared.
+          sed -i '/android.permission.INTERNET/a\    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>' "$M"
+          echo "--- manifest permissions ---"; grep -i "uses-permission" "$M"
+
       - name: Generate launcher icons from the PWA icon (best-effort)
         working-directory: music-player-app
         continue-on-error: true
