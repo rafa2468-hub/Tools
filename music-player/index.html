@@ -1774,8 +1774,11 @@ function trackById(id) {
 
 // Load whatever track the queue currently points at.
 function loadQueueCurrent(autoplay) {
-  if (state.queuePos < 0 || state.queuePos >= state.queue.length) return;
-  loadTrack(trackById(state.queue[state.queuePos]), autoplay);
+  if (state.queuePos < 0 || state.queuePos >= state.queue.length) { console.log('[DIAG loadq] bad pos=' + state.queuePos + ' qlen=' + state.queue.length); return; }
+  const id = state.queue[state.queuePos];
+  const t = trackById(id);
+  console.log('[DIAG loadq] pos=' + state.queuePos + ' id=' + id + ' found=' + !!t + ' sample=' + (state.queue.slice(0,3).join(',')));
+  loadTrack(t, autoplay);
 }
 
 function setQueue(indices, startIndex) {
@@ -2855,6 +2858,7 @@ function setNowPlayingArt(url) {
 }
 
 function playTrackFromCurrentView(trackIndex) {
+  console.log('[DIAG play] view=' + state.view + ' trackIndex=' + trackIndex + ' tracks=' + state.tracks.length + ' currentPlaylist=' + (state.currentPlaylist ? state.currentPlaylist.name + '/loaded=' + state.currentPlaylist.loaded + '/trackIds=' + (state.currentPlaylist.trackIds||[]).length : 'none'));
   // Queue depends on the current view.
   if (state.view === 'album-detail' && state.currentAlbum) {
     const album = state.currentAlbum;
@@ -2870,6 +2874,7 @@ function playTrackFromCurrentView(trackIndex) {
     const indices = state.tracks.map((_, i) => i);
     setQueue(indices, trackIndex);
   }
+  console.log('[DIAG play] after setQueue: qlen=' + state.queue.length + ' qpos=' + state.queuePos);
   loadQueueCurrent(true);
 }
 
@@ -2885,6 +2890,7 @@ function playPause() {
 }
 
 function nextTrack(auto) {
+  console.log('[DIAG next] auto=' + auto + ' qlen=' + state.queue.length + ' qpos=' + state.queuePos + ' src=' + state.source + ' psrc=' + state.playingSource + ' jflen=' + state.jellyfin.tracks.length + ' loclen=' + state.local.tracks.length);
   if (state.queue.length === 0) return;
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
