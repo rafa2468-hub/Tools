@@ -1557,9 +1557,10 @@ async function syncJellyfin(opts) {
   // Capture playback state before we swap the tracks array out from under it.
   // We re-resolve by track id afterward so a refresh doesn't kill the queue.
   const playingId = state.playingTrack ? state.playingTrack.id : null;
-  const queueIds = state.queue
-    .map(qi => (state.tracks[qi] || {}).id)
-    .filter(id => id != null);
+  // state.queue already holds track ids — copy them. (This previously mapped
+  // them as indices into state.tracks, producing an empty list that wiped the
+  // queue on every foreground resync — e.g. each time the phone was unlocked.)
+  const queueIds = state.queue.slice();
   const playlistDetailId = (state.currentPlaylist && !state.currentPlaylist.smart) ? state.currentPlaylist.id : null;
   const wasOnFavorites = !!(state.currentPlaylist && state.currentPlaylist.smart);
 
@@ -2885,6 +2886,7 @@ function playPause() {
 }
 
 function nextTrack(auto) {
+  console.log('[DIAG next] auto=' + auto + ' qlen=' + state.queue.length + ' qpos=' + state.queuePos);
   if (state.queue.length === 0) return;
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
