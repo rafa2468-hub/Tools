@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.5';
+const APP_VERSION = '1.7.7';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -2886,7 +2886,6 @@ function playPause() {
 }
 
 function nextTrack(auto) {
-  console.log('[DIAG next] auto=' + auto + ' qlen=' + state.queue.length + ' qpos=' + state.queuePos);
   if (state.queue.length === 0) return;
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
@@ -3734,6 +3733,21 @@ if ('mediaSession' in navigator) {
     });
   } catch (e) { /* optional */ }
 }
+
+// Native media controls (Android app): route lock-screen / Android Auto /
+// Bluetooth / hardware media buttons to the player. The native plugin owns the
+// system session in the app, so these are what the car talks to.
+(function registerNativeMediaControls() {
+  const n = nativeMS();
+  if (!n) return;
+  const set = (action, handler) => {
+    try { n.setActionHandler({ action }, handler).catch(() => {}); } catch (e) { /* ignore */ }
+  };
+  set('play', () => { playWithFallback('mediaSession'); });
+  set('pause', () => { audio.pause(); });
+  set('previoustrack', () => { prevTrack(); });
+  set('nexttrack', () => { nextTrack(false); });
+})();
 
 /* ---------- Service worker + install prompt ---------- */
 if ('serviceWorker' in navigator) {
