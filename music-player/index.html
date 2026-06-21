@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.5';
+const APP_VERSION = '1.7.7';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -2886,7 +2886,6 @@ function playPause() {
 }
 
 function nextTrack(auto) {
-  console.log('[DIAG next] auto=' + auto + ' qlen=' + state.queue.length + ' qpos=' + state.queuePos);
   if (state.queue.length === 0) return;
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
@@ -3744,10 +3743,10 @@ if ('mediaSession' in navigator) {
   const set = (action, handler) => {
     try { n.setActionHandler({ action }, handler).catch(() => {}); } catch (e) { /* ignore */ }
   };
-  set('play', () => { console.log('[DIAG action play]'); playWithFallback('mediaSession'); });
-  set('pause', () => { console.log('[DIAG action pause]'); audio.pause(); });
-  set('previoustrack', () => { console.log('[DIAG action prev]'); prevTrack(); });
-  set('nexttrack', () => { console.log('[DIAG action next]'); nextTrack(false); });
+  set('play', () => { playWithFallback('mediaSession'); });
+  set('pause', () => { audio.pause(); });
+  set('previoustrack', () => { prevTrack(); });
+  set('nexttrack', () => { nextTrack(false); });
 })();
 
 /* ---------- Service worker + install prompt ---------- */
