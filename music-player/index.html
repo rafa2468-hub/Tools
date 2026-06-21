@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.7.1';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -2693,7 +2693,7 @@ async function playWithFallback(reason) {
       return true;
     } catch (err2) {
       console.warn('audio.play() retry rejected:', err2 && err2.name, err2 && err2.message);
-      MS.setPlaybackState('paused');
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
       playIcon.innerHTML = PLAY_ICON;
       showToast('Playback paused — tap play to resume');
       return false;
@@ -3067,63 +3067,23 @@ async function clearPlaylist() {
   render();
 }
 
-// Media session: use the native plugin inside the Android app (so song info
-// and controls reach the lock screen / Android Auto / Bluetooth), and the Web
-// Media Session API on the PWA. The native plugin is reached via Capacitor's
-// runtime proxy — no bundler needed.
-function nativeMediaSession() {
-  const C = window.Capacitor;
-  if (C && C.isNativePlatform && C.isNativePlatform() && C.Plugins && C.Plugins.MediaSession) {
-    return C.Plugins.MediaSession;
-  }
-  return null;
-}
-const MS = {
-  setMetadata(meta) {
-    const n = nativeMediaSession();
-    if (n) { n.setMetadata(meta).catch(() => {}); return; }
-    if ('mediaSession' in navigator) {
-      try { navigator.mediaSession.metadata = new MediaMetadata(meta); } catch (e) { /* ignore */ }
-    }
-  },
-  clearMetadata() {
-    const n = nativeMediaSession();
-    if (n) { n.setMetadata({ title: '', artist: '', album: '' }).catch(() => {}); return; }
-    if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
-  },
-  setPlaybackState(s) {
-    const n = nativeMediaSession();
-    if (n) { n.setPlaybackState({ playbackState: s }).catch(() => {}); return; }
-    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = s;
-  },
-  setPositionState(pos) {
-    const n = nativeMediaSession();
-    if (n) { n.setPositionState(pos).catch(() => {}); return; }
-    if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession) {
-      try { navigator.mediaSession.setPositionState(pos); } catch (e) { /* ignore */ }
-    }
-  },
-  setActionHandler(action, handler) {
-    const n = nativeMediaSession();
-    if (n) { n.setActionHandler({ action }, handler).catch(() => {}); return; }
-    if ('mediaSession' in navigator) {
-      try { navigator.mediaSession.setActionHandler(action, handler); } catch (e) { /* unsupported */ }
-    }
-  },
-};
-
 function updateMediaSession() {
+  if (!('mediaSession' in navigator)) return;
   const track = state.playingTrack;
-  if (!track) { MS.clearMetadata(); return; }
-  let artUrl = track.pictureUrl || albumArtUrlFor(albumOf(track));
-  // Native can't load blob: artwork (local-file art), so drop it there — title
-  // and artist still show. Jellyfin art is an https URL and works.
-  if (artUrl && artUrl.startsWith('blob:') && nativeMediaSession()) artUrl = null;
-  MS.setMetadata({
-    title: track.title || '',
+  if (!track) { navigator.mediaSession.metadata = null; return; }
+  const artUrl = track.pictureUrl || albumArtUrlFor(albumOf(track));
+  const artwork = artUrl
+    ? [{
+        src: artUrl,
+        sizes: '512x512',
+        type: track.pictureMime || 'image/jpeg',
+      }]
+    : [];
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: track.title,
     artist: artistOf(track),
     album: albumOf(track) === UNSORTED ? '' : albumOf(track),
-    artwork: artUrl ? [{ src: artUrl, sizes: '512x512', type: track.pictureMime || 'image/jpeg' }] : [],
+    artwork,
   });
 }
 
@@ -3320,12 +3280,14 @@ audio.addEventListener('timeupdate', () => {
   if (dur > 0 && !durationEl.textContent.match(/^\d+:\d\d$/)) {
     durationEl.textContent = formatTime(dur);
   }
-  if (dur > 0) {
-    MS.setPositionState({
-      duration: dur,
-      playbackRate: audio.playbackRate,
-      position: Math.min(audio.currentTime, dur),
-    });
+  if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && dur > 0) {
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: dur,
+        playbackRate: audio.playbackRate,
+        position: Math.min(audio.currentTime, dur),
+      });
+    } catch (e) { /* iOS may reject */ }
   }
   saveResume(false); // throttled internally
 });
@@ -3337,11 +3299,11 @@ audio.addEventListener('loadedmetadata', () => {
 });
 audio.addEventListener('play', () => {
   playIcon.innerHTML = PAUSE_ICON;
-  MS.setPlaybackState('playing');
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
 });
 audio.addEventListener('pause', () => {
   playIcon.innerHTML = PLAY_ICON;
-  MS.setPlaybackState('paused');
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
   saveResume(true);
 });
 window.addEventListener('pagehide', () => saveResume(true));
@@ -3709,22 +3671,28 @@ clearBtn.addEventListener('click', () => {
   }
 });
 
-// Lock-screen / Bluetooth / Android Auto / headphone key controls
-MS.setActionHandler('play', () => playWithFallback('mediaSession'));
-MS.setActionHandler('pause', () => audio.pause());
-MS.setActionHandler('previoustrack', () => prevTrack());
-MS.setActionHandler('nexttrack', () => nextTrack(false));
-MS.setActionHandler('seekto', (e) => {
-  if (e && e.fastSeek && 'fastSeek' in audio) audio.fastSeek(e.seekTime);
-  else if (e && typeof e.seekTime === 'number') audio.currentTime = e.seekTime;
-});
-MS.setActionHandler('seekbackward', (e) => {
-  audio.currentTime = Math.max(0, audio.currentTime - ((e && e.seekOffset) || 10));
-});
-MS.setActionHandler('seekforward', (e) => {
-  const dur = effectiveDuration();
-  audio.currentTime = Math.min(dur || (audio.currentTime + 10), audio.currentTime + ((e && e.seekOffset) || 10));
-});
+// Lock-screen / Bluetooth / headphone key controls
+if ('mediaSession' in navigator) {
+  navigator.mediaSession.setActionHandler('play', () => playWithFallback('mediaSession'));
+  navigator.mediaSession.setActionHandler('pause', () => audio.pause());
+  navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
+  navigator.mediaSession.setActionHandler('nexttrack', () => nextTrack(false));
+  try {
+    navigator.mediaSession.setActionHandler('seekto', (e) => {
+      if (e.fastSeek && 'fastSeek' in audio) audio.fastSeek(e.seekTime);
+      else audio.currentTime = e.seekTime;
+    });
+  } catch (e) { /* some browsers don't support seekto */ }
+  try {
+    navigator.mediaSession.setActionHandler('seekbackward', (e) => {
+      audio.currentTime = Math.max(0, audio.currentTime - (e.seekOffset || 10));
+    });
+    navigator.mediaSession.setActionHandler('seekforward', (e) => {
+      const dur = effectiveDuration();
+      audio.currentTime = Math.min(dur || (audio.currentTime + 10), audio.currentTime + (e.seekOffset || 10));
+    });
+  } catch (e) { /* optional */ }
+}
 
 /* ---------- Service worker + install prompt ---------- */
 if ('serviceWorker' in navigator) {
