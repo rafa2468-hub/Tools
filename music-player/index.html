@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.7';
+const APP_VERSION = '1.7.8';
 
 /* ---------- IndexedDB persistence ---------- */
 const DB_NAME = 'music-player-db';
@@ -1780,6 +1780,10 @@ function loadQueueCurrent(autoplay) {
 }
 
 function setQueue(indices, startIndex) {
+  // A fresh queue is always a new playback intent, so clear any prior
+  // consecutive-error streak. (Auto-advance via nextTrack does NOT call
+  // setQueue, so the cap still works across a failing queue.)
+  resetPlaybackErrors();
   // indices: array of track indices into state.tracks
   // startIndex: which track to play first (an index present in indices)
   // The queue itself is stored as track ids, not indices.
@@ -2678,7 +2682,19 @@ async function deletePlaylist(playlistId) {
 // audio-focus interruptions (Bluetooth, navigation prompts in the car, phone
 // calls), transient network errors, etc. Track which url we were trying to
 // start; if a retry would attempt to play a different track, drop it.
+// Playback failure handling. playbackIntended gates auto-advance on error so a
+// non-playing (boot/resume) load that fails never starts skipping. The streak
+// counter caps how many failing tracks we'll skip through before giving up, so
+// an entire unreachable library (e.g. Jellyfin offline) can never loop forever.
+let playbackIntended = false;
+let playbackErrorStreak = 0;
+const MAX_PLAYBACK_ERROR_SKIPS = 3;
+// Called from setQueue (every fresh user-initiated queue) and the transport
+// buttons, so a new intent always gets a clean slate of skip attempts.
+function resetPlaybackErrors() { playbackErrorStreak = 0; }
+
 async function playWithFallback(reason) {
+  playbackIntended = true;
   const startedSrc = audio.src;
   try {
     await audio.play();
@@ -2738,6 +2754,12 @@ function bootPlaybackTrack(autoplay) {
 
 function loadTrack(track, autoplay) {
   if (!track) return;
+  // Track whether the user actually wants this playing. The audio 'error'
+  // handler only auto-advances when playback was intended, so a boot/resume
+  // preload (autoplay=false) that fails to load never kicks off a skip loop.
+  // We deliberately do NOT reset playbackErrorStreak here — auto-advance flows
+  // through loadTrack, and resetting would defeat the consecutive-failure cap.
+  playbackIntended = !!autoplay;
   state.playingTrack = track;
   state.playingSource = track.source || 'local';
   audio.src = track.url;
@@ -2881,12 +2903,13 @@ function playPause() {
     loadQueueCurrent(true);
     return;
   }
-  if (audio.paused) playWithFallback('playPause');
+  if (audio.paused) { resetPlaybackErrors(); playWithFallback('playPause'); }
   else audio.pause();
 }
 
 function nextTrack(auto) {
   if (state.queue.length === 0) return;
+  if (!auto) resetPlaybackErrors(); // user pressed Next — fresh intent
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
     playWithFallback('repeatOne');
@@ -2908,6 +2931,7 @@ function nextTrack(auto) {
 
 function prevTrack() {
   if (state.queue.length === 0) return;
+  resetPlaybackErrors();
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
   let pos = state.queuePos - 1;
   if (pos < 0) pos = state.queue.length - 1;
@@ -3340,10 +3364,15 @@ audio.addEventListener('play', () => {
   nativeSetPlaybackState('playing');
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
 });
+// Real, progressing playback clears the failure streak — we've recovered.
+audio.addEventListener('playing', () => { playbackErrorStreak = 0; });
 audio.addEventListener('pause', () => {
   playIcon.innerHTML = PLAY_ICON;
   nativeSetPlaybackState('paused');
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  // A user-driven pause means they no longer intend playback, so a late error
+  // on the (now abandoned) stream won't trigger an auto-skip.
+  playbackIntended = false;
   saveResume(true);
 });
 window.addEventListener('pagehide', () => saveResume(true));
@@ -3357,10 +3386,32 @@ document.addEventListener('visibilitychange', () => {
   if (state.source !== 'jellyfin') return;
   syncJellyfin({ feedback: false, silent: true, debounceMs: 60000 });
 });
-audio.addEventListener('ended', () => nextTrack(true));
+audio.addEventListener('ended', () => { playbackErrorStreak = 0; nextTrack(true); });
 audio.addEventListener('error', () => {
+  // Ignore errors when there's no real source (e.g. after removeAttribute('src')
+  // + load() during teardown), and when the user isn't actually trying to play
+  // (a boot/resume preload that failed should just sit there, not skip).
+  if (!audio.currentSrc && !audio.src) return;
+  if (!playbackIntended) {
+    showToast('Could not load track');
+    nativeSetPlaybackState('paused');
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    playIcon.innerHTML = PLAY_ICON;
+    return;
+  }
+  playbackErrorStreak++;
+  if (playbackErrorStreak >= MAX_PLAYBACK_ERROR_SKIPS) {
+    // Whole queue (or server) looks unreachable — stop instead of looping.
+    playbackIntended = false;
+    audio.pause();
+    nativeSetPlaybackState('paused');
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    playIcon.innerHTML = PLAY_ICON;
+    showToast('Can’t play — check your Jellyfin connection');
+    return;
+  }
   showToast('Playback error — skipping');
-  setTimeout(() => nextTrack(true), 500);
+  setTimeout(() => { if (playbackIntended) nextTrack(true); }, 500);
 });
 
 tabs.addEventListener('click', e => {
