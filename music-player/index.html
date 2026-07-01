@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.9';
+const APP_VERSION = '1.7.10';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1611,6 +1611,7 @@ function jfItemToTrack(item, config) {
 }
 
 async function syncJellyfin(opts) {
+  breadcrumb('syncJellyfin');
   opts = opts || {};
   const feedback = !!opts.feedback;
   const silent = !!opts.silent;       // no spinner, no error toast
@@ -1717,6 +1718,7 @@ function updateRefreshSpin(spinning) {
 }
 
 async function setActiveSource(nextSource, opts) {
+  breadcrumb('setActiveSource ' + nextSource);
   const initial = !!(opts && opts.initial);
   if (state.source === nextSource && !(opts && opts.force)) return;
 
@@ -2798,6 +2800,7 @@ async function playWithFallback(reason) {
 // use it (and seek to the saved playback position once metadata is ready);
 // otherwise fall back to the first track in the queue.
 function bootPlaybackTrack(autoplay) {
+  breadcrumb('bootPlaybackTrack');
   if (state.tracks.length === 0) return;
   const resume = loadResume();
   const indices = state.tracks.map((_, i) => i);
@@ -3230,6 +3233,7 @@ function updateMediaSession() {
 }
 
 async function restoreLibrary() {
+  breadcrumb('restoreLibrary');
   try {
     state.db = await openDB();
     const records = await idbAll(state.db);
