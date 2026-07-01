@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.11';
+const APP_VERSION = '1.7.12';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -2789,7 +2789,7 @@ async function playWithFallback(reason) {
     } catch (err2) {
       console.warn('audio.play() retry rejected:', err2 && err2.name, err2 && err2.message);
       nativeSetPlaybackState('paused');
-      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+      if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
       playIcon.innerHTML = PLAY_ICON;
       showToast('Playback paused — tap play to resume');
       return false;
@@ -3194,22 +3194,32 @@ function nativeMS() {
 // Until then, every native call below is a no-op, so boot/resume never touches
 // the service and can't crash.
 let mediaSessionArmed = false;
+function isNativeApp() {
+  const C = window.Capacitor;
+  return !!(C && C.isNativePlatform && C.isNativePlatform());
+}
+// Force any value to a safe, bounded plain string for the native bridge.
+function safeMetaStr(v) {
+  let s = (v == null) ? '' : String(v);
+  // Strip control chars that can trip the native serializer, then cap length.
+  s = s.replace(/[\u0000-\u001F\u007F]/g, ' ');
+  return s.length > 200 ? s.slice(0, 200) : s;
+}
 function nativeSetMetadata(track) {
   const n = nativeMS();
   if (!n || !mediaSessionArmed) return;
   breadcrumb('nativeSetMetadata:enter');
-  // The plugin REQUIRES an artwork array — omitting it makes its native
-  // setMetadata call .toList() on null and crash. Always pass one. Native can't
-  // load blob: art (local files), so only pass http(s) art (Jellyfin).
-  let artUrl = track ? (track.pictureUrl || albumArtUrlFor(albumOf(track))) : null;
-  if (artUrl && artUrl.indexOf('blob:') === 0) artUrl = null;
-  breadcrumb('nativeSetMetadata:call art=' + (artUrl ? 'yes' : 'no'));
+  // IMPORTANT: pass NO artwork to the native plugin. Its native artwork handling
+  // is what crashed the app on specific Jellyfin tracks (v1.7.7–1.7.11). An empty
+  // array is the safe value the plugin already handles. Lock screen still shows
+  // title/artist/album — just no album art. Strings are sanitized too.
+  breadcrumb('nativeSetMetadata:call');
   try {
     n.setMetadata({
-      title: track ? (track.title || '') : '',
-      artist: track ? artistOf(track) : '',
-      album: track && albumOf(track) !== UNSORTED ? albumOf(track) : '',
-      artwork: artUrl ? [{ src: artUrl, sizes: '512x512', type: (track && track.pictureMime) || 'image/jpeg' }] : [],
+      title: safeMetaStr(track ? track.title : ''),
+      artist: safeMetaStr(track ? artistOf(track) : ''),
+      album: safeMetaStr(track && albumOf(track) !== UNSORTED ? albumOf(track) : ''),
+      artwork: [],
     }).catch(() => {});
   } catch (e) { /* ignore */ }
   breadcrumb('nativeSetMetadata:done');
@@ -3225,6 +3235,11 @@ function nativeSetPlaybackState(s) {
 function updateMediaSession() {
   const track = state.playingTrack;
   nativeSetMetadata(track);
+  // On the native app the @jofr plugin POLYFILLS navigator.mediaSession, so
+  // touching it here would call into native UNGATED (bypassing mediaSessionArmed)
+  // and with artwork — exactly the path that crashed on specific tracks. Native
+  // media session is handled solely via the gated nativeSetMetadata above.
+  if (isNativeApp()) return;
   if (!('mediaSession' in navigator)) return;
   if (!track) { navigator.mediaSession.metadata = null; return; }
   const artUrl = track.pictureUrl || albumArtUrlFor(albumOf(track));
@@ -3437,7 +3452,9 @@ audio.addEventListener('timeupdate', () => {
   if (dur > 0 && !durationEl.textContent.match(/^\d+:\d\d$/)) {
     durationEl.textContent = formatTime(dur);
   }
-  if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && dur > 0) {
+  // Skip on native: navigator.mediaSession is @jofr's polyfill there, and rapid
+  // position updates through it are exactly what "crashed in the v1.7.0 attempt".
+  if (!isNativeApp() && 'mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && dur > 0) {
     try {
       navigator.mediaSession.setPositionState({
         duration: dur,
@@ -3457,14 +3474,14 @@ audio.addEventListener('loadedmetadata', () => {
 audio.addEventListener('play', () => {
   playIcon.innerHTML = PAUSE_ICON;
   nativeSetPlaybackState('playing');
-  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+  if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
 });
 // Real, progressing playback clears the failure streak — we've recovered.
 audio.addEventListener('playing', () => { playbackErrorStreak = 0; });
 audio.addEventListener('pause', () => {
   playIcon.innerHTML = PLAY_ICON;
   nativeSetPlaybackState('paused');
-  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
   // A user-driven pause means they no longer intend playback, so a late error
   // on the (now abandoned) stream won't trigger an auto-skip.
   playbackIntended = false;
@@ -3490,7 +3507,7 @@ audio.addEventListener('error', () => {
   if (!playbackIntended) {
     showToast('Could not load track');
     nativeSetPlaybackState('paused');
-    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     playIcon.innerHTML = PLAY_ICON;
     return;
   }
@@ -3500,7 +3517,7 @@ audio.addEventListener('error', () => {
     playbackIntended = false;
     audio.pause();
     nativeSetPlaybackState('paused');
-    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     playIcon.innerHTML = PLAY_ICON;
     showToast('Can’t play — check your Jellyfin connection');
     return;
@@ -3857,8 +3874,11 @@ clearBtn.addEventListener('click', () => {
   }
 });
 
-// Lock-screen / Bluetooth / headphone key controls
-if ('mediaSession' in navigator) {
+// Lock-screen / Bluetooth / headphone key controls (WEB/PWA only — on the
+// native app @jofr polyfills navigator.mediaSession, and registering these at
+// boot would engage the native session ungated. Native controls are registered
+// lazily in armNativeMediaSession() via the gated nativeMS() API instead.)
+if (!isNativeApp() && 'mediaSession' in navigator) {
   navigator.mediaSession.setActionHandler('play', () => playWithFallback('mediaSession'));
   navigator.mediaSession.setActionHandler('pause', () => audio.pause());
   navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
