@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.10';
+const APP_VERSION = '1.7.11';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -2770,6 +2770,9 @@ function resetPlaybackErrors() { playbackErrorStreak = 0; }
 
 async function playWithFallback(reason) {
   playbackIntended = true;
+  // First real play arms the native media session (foreground-only). Boot/resume
+  // preloads don't reach here with intent, so the service never starts at boot.
+  armNativeMediaSession();
   const startedSrc = audio.src;
   try {
     await audio.play();
@@ -3183,9 +3186,17 @@ function nativeMS() {
   }
   return null;
 }
+// The native media session starts an Android foreground service. On Android 14
+// starting that service while the app is at boot / in the background throws and
+// crash-loops the app (this is exactly what happened in v1.7.7–1.7.9). So we
+// keep the session DORMANT until the first foreground, user-initiated play —
+// armNativeMediaSession() flips this true and registers the control handlers.
+// Until then, every native call below is a no-op, so boot/resume never touches
+// the service and can't crash.
+let mediaSessionArmed = false;
 function nativeSetMetadata(track) {
   const n = nativeMS();
-  if (!n) return;
+  if (!n || !mediaSessionArmed) return;
   breadcrumb('nativeSetMetadata:enter');
   // The plugin REQUIRES an artwork array — omitting it makes its native
   // setMetadata call .toList() on null and crash. Always pass one. Native can't
@@ -3205,7 +3216,7 @@ function nativeSetMetadata(track) {
 }
 function nativeSetPlaybackState(s) {
   const n = nativeMS();
-  if (!n) return;
+  if (!n || !mediaSessionArmed) return;
   breadcrumb('nativeSetPlaybackState:' + s);
   try { n.setPlaybackState({ playbackState: s }).catch(() => {}); } catch (e) { /* ignore */ }
   breadcrumb('nativeSetPlaybackState:done');
@@ -3872,9 +3883,21 @@ if ('mediaSession' in navigator) {
 // Native media controls (Android app): route lock-screen / Android Auto /
 // Bluetooth / hardware media buttons to the player. The native plugin owns the
 // system session in the app, so these are what the car talks to.
-(function registerNativeMediaControls() {
+//
+// CRITICAL: this must NOT run at boot. Registering handlers / touching the
+// native session starts the Android foreground service, and doing that at
+// app-startup on Android 14 crash-loops the app. armNativeMediaSession() is
+// therefore called only from a foreground, user-initiated play (see
+// playWithFallback), by which point the app is visibly in the foreground and
+// Android permits the mediaPlayback service to start.
+function armNativeMediaSession() {
+  if (mediaSessionArmed) return;
   const n = nativeMS();
-  if (!n) return;
+  if (!n) { mediaSessionArmed = true; return; } // web/PWA: nothing native to arm
+  // Only arm when actually in the foreground — the whole point is to avoid a
+  // background service start.
+  if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return;
+  breadcrumb('armNativeMediaSession');
   const set = (action, handler) => {
     try { n.setActionHandler({ action }, handler).catch(() => {}); } catch (e) { /* ignore */ }
   };
@@ -3882,7 +3905,11 @@ if ('mediaSession' in navigator) {
   set('pause', () => { audio.pause(); });
   set('previoustrack', () => { prevTrack(); });
   set('nexttrack', () => { nextTrack(false); });
-})();
+  mediaSessionArmed = true;
+  // Now that the session is live, push the current track's metadata + state.
+  try { updateMediaSession(); } catch (e) { /* ignore */ }
+  nativeSetPlaybackState(audio.paused ? 'paused' : 'playing');
+}
 
 /* ---------- Service worker + install prompt ---------- */
 if ('serviceWorker' in navigator) {
