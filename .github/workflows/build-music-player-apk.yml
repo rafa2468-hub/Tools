@@ -13,6 +13,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Needed so the build can publish the APK as a GitHub Release asset.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -131,3 +134,31 @@ jobs:
           name: music-player-apk
           path: music-player-debug.apk
           retention-days: 30
+
+      # Read the app version so the release is labelled with it.
+      - name: Read app version
+        id: ver
+        run: |
+          V=$(grep -oE "APP_VERSION = '[^']+'" music-player/index.html | head -1 | sed "s/.*'\([^']*\)'.*/\1/")
+          [ -n "$V" ] || V="unknown"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "App version: $V"
+
+      # Publish the APK to a fixed 'music-player-latest' release so there's a
+      # stable, phone-friendly download URL that always points at the newest
+      # build — no zip, no login, tap-to-install. Only on main.
+      - name: Publish APK to GitHub Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: music-player-latest
+          name: Music Player APK (latest)
+          body: |
+            Latest **Music Player** debug APK — **v${{ steps.ver.outputs.version }}**
+            (commit ${{ github.sha }}).
+
+            Tap **music-player-debug.apk** below to download and install on your
+            phone. It installs over any previous build (same debug signing key),
+            so your library, Jellyfin login and favourites are preserved.
+          files: music-player-debug.apk
+          make_latest: true
