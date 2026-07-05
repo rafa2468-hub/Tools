@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.12';
+const APP_VERSION = '1.7.13';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -859,13 +859,27 @@ function breadcrumb(msg) {
   try {
     _breadcrumbs.push(Date.now() % 100000 + ' ' + msg);
     if (_breadcrumbs.length > 16) _breadcrumbs.shift();
-    // Persist continuously so a native crash still leaves a trail behind.
-    localStorage.setItem(TRAIL_KEY, _breadcrumbs.join('\n'));
+    // Persist only while the app is in the foreground. Breadcrumbs written during
+    // background playback (a track advancing with the screen off) must NOT leave
+    // a trail — otherwise Android reclaiming the backgrounded app looks like a
+    // crash on next launch. A persisted trail therefore only ever reflects
+    // foreground activity, so its survival to next launch means a real
+    // foreground crash.
+    if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+      localStorage.setItem(TRAIL_KEY, _breadcrumbs.join('\n'));
+    }
   } catch (e) { /* ignore */ }
 }
-// Clear the trail on a clean backgrounding so a normal exit isn't mistaken
-// for a crash next launch.
-window.addEventListener('pagehide', () => { try { localStorage.removeItem(TRAIL_KEY); } catch (e) {} });
+// Clear the trail whenever the app leaves the foreground (backgrounded, screen
+// locked, task-switched) OR on pagehide. Android routinely kills a backgrounded
+// app to reclaim memory — that is NOT a crash, but it leaves a trail behind. By
+// clearing on the way out, a leftover trail on next launch means the app died
+// while actually in the FOREGROUND, i.e. a genuine crash worth surfacing.
+function clearTrail() { try { localStorage.removeItem(TRAIL_KEY); } catch (e) {} }
+window.addEventListener('pagehide', clearTrail);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') clearTrail();
+});
 function recordCrash(kind, detail) {
   try {
     localStorage.setItem(CRASH_KEY, JSON.stringify({
