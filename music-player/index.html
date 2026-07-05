@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.13';
+const APP_VERSION = '1.7.14';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -900,33 +900,22 @@ window.addEventListener('unhandledrejection', (e) => {
     stack: r && r.stack ? String(r.stack).slice(0, 800) : null,
   });
 });
+// The crash diagnostic did its job (it's how we found the native media-session
+// crash). We keep capturing silently — the last crash record and the previous
+// session's breadcrumb trail stay readable on demand via window.__lastCrash()
+// (devtools) — but we NO LONGER interrupt the user with an alert on launch.
+// The repeated "NATIVE crash" pop-ups were firing for non-crashes (Android
+// reclaiming the backgrounded app), which is just noise now that the app is
+// stable.
+window.__lastCrash = function () {
+  try {
+    const raw = localStorage.getItem(CRASH_KEY);
+    return { crash: raw ? JSON.parse(raw) : null, prevTrail: _prevTrail || null };
+  } catch (e) { return { error: String(e) }; }
+};
 function showStoredCrashIfAny() {
-  let raw;
-  try { raw = localStorage.getItem(CRASH_KEY); } catch (e) { raw = null; }
-  try { if (raw) localStorage.removeItem(CRASH_KEY); } catch (e) { /* ignore */ }
-  // A leftover trail with no JS crash record => the previous session died
-  // without a catchable JS error, i.e. a native crash. Surface the trail so we
-  // can see the last JS call before it.
-  const nativeTrail = (!raw && _prevTrail) ? _prevTrail : null;
-  if (!raw && !nativeTrail) return;
-  setTimeout(() => {
-    try {
-      let msg;
-      if (raw) {
-        const c = JSON.parse(raw);
-        msg = [
-          'Last crash (' + (c.v || '?') + ', ' + (c.kind || '?') + '):',
-          c.detail && c.detail.message ? c.detail.message : '(no message)',
-          c.detail && c.detail.source ? (c.detail.source + ':' + c.detail.line) : '',
-          c.detail && c.detail.stack ? '\n' + c.detail.stack : '',
-          '\nBreadcrumbs:\n' + (c.breadcrumbs || []).join('\n'),
-        ].filter(Boolean).join('\n');
-      } else {
-        msg = 'Likely NATIVE crash (no JS error caught).\nLast JS steps before it:\n\n' + nativeTrail;
-      }
-      alert(msg);
-    } catch (e) { /* ignore */ }
-  }, 1200);
+  // Clear any stored crash record so it doesn't linger; no user-facing alert.
+  try { localStorage.removeItem(CRASH_KEY); } catch (e) { /* ignore */ }
 }
 
 /* ---------- IndexedDB persistence ---------- */
