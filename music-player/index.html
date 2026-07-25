@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.16';
+const APP_VERSION = '1.7.17';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1023,7 +1023,105 @@ function idbDeletePlaylist(db, id) {
 }
 
 /* ---------- DOM refs ---------- */
-const audio = document.getElementById('audio');
+const IS_NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+
+// On the native app we play through Android's MediaPlayer (NativePlayer plugin)
+// instead of the WebView's <audio> element, because the WebView won't route
+// audio to USB-C / Bluetooth / the car the way a real media app does. This
+// adapter mimics just enough of the HTMLAudioElement interface that the rest of
+// the app can keep using `audio.play()`, `audio.currentTime`, event listeners,
+// etc. unchanged. The web/PWA build keeps using the real <audio> element.
+function _blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => { const s = String(r.result); const i = s.indexOf(','); resolve(i >= 0 ? s.slice(i + 1) : s); };
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+function _extForMime(m) {
+  m = (m || '').toLowerCase();
+  if (m.indexOf('mpeg') >= 0) return 'mp3';
+  if (m.indexOf('mp4') >= 0 || m.indexOf('m4a') >= 0 || m.indexOf('aac') >= 0) return 'm4a';
+  if (m.indexOf('ogg') >= 0 || m.indexOf('opus') >= 0) return 'ogg';
+  if (m.indexOf('flac') >= 0) return 'flac';
+  if (m.indexOf('wav') >= 0) return 'wav';
+  if (m.indexOf('webm') >= 0) return 'webm';
+  return 'mp3';
+}
+class NativeAudioAdapter {
+  constructor() {
+    this._src = ''; this._currentSrc = '';
+    this._currentTime = 0; this._duration = 0;
+    this._paused = true; this._volume = 1; this._playbackRate = 1;
+    this._ready = false; this._listeners = {}; this._loadSeq = 0; this._bound = false;
+    // Whether the app wants playback (set by play()/pause()). Passed through to
+    // native load so a play() during an async local-file load isn't lost.
+    this._playIntent = false;
+    this._bind();
+  }
+  _plugin() {
+    const C = window.Capacitor;
+    return (C && C.Plugins && C.Plugins.NativePlayer) ? C.Plugins.NativePlayer : null;
+  }
+  _bind() {
+    const p = this._plugin();
+    if (!p || this._bound) return;
+    this._bound = true;
+    p.addListener('loadstart', () => { this._ready = false; this._currentTime = 0; this._emit('loadstart'); });
+    p.addListener('loadedmetadata', (d) => { this._ready = true; if (d && d.duration > 0) this._duration = d.duration; this._emit('loadedmetadata'); });
+    p.addListener('play', () => { this._paused = false; this._emit('play'); });
+    p.addListener('playing', () => { this._emit('playing'); });
+    p.addListener('pause', () => { this._paused = true; this._emit('pause'); });
+    p.addListener('timeupdate', (d) => { if (d) { this._currentTime = d.position || 0; if (d.duration > 0) this._duration = d.duration; } this._emit('timeupdate'); });
+    p.addListener('ended', () => { this._paused = true; this._emit('ended'); });
+    p.addListener('error', () => { this._emit('error'); });
+  }
+  _emit(type) {
+    const ls = this._listeners[type];
+    if (!ls) return;
+    const ev = { type, target: this };
+    ls.slice().forEach((cb) => { try { cb.call(this, ev); } catch (e) { /* ignore */ } });
+  }
+  addEventListener(type, cb) { (this._listeners[type] = this._listeners[type] || []).push(cb); }
+  removeEventListener(type, cb) { const ls = this._listeners[type]; if (ls) { const i = ls.indexOf(cb); if (i >= 0) ls.splice(i, 1); } }
+  get src() { return this._src; }
+  set src(v) {
+    const val = v || '';
+    this._src = val; this._currentSrc = val; this._ready = false;
+    const seq = ++this._loadSeq;
+    const p = this._plugin();
+    if (!val) { if (p) p.stop(); return; }
+    if (val.indexOf('blob:') === 0) {
+      // Local file: pull the bytes out of the WebView and hand them to native.
+      fetch(val).then((r) => r.blob()).then((b) => _blobToBase64(b).then((data) => ({ data, type: b.type })))
+        .then(({ data, type }) => {
+          if (seq !== this._loadSeq) return; // a newer track was selected meanwhile
+          const pl = this._plugin(); if (pl) pl.loadData({ data, ext: _extForMime(type), autoplay: this._playIntent });
+        })
+        .catch(() => { if (seq === this._loadSeq) this._emit('error'); });
+    } else {
+      if (p) p.load({ url: val, autoplay: this._playIntent }); // http(s) stream (Jellyfin) or file path
+    }
+  }
+  get currentSrc() { return this._currentSrc; }
+  get currentTime() { return this._currentTime || 0; }
+  set currentTime(v) { this._currentTime = v || 0; const p = this._plugin(); if (p) p.seek({ seconds: this._currentTime }); }
+  get duration() { return this._duration || 0; }
+  get paused() { return this._paused; }
+  get readyState() { return this._ready ? 4 : 0; }
+  get volume() { return this._volume; }
+  set volume(v) { this._volume = Math.max(0, Math.min(1, Number(v))); const p = this._plugin(); if (p) p.setVolume({ value: this._volume }); }
+  get playbackRate() { return this._playbackRate; }
+  set playbackRate(v) { this._playbackRate = Number(v) || 1; const p = this._plugin(); if (p) p.setRate({ value: this._playbackRate }); }
+  play() { this._playIntent = true; const p = this._plugin(); if (p) p.play(); return Promise.resolve(); }
+  pause() { this._playIntent = false; const p = this._plugin(); if (p) p.pause(); }
+  load() { /* native prepares on src assignment; nothing to do */ }
+  removeAttribute(name) { if (name === 'src') { this.src = ''; } }
+  setAttribute() { /* no-op */ }
+}
+
+const audio = IS_NATIVE ? new NativeAudioAdapter() : document.getElementById('audio');
 const fileInput = document.getElementById('file-input');
 const folderInput = document.getElementById('folder-input');
 const folderPickLabel = document.getElementById('folder-pick');
