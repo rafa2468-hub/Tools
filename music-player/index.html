@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.14';
+const APP_VERSION = '1.7.15';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -2776,6 +2776,9 @@ async function playWithFallback(reason) {
   // First real play arms the native media session (foreground-only). Boot/resume
   // preloads don't reach here with intent, so the service never starts at boot.
   armNativeMediaSession();
+  // Claim audio focus BEFORE playback starts so Android routes it to the active
+  // media output (Bluetooth / wired earbuds) rather than the phone speaker.
+  requestAudioFocus();
   const startedSrc = audio.src;
   try {
     await audio.play();
@@ -3235,6 +3238,63 @@ function nativeSetPlaybackState(s) {
   breadcrumb('nativeSetPlaybackState:done');
 }
 
+// ---------- Android audio focus ----------
+// The @jofr media-session plugin never requests audio focus, so on the native
+// app Android does not treat our WebView audio as "media" and leaves it on the
+// phone speaker instead of routing to connected Bluetooth / wired earbuds. Our
+// tiny AudioFocus plugin requests AUDIOFOCUS_GAIN with USAGE_MEDIA — the same
+// claim Spotify/YouTube make — which hands playback to the active media output.
+// (Web/PWA returns null here and relies on the browser's own routing.)
+function audioFocusPlugin() {
+  const C = window.Capacitor;
+  if (C && C.isNativePlatform && C.isNativePlatform() && C.Plugins && C.Plugins.AudioFocus) {
+    return C.Plugins.AudioFocus;
+  }
+  return null;
+}
+let _focusAbandonTimer = null;
+let _focusListenerAdded = false;
+let _resumeAfterFocusLoss = false;
+// Pause on a phone call / navigation prompt (focus loss) and resume when the
+// interruption ends (focus regained), matching normal media-app behaviour.
+function handleAudioFocusChange(change) {
+  try {
+    if (change === -1 || change === -2) {          // LOSS / LOSS_TRANSIENT
+      _resumeAfterFocusLoss = (change === -2) && !audio.paused;
+      audio.pause();
+    } else if (change === 1) {                     // GAIN (interruption ended)
+      if (_resumeAfterFocusLoss) { _resumeAfterFocusLoss = false; playWithFallback('focusgain'); }
+    }
+    // -3 (LOSS_TRANSIENT_CAN_DUCK): keep playing at normal volume.
+  } catch (e) { /* ignore */ }
+}
+function ensureFocusListener() {
+  if (_focusListenerAdded) return;
+  const p = audioFocusPlugin();
+  if (!p || !p.addListener) return;
+  _focusListenerAdded = true;
+  try { p.addListener('audioFocusChange', (ev) => handleAudioFocusChange(ev && ev.change)); } catch (e) { /* ignore */ }
+}
+function requestAudioFocus() {
+  const p = audioFocusPlugin();
+  if (!p) return;
+  ensureFocusListener();
+  if (_focusAbandonTimer) { clearTimeout(_focusAbandonTimer); _focusAbandonTimer = null; }
+  try { p.request().catch(() => {}); } catch (e) { /* ignore */ }
+}
+function abandonAudioFocusSoon() {
+  const p = audioFocusPlugin();
+  if (!p) return;
+  if (_focusAbandonTimer) clearTimeout(_focusAbandonTimer);
+  // Delay the release so the brief pause between two tracks doesn't drop and
+  // immediately re-grab focus (which makes Bluetooth earbuds re-negotiate the
+  // audio link between every song).
+  _focusAbandonTimer = setTimeout(() => {
+    _focusAbandonTimer = null;
+    if (audio.paused) { try { p.abandon().catch(() => {}); } catch (e) { /* ignore */ } }
+  }, 2000);
+}
+
 function updateMediaSession() {
   const track = state.playingTrack;
   nativeSetMetadata(track);
@@ -3485,6 +3545,9 @@ audio.addEventListener('pause', () => {
   playIcon.innerHTML = PLAY_ICON;
   nativeSetPlaybackState('paused');
   if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  // Release audio focus shortly after pausing (debounced so track-to-track
+  // gaps don't drop the Bluetooth link), letting other apps play again.
+  abandonAudioFocusSoon();
   // A user-driven pause means they no longer intend playback, so a late error
   // on the (now abandoned) stream won't trigger an auto-skip.
   playbackIntended = false;
