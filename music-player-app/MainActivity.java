@@ -7,9 +7,12 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        // Register our audio-focus plugin BEFORE super.onCreate so it is exposed
-        // to JavaScript on the very first page load (adding it later would only
-        // take effect after a reload).
+        // Register our plugins BEFORE super.onCreate so they are exposed to
+        // JavaScript on the very first page load (adding them later would only
+        // take effect after a reload). NativePlayer plays audio through Android's
+        // MediaPlayer so it routes to USB-C / Bluetooth / the car; AudioFocus is
+        // now dormant (NativePlayer handles focus itself) but kept registered.
+        registerPlugin(NativePlayerPlugin.class);
         registerPlugin(AudioFocusPlugin.class);
 
         super.onCreate(savedInstanceState);
