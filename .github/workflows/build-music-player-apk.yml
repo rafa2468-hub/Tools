@@ -56,13 +56,15 @@ jobs:
         working-directory: music-player-app
         run: npx cap add android
 
-      - name: Apply custom MainActivity (enables media auto-advance)
+      - name: Apply custom MainActivity + AudioFocus plugin
         working-directory: music-player-app
         run: |
           dest="android/app/src/main/java/com/brokis/musicplayer"
           mkdir -p "$dest"
           cp MainActivity.java "$dest/MainActivity.java"
+          cp AudioFocusPlugin.java "$dest/AudioFocusPlugin.java"
           echo "--- MainActivity.java ---"; cat "$dest/MainActivity.java"
+          echo "--- AudioFocusPlugin.java ---"; cat "$dest/AudioFocusPlugin.java"
 
       - name: Add media-playback foreground-service permissions to manifest
         working-directory: music-player-app
