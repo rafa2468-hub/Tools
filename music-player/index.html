@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.18';
+const APP_VERSION = '1.7.19';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -3738,7 +3738,10 @@ view.addEventListener('click', e => {
       .map((t, i) => albumOf(t) === album ? i : -1)
       .filter(i => i !== -1);
     if (indices.length === 0) return;
-    setQueue(indices, indices[0]);
+    // With shuffle on, start from a random track instead of always the first;
+    // with shuffle off, start at the top. (Tapping a specific song still starts
+    // from that song — that path passes an explicit start index.)
+    setQueue(indices, state.shuffle ? null : indices[0]);
     loadQueueCurrent(true);
     return;
   }
@@ -3750,7 +3753,8 @@ view.addEventListener('click', e => {
     if (!state.currentPlaylist) return;
     const indices = playlistTracks(state.currentPlaylist);
     if (indices.length === 0) return;
-    setQueue(indices, indices[0]);
+    // Shuffle on → start from a random track; shuffle off → start at the top.
+    setQueue(indices, state.shuffle ? null : indices[0]);
     loadQueueCurrent(true);
     return;
   }
