@@ -835,7 +835,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.20';
+const APP_VERSION = '1.7.21';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1071,6 +1071,8 @@ class NativeAudioAdapter {
     p.addListener('timeupdate', (d) => { if (d) { this._currentTime = d.position || 0; if (d.duration > 0) this._duration = d.duration; } this._emit('timeupdate'); });
     p.addListener('ended', () => { this._paused = true; this._emit('ended'); });
     p.addListener('error', () => { this._emit('error'); });
+    // Native auto-advanced to the next queue track on its own (screen off).
+    p.addListener('advanced', (d) => { try { handleNativeAdvanced(d && d.index); } catch (e) { /* ignore */ } });
   }
   _emit(type) {
     const ls = this._listeners[type];
@@ -1951,6 +1953,71 @@ function trackById(id) {
 function loadQueueCurrent(autoplay) {
   if (state.queuePos < 0 || state.queuePos >= state.queue.length) return;
   loadTrack(trackById(state.queue[state.queuePos]), autoplay);
+  // On the native app, also hand the queue to the native player so it can
+  // auto-advance while the screen is off (when this web layer is suspended).
+  // Only for real playback — a boot/resume preload would needlessly persist the
+  // whole library. Fire-and-forget; persists local files in the background.
+  if (autoplay) syncNativeQueue();
+}
+
+// ---------- Native auto-advance queue ----------
+// The native MediaPlayer plays http(s) URLs (Jellyfin) and local file paths,
+// but not JavaScript blob: URLs, so local tracks are written to disk once and
+// referenced by path. Resolving is cheap after the first time (path cached on
+// the track). Returns a source string the native queue can play.
+async function nativeSourceForTrack(t) {
+  if (!t) return '';
+  if ((t.source || 'local') === 'jellyfin') return t.url || '';
+  if (t._nativePath) return t._nativePath;
+  try {
+    const blob = t.blob || await (await fetch(t.url)).blob();
+    const data = await _blobToBase64(blob);
+    const ext = _extForMime(blob.type);
+    const p = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.NativePlayer;
+    if (p) {
+      const res = await p.persist({ data, name: t.id + '.' + ext });
+      if (res && res.path) { t._nativePath = res.path; return res.path; }
+    }
+  } catch (e) { /* fall through */ }
+  return t.url || '';
+}
+let _nativeQueueSeq = 0;
+const NATIVE_QUEUE_WINDOW = 60; // how many local tracks ahead to pre-save to disk
+async function syncNativeQueue() {
+  if (!IS_NATIVE) return;
+  const p = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.NativePlayer;
+  if (!p) return;
+  const seq = ++_nativeQueueSeq;
+  const ids = state.queue.slice();
+  const start = state.queuePos;
+  try {
+    const sources = [];
+    for (let i = 0; i < ids.length; i++) {
+      const t = trackById(ids[i]);
+      if (!t) { sources.push(''); continue; }
+      if ((t.source || 'local') === 'jellyfin') { sources.push(t.url || ''); continue; }
+      if (t._nativePath) { sources.push(t._nativePath); continue; }
+      // Local file not yet on disk: only persist within a forward window so a
+      // huge "all songs" queue doesn't write the entire library up front.
+      if (i >= start && i <= start + NATIVE_QUEUE_WINDOW) {
+        sources.push(await nativeSourceForTrack(t));
+        if (seq !== _nativeQueueSeq) return; // queue changed while persisting
+      } else {
+        sources.push('');
+      }
+    }
+    if (seq !== _nativeQueueSeq) return;
+    await p.setQueue({ sources, index: state.queuePos, repeat: state.repeat || 'off' });
+  } catch (e) { /* ignore */ }
+}
+// Native told us it auto-advanced (screen was likely off). Catch the UI up to
+// the track native is now playing, without touching the audio (native owns it).
+function handleNativeAdvanced(index) {
+  if (typeof index !== 'number' || index < 0 || index >= state.queue.length) return;
+  state.queuePos = index;
+  resetPlaybackErrors();
+  loadTrack(trackById(state.queue[index]), true, true);
+  saveResume(true);
 }
 
 function setQueue(indices, startIndex) {
@@ -2930,7 +2997,11 @@ function bootPlaybackTrack(autoplay) {
   }
 }
 
-function loadTrack(track, autoplay) {
+// nativeAlreadyPlaying: set when the NATIVE queue auto-advanced to this track
+// on its own (screen off). The audio is already loaded and playing in native,
+// so we only refresh the UI/metadata — we must NOT reassign audio.src or call
+// play() again (that would restart/duplicate playback).
+function loadTrack(track, autoplay, nativeAlreadyPlaying) {
   if (!track) return;
   breadcrumb('loadTrack ' + (track.source || '?') + ' id=' + track.id + ' art=' + (track.pictureUrl ? (track.pictureUrl.slice(0, 12) + '…') : 'none') + ' dur=' + track.durationSec);
   // Track whether the user actually wants this playing. The audio 'error'
@@ -2941,7 +3012,7 @@ function loadTrack(track, autoplay) {
   playbackIntended = !!autoplay;
   state.playingTrack = track;
   state.playingSource = track.source || 'local';
-  audio.src = track.url;
+  if (!nativeAlreadyPlaying) audio.src = track.url;
   titleEl.textContent = track.title;
   subtitleEl.textContent = subtitleFor(track);
   setNowPlayingArt(track.pictureUrl || albumArtUrlFor(albumOf(track)));
@@ -2954,7 +3025,7 @@ function loadTrack(track, autoplay) {
   render();
   updateMediaSession();
   updateFavoriteUI();
-  if (autoplay) playWithFallback('loadTrack');
+  if (autoplay && !nativeAlreadyPlaying) playWithFallback('loadTrack');
 }
 
 function updateFavoriteUI() {
@@ -3514,6 +3585,11 @@ repeatBtn.addEventListener('click', () => {
   state.repeat = state.repeat === 'off' ? 'all' : state.repeat === 'all' ? 'one' : 'off';
   applyRepeatVisual();
   savePrefs();
+  // Keep the native auto-advance queue in sync with the repeat mode.
+  if (IS_NATIVE) {
+    const p = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.NativePlayer;
+    if (p) { try { p.setRepeat({ mode: state.repeat }); } catch (e) { /* ignore */ } }
+  }
 });
 
 
@@ -3602,7 +3678,14 @@ document.addEventListener('visibilitychange', () => {
   if (state.source !== 'jellyfin') return;
   syncJellyfin({ feedback: false, silent: true, debounceMs: 60000 });
 });
-audio.addEventListener('ended', () => { playbackErrorStreak = 0; nextTrack(true); });
+audio.addEventListener('ended', () => {
+  playbackErrorStreak = 0;
+  // On native the player owns the queue and auto-advances itself (so it works
+  // with the screen off). An 'ended' here means the end of the queue — nothing
+  // more to do. On web, advance to the next track as before.
+  if (IS_NATIVE) return;
+  nextTrack(true);
+});
 audio.addEventListener('error', () => {
   // Ignore errors when there's no real source (e.g. after removeAttribute('src')
   // + load() during teardown), and when the user isn't actually trying to play
