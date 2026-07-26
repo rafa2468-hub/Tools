@@ -809,11 +809,6 @@
     </button>
   </div>
 
-  <div class="volume-row">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
-    <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
-  </div>
-
   <section class="library" id="library">
     <div class="tabs" id="tabs">
       <button class="tab active" data-view="albums" type="button">Albums</button>
@@ -840,7 +835,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.19';
+const APP_VERSION = '1.7.20';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1141,7 +1136,6 @@ const prevBtn = document.getElementById('prev');
 const nextBtn = document.getElementById('next');
 const shuffleBtn = document.getElementById('shuffle');
 const repeatBtn = document.getElementById('repeat');
-const volume = document.getElementById('volume');
 const view = document.getElementById('view');
 const tabs = document.getElementById('tabs');
 const clearBtn = document.getElementById('clear');
@@ -1257,7 +1251,6 @@ function loadPrefs() {
     const p = JSON.parse(raw);
     if (typeof p.volume === 'number') {
       audio.volume = p.volume;
-      volume.value = String(p.volume);
     }
     if (typeof p.shuffle === 'boolean') {
       state.shuffle = p.shuffle;
@@ -3523,10 +3516,6 @@ repeatBtn.addEventListener('click', () => {
   savePrefs();
 });
 
-volume.addEventListener('input', () => {
-  audio.volume = Number(volume.value);
-  savePrefs();
-});
 
 // Returns the duration to use for the seek bar / time display. Prefers the
 // audio element's reported duration; falls back to the current track's
