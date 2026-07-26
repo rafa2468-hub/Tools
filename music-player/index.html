@@ -840,7 +840,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.17';
+const APP_VERSION = '1.7.18';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1111,7 +1111,12 @@ class NativeAudioAdapter {
   get paused() { return this._paused; }
   get readyState() { return this._ready ? 4 : 0; }
   get volume() { return this._volume; }
-  set volume(v) { this._volume = Math.max(0, Math.min(1, Number(v))); const p = this._plugin(); if (p) p.setVolume({ value: this._volume }); }
+  // On native we deliberately do NOT push the in-app slider down to MediaPlayer:
+  // that applied a software attenuation on top of the hardware volume and made
+  // USB-C / headset output very quiet. Real media apps play at full and let the
+  // phone's volume buttons (routed to STREAM_MUSIC) control loudness. We still
+  // remember the value so the (web) prefs round-trip is unaffected.
+  set volume(v) { this._volume = Math.max(0, Math.min(1, Number(v))); }
   get playbackRate() { return this._playbackRate; }
   set playbackRate(v) { this._playbackRate = Number(v) || 1; const p = this._plugin(); if (p) p.setRate({ value: this._playbackRate }); }
   play() { this._playIntent = true; const p = this._plugin(); if (p) p.play(); return Promise.resolve(); }

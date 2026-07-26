@@ -57,10 +57,11 @@ public class NativePlayerPlugin extends Plugin {
                 internalPause();
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                try { if (player != null) player.setVolume(volume * 0.3f, volume * 0.3f); } catch (Exception e) { /* ignore */ }
+                // Keep playing at full volume. Self-ducking here could leave the
+                // output stuck quiet if the matching GAIN never arrived, and it
+                // is not needed for a music player.
                 break;
             case AudioManager.AUDIOFOCUS_GAIN:
-                try { if (player != null) player.setVolume(volume, volume); } catch (Exception e) { /* ignore */ }
                 if (resumeOnFocusGain) { resumeOnFocusGain = false; internalPlay(); }
                 break;
             default:
