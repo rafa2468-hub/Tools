@@ -43,6 +43,13 @@ public class NativePlayerPlugin extends Plugin {
     private float volume = 1.0f;
     private boolean resumeOnFocusGain = false;
 
+    // The playback queue lives here so tracks auto-advance even while the screen
+    // is off (the web layer is suspended then and can't drive the "next track"
+    // logic). Sources are http(s) URLs (Jellyfin) or local file paths.
+    private final java.util.List<String> queue = new java.util.ArrayList<>();
+    private int queueIndex = -1;
+    private String repeatMode = "off"; // off | all | one
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable ticker;
 
@@ -189,7 +196,7 @@ public class NativePlayerPlugin extends Plugin {
             });
             player.setOnCompletionListener(mp -> {
                 stopTicker();
-                emit("ended");
+                advanceOnCompletion();
             });
             player.setOnErrorListener((mp, what, extra) -> {
                 JSObject d = new JSObject();
@@ -233,7 +240,110 @@ public class NativePlayerPlugin extends Plugin {
         } catch (Exception e) { /* ignore */ }
     }
 
+    // Called when the current track finishes. Picks the next source from the
+    // queue and plays it — all natively, so it works with the screen off. Emits
+    // "advanced" (with the new index) so the web layer can catch up its UI when
+    // it wakes; at the end of the queue emits "pause" + "ended" instead.
+    private void advanceOnCompletion() {
+        if ("one".equals(repeatMode) && queueIndex >= 0 && queueIndex < queue.size()) {
+            setDataSourceAndPrepare(queue.get(queueIndex), true);
+            JSObject d = new JSObject();
+            d.put("index", queueIndex);
+            emit("advanced", d);
+            return;
+        }
+        int next = queueIndex + 1;
+        if (next >= queue.size()) {
+            if ("all".equals(repeatMode) && !queue.isEmpty()) {
+                next = 0;
+            } else {
+                emit("pause");
+                emit("ended");
+                return;
+            }
+        }
+        if (next >= 0 && next < queue.size()) {
+            queueIndex = next;
+            setDataSourceAndPrepare(queue.get(next), true);
+            JSObject d = new JSObject();
+            d.put("index", next);
+            emit("advanced", d);
+        } else {
+            emit("pause");
+            emit("ended");
+        }
+    }
+
     // ---- plugin API ----
+
+    // Replace the playback queue and current index WITHOUT touching the player.
+    // The web layer starts the current track itself (via load/loadData); this
+    // just tells native what to auto-advance through when a track completes.
+    @PluginMethod
+    public void setQueue(PluginCall call) {
+        com.getcapacitor.JSArray arr = call.getArray("sources");
+        final int index = call.getInt("index", -1);
+        final String repeat = call.getString("repeat", "off");
+        final java.util.List<String> next = new java.util.ArrayList<>();
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                try { next.add(arr.getString(i)); } catch (Exception e) { next.add(""); }
+            }
+        }
+        getActivity().runOnUiThread(() -> {
+            queue.clear();
+            queue.addAll(next);
+            queueIndex = index;
+            repeatMode = repeat;
+        });
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setRepeat(PluginCall call) {
+        repeatMode = call.getString("mode", "off");
+        call.resolve();
+    }
+
+    // Jump to a queue index and play it (used by Next/Previous while awake).
+    @PluginMethod
+    public void skipTo(PluginCall call) {
+        final int index = call.getInt("index", -1);
+        getActivity().runOnUiThread(() -> {
+            if (index >= 0 && index < queue.size()) {
+                queueIndex = index;
+                setDataSourceAndPrepare(queue.get(index), true);
+            }
+        });
+        call.resolve();
+    }
+
+    // Persist a local track's bytes to a stable file so MediaPlayer can play it
+    // by path (needed for the native auto-advance queue — it can't reach a
+    // JavaScript blob). Returns the absolute path. Writes off the UI thread.
+    @PluginMethod
+    public void persist(PluginCall call) {
+        final String data = call.getString("data", "");
+        final String name = call.getString("name", "track.dat");
+        new Thread(() -> {
+            try {
+                File dir = new File(getContext().getFilesDir(), "tracks");
+                if (!dir.exists()) dir.mkdirs();
+                File f = new File(dir, name);
+                if (!f.exists() || f.length() == 0) {
+                    byte[] bytes = Base64.decode(data, Base64.DEFAULT);
+                    FileOutputStream fos = new FileOutputStream(f);
+                    fos.write(bytes);
+                    fos.close();
+                }
+                JSObject ret = new JSObject();
+                ret.put("path", f.getAbsolutePath());
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("persist failed: " + e.getMessage());
+            }
+        }).start();
+    }
 
     // Load a source that MediaPlayer can open directly: an http(s) stream
     // (Jellyfin) or a file path. Prepares but does not start until play().
