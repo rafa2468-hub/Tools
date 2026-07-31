@@ -19,6 +19,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 // ---------------------------------------------------------------------
 // User configuration
@@ -30,12 +31,17 @@
 static const char *WIFI_SSID = "YOUR_WIFI_SSID";
 static const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
-// Local time zone, as offsets from UTC in seconds. Example: Central
-// European Time (UTC+1, +1h DST) -> GMT_OFFSET_SEC = 3600,
-// DAYLIGHT_OFFSET_SEC = 3600. US Eastern (UTC-5, +1h DST) ->
-// GMT_OFFSET_SEC = -18000, DAYLIGHT_OFFSET_SEC = 3600.
-static const long GMT_OFFSET_SEC = 0;
-static const int DAYLIGHT_OFFSET_SEC = 0;
+// Local time zone as a POSIX TZ string: Europe/Warsaw, i.e. CET (UTC+1)
+// switching to CEST (UTC+2) on the last Sunday of March at 02:00 and back
+// on the last Sunday of October at 03:00.
+//
+// Note this is deliberately not the configTime(gmtOffset, daylightOffset)
+// form. That one builds a TZ string with no DST transition rule, leaving
+// the C library to apply its built-in default - US switching dates, which
+// are two weeks off from the EU's in spring and a week off in autumn. An
+// explicit rule string keeps the DST changeover correct year-round with
+// no code change.
+static const char *TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 // Time source. The primary is a local NTP server on the LAN, so the clock
 // syncs without needing to reach the internet. The secondary is a public
@@ -223,6 +229,13 @@ static void drawFace() {
 static void setFallbackTime() {
   static const char *MONTHS[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  // Apply the same time zone the NTP path would, so mktime() below reads
+  // the build timestamp as local time and the display renders it back
+  // unchanged. Without this the fallback clock would silently be
+  // interpreted as UTC.
+  setenv("TZ", TZ_INFO, 1);
+  tzset();
+
   char monStr[4];
   struct tm t = {};
   int day, year, hour, min, sec;
@@ -273,7 +286,7 @@ static void connectAndSyncTime() {
   }
 
   Serial.println("Wi-Fi connected, syncing time via NTP...");
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+  configTzTime(TZ_INFO, NTP_SERVER_1, NTP_SERVER_2);
 
   struct tm t;
   if (getLocalTime(&t, 10000)) {

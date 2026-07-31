@@ -84,8 +84,9 @@ Edit the constants at the top of `src/main.cpp` before flashing:
 - `WIFI_SSID` / `WIFI_PASSWORD` — leave `WIFI_SSID` as
   `"YOUR_WIFI_SSID"` to skip Wi-Fi/NTP entirely and run from the
   compile-time fallback clock instead.
-- `GMT_OFFSET_SEC` / `DAYLIGHT_OFFSET_SEC` — your local time zone, as
-  offsets from UTC in seconds (see the comment above them for examples).
+- `TZ_INFO` — local time zone as a POSIX TZ string. Defaults to
+  `"CET-1CEST,M3.5.0,M10.5.0/3"` (Europe/Warsaw). See the note below
+  before changing it.
 - `NTP_SERVER_1` / `NTP_SERVER_2` — time sources. `NTP_SERVER_1` defaults
   to `192.168.1.5`, a local NTP server on the LAN, so the clock syncs
   without needing internet access. `NTP_SERVER_2` is `pool.ntp.org`,
@@ -94,6 +95,28 @@ Edit the constants at the top of `src/main.cpp` before flashing:
 
 The Wi-Fi network you point it at must of course be able to route to
 `192.168.1.5`.
+
+### Time zones and DST
+
+The sketch calls `configTzTime(TZ_INFO, ...)` with an explicit POSIX TZ
+string rather than the more commonly seen
+`configTime(gmtOffset, daylightOffset, ...)`. This is deliberate.
+
+`configTime()`'s offset form builds a TZ string containing only offsets
+and abbreviations — no DST *transition rule*. The C library then falls
+back to its built-in default, which is the **US** switching schedule. The
+EU switches on the last Sunday of March and the last Sunday of October,
+while the US switches on the second Sunday of March and the first Sunday
+of November, so a clock configured that way reads an hour wrong for
+roughly two weeks each spring and one week each autumn.
+
+`"CET-1CEST,M3.5.0,M10.5.0/3"` spells the EU rule out: CET at UTC+1
+(POSIX inverts the sign), CEST one hour ahead, starting on month 3, week
+5 ("last"), day 0 (Sunday), and ending month 10, last Sunday, at 03:00
+local. Transitions are then handled correctly with no code change.
+
+For another zone, use that zone's TZ string — e.g. `GMT0BST,M3.5.0/1,M10.5.0`
+for the UK, `EST5EDT,M3.2.0,M11.1.0` for US Eastern.
 
 ## How it works
 
@@ -107,7 +130,7 @@ The Wi-Fi network you point it at must of course be able to route to
   after startup — only the three hands and the center hub redraw each
   second.
 - Time itself is supplied by the ESP32 core's SNTP client
-  (`configTime`), which keeps the system clock synced in the background
+  (`configTzTime`), which keeps the system clock synced in the background
   after the initial connection; `loop()` just reads it with
   `getLocalTime()`.
 
