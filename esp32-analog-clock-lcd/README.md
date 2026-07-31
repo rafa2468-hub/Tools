@@ -1,9 +1,10 @@
 # esp32-analog-clock-lcd
 
 An analog clock face for a 2.1" round 360x360 SPI TFT (GC9B72 driver IC),
-driven by an ESP32-C3 Super Mini. Time comes from NTP over Wi-Fi; if
-Wi-Fi isn't configured (or the connection fails), the sketch falls back
-to the firmware's build timestamp so the clock still runs.
+driven by an ESP32-C3 Super Mini. Time comes over Wi-Fi from an NTP
+server on the LAN (`192.168.1.5`); if Wi-Fi isn't configured, or the
+connection or sync fails, the sketch falls back to the firmware's build
+timestamp so the clock still runs.
 
 ## Hardware
 
@@ -85,7 +86,14 @@ Edit the constants at the top of `src/main.cpp` before flashing:
   compile-time fallback clock instead.
 - `GMT_OFFSET_SEC` / `DAYLIGHT_OFFSET_SEC` — your local time zone, as
   offsets from UTC in seconds (see the comment above them for examples).
-- `NTP_SERVER_1` / `NTP_SERVER_2` — NTP sources.
+- `NTP_SERVER_1` / `NTP_SERVER_2` — time sources. `NTP_SERVER_1` defaults
+  to `192.168.1.5`, a local NTP server on the LAN, so the clock syncs
+  without needing internet access. `NTP_SERVER_2` is `pool.ntp.org`,
+  consulted only if the local server doesn't answer; set it to `nullptr`
+  if this device should never reach outside the LAN.
+
+The Wi-Fi network you point it at must of course be able to route to
+`192.168.1.5`.
 
 ## How it works
 

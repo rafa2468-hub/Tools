@@ -37,8 +37,12 @@ static const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 static const long GMT_OFFSET_SEC = 0;
 static const int DAYLIGHT_OFFSET_SEC = 0;
 
-static const char *NTP_SERVER_1 = "pool.ntp.org";
-static const char *NTP_SERVER_2 = "time.nist.gov";
+// Time source. The primary is a local NTP server on the LAN, so the clock
+// syncs without needing to reach the internet. The secondary is a public
+// pool, used only if the local server doesn't answer - drop it (set to
+// nullptr) if this device should never talk to the outside world.
+static const char *NTP_SERVER_1 = "192.168.1.5";
+static const char *NTP_SERVER_2 = "pool.ntp.org";
 
 // ---------------------------------------------------------------------
 // Display wiring - ESP32-C3 Super Mini
