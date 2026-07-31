@@ -43,16 +43,24 @@ static const char *NTP_SERVER_2 = "time.nist.gov";
 // ---------------------------------------------------------------------
 // Display wiring - ESP32-C3 Super Mini
 // ---------------------------------------------------------------------
-// The Super Mini breaks out every GPIO, so any free pins work; these are
-// just a convenient set that avoids the boot-strapping pins (GPIO2/8/9)
-// and the USB pins (GPIO18/19). Rewire to taste.
 #define TFT_SCK 4
 #define TFT_MOSI 6
-#define TFT_MISO -1 // not used by the display
-#define TFT_DC 7
-#define TFT_CS 10
+#define TFT_MISO -1 // display is write-only, no MISO
+#define TFT_CS 7
+#define TFT_DC 2    // see the strapping-pin note below
 #define TFT_RST 3
-#define TFT_BL 5 // backlight enable, active HIGH
+
+// Backlight enable (active HIGH). Set to -1 if the module's BLK pin is
+// tied straight to 3V3 (always on) or left unconnected; set it to a GPIO
+// number to control brightness/blanking from software.
+#define TFT_BL -1
+
+// Note on GPIO2: it is one of the ESP32-C3's strapping pins, sampled at
+// reset to select the boot mode, and must not be held LOW at that moment.
+// A TFT's DC line is a high-impedance input, so in practice it does not
+// disturb the strap and the board boots normally. If this board ever
+// fails to boot with the display attached, that is the first thing to
+// suspect - move DC to a non-strapping GPIO (e.g. 1, 5 or 10).
 
 // ---------------------------------------------------------------------
 // Display bus / driver
@@ -280,8 +288,10 @@ static int8_t lastSecDrawn = -1;
 void setup() {
   Serial.begin(115200);
 
+#if TFT_BL >= 0
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
+#endif
 
   gfx->begin();
   gfx->fillScreen(COLOR_BG);

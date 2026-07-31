@@ -14,18 +14,32 @@ to the firmware's build timestamp so the clock still runs.
 
 | Display pin | ESP32-C3 GPIO | Notes |
 |---|---|---|
-| SCK / SCL   | 4  | SPI clock |
-| SDA / MOSI  | 6  | SPI data in |
-| DC / RS     | 7  | data/command |
-| CS          | 10 | chip select |
-| RST         | 3  | reset |
-| BLK / LED   | 5  | backlight enable, active HIGH |
+| SCK / SCL   | 4   | SPI clock |
+| SDA / MOSI  | 6   | SPI data in |
+| CS          | 7   | chip select |
+| DC / RS     | 2   | data/command (strapping pin, see below) |
+| RST         | 3   | reset |
+| MISO        | —   | not connected; the display is write-only |
+| BLK / LED   | —   | not driven by software (`TFT_BL` is `-1`) |
 | VCC         | 3V3 | **3.3V only** |
 | GND         | GND | |
 
-These pins just avoid the C3's boot-strapping pins (GPIO2/8/9) and its
-native-USB pins (GPIO18/19); any other free GPIOs work equally well if you
-rewire and update the `#define`s at the top of `src/main.cpp`.
+To rewire, edit the `#define`s at the top of `src/main.cpp`.
+
+If your module has a BLK/LED backlight pin and you want software control
+over it, connect it to a free GPIO and set `TFT_BL` to that number; the
+sketch will drive it HIGH at startup. Left at `-1` it is never touched,
+which is what you want when BLK is tied straight to 3V3.
+
+### GPIO2 and boot
+
+GPIO2 is one of the ESP32-C3's strapping pins: it is sampled at reset to
+choose the boot mode and must not be held LOW at that instant. A TFT's DC
+line is a high-impedance input, so it normally doesn't disturb the strap
+and the board boots fine. If the board ever refuses to boot with the
+display connected, this is the first thing to suspect — move DC to a
+non-strapping GPIO (1, 5 and 10 are free in this wiring) and update
+`TFT_DC`.
 
 ## Driver note: GC9B72 vs GC9C01
 
