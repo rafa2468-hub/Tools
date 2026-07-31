@@ -1,21 +1,20 @@
 // Analog clock for a 2.1" round 360x360 GC9B72 SPI TFT, driven by an
 // ESP32-C3 Super Mini.
 //
-// The panel is driven through LovyanGFX using the vendor's own
-// LGFX_GC9B72.hpp panel definition, which carries the GC9B72 register
-// init sequence. An earlier version of this sketch tried to reuse
-// Arduino_GFX's GC9C01 driver on the theory that GalaxyCore's two 360x360
-// round parts were register-compatible; they are not. That build left the
-// panel backlit but showing uninitialized display RAM.
+// This sketch deliberately depends on NO graphics library. Two attempts to
+// reuse an existing driver for this panel failed on real hardware -
+// Arduino_GFX's GC9C01 (GalaxyCore's two 360x360 round controllers turn
+// out not to be register-compatible) and then LovyanGFX - so everything
+// drawn here is built from a single primitive: set one pixel. Adapting to
+// whatever driver does light your panel up is then a matter of filling in
+// the three functions in the PANEL ADAPTER block below, and nothing else
+// in this file needs to know what the display is.
 //
 // Time is obtained over Wi-Fi via NTP (the ESP32-C3 has no RTC of its
 // own). If Wi-Fi is not configured or the connection attempt fails, the
 // clock falls back to the firmware's compile timestamp and free-runs from
 // there so it still displays something useful.
 
-#define LGFX_USE_V1
-#include <LovyanGFX.hpp>
-#include "LGFX_GC9B72.hpp" // vendor panel definition; declares class LGFX
 #include <WiFi.h>
 #include <time.h>
 #include <sys/time.h>
@@ -57,16 +56,68 @@ static const char *NTP_SERVER_2 = "pool.ntp.org";
 // false - it steps once per second, the way a quartz movement does.
 static const bool SMOOTH_SECONDS = true;
 
-// ---------------------------------------------------------------------
-// Display
-// ---------------------------------------------------------------------
-// Pin assignments, SPI clock rate, panel offsets and the GC9B72 init
-// sequence all live in the vendor's LGFX_GC9B72.hpp next to this sketch.
-// LovyanGFX takes its wiring from the panel definition rather than from
-// the sketch, so there is deliberately nothing to configure here - to
-// rewire, edit that file. The wiring this was built against is recorded
-// in README.md for reference.
-static LGFX gfx;
+// Panel size. Everything on the face is positioned from these, so a
+// different round panel only needs these two numbers changed.
+static const int16_t PANEL_W = 360;
+static const int16_t PANEL_H = 360;
+
+// =====================================================================
+// PANEL ADAPTER
+// =====================================================================
+// The only code in this sketch that knows what the display is. Point
+// these three functions at whichever driver actually initializes your
+// panel; everything below is drawn out of panelDrawPixel and needs no
+// changes.
+//
+// panelFillRect exists purely for speed. A correct but slow version is
+// just a loop over panelDrawPixel, and that is what the fallback below
+// does - but filling the 360x360 background one pixel at a time means
+// 129,600 separate SPI transactions, which takes visible seconds. If your
+// driver can set an address window and stream pixels (almost all of them
+// can - it is how a fillScreen is implemented), route it through that
+// instead.
+
+#if HOSTTEST
+// The test harness supplies its own framebuffer-backed implementations.
+void panelInit();
+void panelDrawPixel(int16_t x, int16_t y, uint16_t color);
+void panelFillRect(int16_t x, int16_t y, int16_t w, int16_t h,
+                   uint16_t color);
+void panelBeginBatch();
+void panelEndBatch();
+#else
+
+#include "GC9B72.h" // <-- your working custom driver
+
+static void panelInit() {
+  // Whatever your driver needs to bring the panel up. After this returns,
+  // panelDrawPixel must work and the display should be showing something
+  // (the red fill you already got is proof this part is right).
+  gc9b72_init();
+}
+
+static void panelDrawPixel(int16_t x, int16_t y, uint16_t color) {
+  if (x < 0 || y < 0 || x >= PANEL_W || y >= PANEL_H) return; // clip
+  gc9b72_draw_pixel(x, y, color);
+}
+
+static void panelFillRect(int16_t x, int16_t y, int16_t w, int16_t h,
+                          uint16_t color) {
+  gc9b72_fill_rect(x, y, w, h, color);
+  // If your driver has no rectangle fill, delete the line above and use:
+  //   for (int16_t j = 0; j < h; j++)
+  //     for (int16_t i = 0; i < w; i++)
+  //       panelDrawPixel(x + i, y + j, color);
+}
+
+// Optional. If your driver can hold one SPI transaction open across many
+// pixel writes, start/end it here - a frame is dozens of short lines, and
+// paying transaction setup on each one is the difference between a smooth
+// sweep and a stuttering one. Leave them empty if it has no such concept.
+static void panelBeginBatch() {}
+static void panelEndBatch() {}
+
+#endif
 
 // ---------------------------------------------------------------------
 // Clock face geometry
@@ -122,6 +173,125 @@ struct Hand {
 static Hand hourHand, minHand, secHand;
 
 // ---------------------------------------------------------------------
+// Drawing primitives
+// ---------------------------------------------------------------------
+// Standard integer algorithms, all resolving to panelDrawPixel. Having
+// them here rather than in a library is what makes this sketch portable
+// across display drivers.
+
+// Bresenham.
+static void gfxDrawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+                         uint16_t color) {
+  bool steep = abs(y1 - y0) > abs(x1 - x0);
+  if (steep) {
+    int16_t t;
+    t = x0; x0 = y0; y0 = t;
+    t = x1; x1 = y1; y1 = t;
+  }
+  if (x0 > x1) {
+    int16_t t;
+    t = x0; x0 = x1; x1 = t;
+    t = y0; y0 = y1; y1 = t;
+  }
+  int16_t dx = x1 - x0;
+  int16_t dy = abs(y1 - y0);
+  int16_t err = dx / 2;
+  int16_t ystep = (y0 < y1) ? 1 : -1;
+  for (; x0 <= x1; x0++) {
+    if (steep) {
+      panelDrawPixel(y0, x0, color);
+    } else {
+      panelDrawPixel(x0, y0, color);
+    }
+    err -= dy;
+    if (err < 0) {
+      y0 += ystep;
+      err += dx;
+    }
+  }
+}
+
+// Midpoint circle, outline only.
+static void gfxDrawCircle(int16_t x0, int16_t y0, int16_t r,
+                           uint16_t color) {
+  int16_t f = 1 - r, ddF_x = 1, ddF_y = -2 * r, x = 0, y = r;
+  panelDrawPixel(x0, y0 + r, color);
+  panelDrawPixel(x0, y0 - r, color);
+  panelDrawPixel(x0 + r, y0, color);
+  panelDrawPixel(x0 - r, y0, color);
+  while (x < y) {
+    if (f >= 0) { y--; ddF_y += 2; f += ddF_y; }
+    x++; ddF_x += 2; f += ddF_x;
+    panelDrawPixel(x0 + x, y0 + y, color);
+    panelDrawPixel(x0 - x, y0 + y, color);
+    panelDrawPixel(x0 + x, y0 - y, color);
+    panelDrawPixel(x0 - x, y0 - y, color);
+    panelDrawPixel(x0 + y, y0 + x, color);
+    panelDrawPixel(x0 - y, y0 + x, color);
+    panelDrawPixel(x0 + y, y0 - x, color);
+    panelDrawPixel(x0 - y, y0 - x, color);
+  }
+}
+
+static void gfxFillCircle(int16_t x0, int16_t y0, int16_t r,
+                           uint16_t color) {
+  for (int16_t dy = -r; dy <= r; dy++) {
+    for (int16_t dx = -r; dx <= r; dx++) {
+      if (dx * dx + dy * dy <= r * r) {
+        panelDrawPixel(x0 + dx, y0 + dy, color);
+      }
+    }
+  }
+}
+
+// A 5x7 digit font - the clock face only ever spells 0-9, so carrying a
+// whole font table would be dead weight. Column-major, bit 0 is the top
+// row. Glyph cell is 6 columns wide including the trailing space.
+static const uint8_t DIGIT_FONT[10][5] = {
+    {0x3E, 0x51, 0x49, 0x45, 0x3E}, // 0
+    {0x00, 0x42, 0x7F, 0x40, 0x00}, // 1
+    {0x42, 0x61, 0x51, 0x49, 0x46}, // 2
+    {0x21, 0x41, 0x45, 0x4B, 0x31}, // 3
+    {0x18, 0x14, 0x12, 0x7F, 0x10}, // 4
+    {0x27, 0x45, 0x45, 0x45, 0x39}, // 5
+    {0x3C, 0x4A, 0x49, 0x49, 0x30}, // 6
+    {0x01, 0x71, 0x09, 0x05, 0x03}, // 7
+    {0x36, 0x49, 0x49, 0x49, 0x36}, // 8
+    {0x06, 0x49, 0x49, 0x29, 0x1E}, // 9
+};
+
+static const uint8_t GLYPH_W = 6; // 5 columns + 1 spacing
+static const uint8_t GLYPH_H = 8; // 7 rows + 1 spacing
+
+// Draws one digit at `scale`, painting the full cell background first so
+// that redrawing a numeral also erases whatever was scribbled over it.
+static void gfxDrawDigit(int16_t x, int16_t y, uint8_t digit, uint8_t scale,
+                          uint16_t color, uint16_t bg) {
+  panelFillRect(x, y, GLYPH_W * scale, GLYPH_H * scale, bg);
+  for (uint8_t col = 0; col < 5; col++) {
+    uint8_t bits = DIGIT_FONT[digit][col];
+    for (uint8_t row = 0; row < 7; row++) {
+      if (bits & (1 << row)) {
+        for (uint8_t sy = 0; sy < scale; sy++) {
+          for (uint8_t sx = 0; sx < scale; sx++) {
+            panelDrawPixel(x + col * scale + sx, y + row * scale + sy,
+                           color);
+          }
+        }
+      }
+    }
+  }
+}
+
+static void gfxDrawNumber(int16_t x, int16_t y, const char *s, uint8_t scale,
+                           uint16_t color, uint16_t bg) {
+  for (const char *p = s; *p; p++) {
+    gfxDrawDigit(x, y, (uint8_t)(*p - '0'), scale, color, bg);
+    x += GLYPH_W * scale;
+  }
+}
+
+// ---------------------------------------------------------------------
 // Geometry helpers
 // ---------------------------------------------------------------------
 
@@ -139,23 +309,65 @@ static void polarToXY(float angleDeg, int16_t radius, int16_t &x,
   y = CY - (int16_t)lroundf(radius * cosf(rad));
 }
 
+// Scanline-fills a convex quad given in float coordinates.
+static void gfxFillQuad(const float *qx, const float *qy, uint16_t color) {
+  float fminY = qy[0], fmaxY = qy[0];
+  for (int i = 1; i < 4; i++) {
+    if (qy[i] < fminY) fminY = qy[i];
+    if (qy[i] > fmaxY) fmaxY = qy[i];
+  }
+  int16_t yStart = (int16_t)floorf(fminY);
+  int16_t yEnd = (int16_t)ceilf(fmaxY);
+  for (int16_t y = yStart; y <= yEnd; y++) {
+    float yc = (float)y;
+    float xmin = 1e9f, xmax = -1e9f;
+    for (int e = 0; e < 4; e++) {
+      int a = e, b = (e + 1) & 3;
+      float ya = qy[a], yb = qy[b];
+      if ((ya <= yc && yb > yc) || (yb <= yc && ya > yc)) {
+        float t = (yc - ya) / (yb - ya);
+        float x = qx[a] + t * (qx[b] - qx[a]);
+        if (x < xmin) xmin = x;
+        if (x > xmax) xmax = x;
+      }
+    }
+    if (xmax < xmin) continue;
+    int16_t px0 = (int16_t)lroundf(xmin);
+    int16_t px1 = (int16_t)lroundf(xmax);
+    for (int16_t x = px0; x <= px1; x++) panelDrawPixel(x, y, color);
+  }
+}
+
+// A line with width, drawn as the quad the hand actually occupies.
+//
+// The obvious implementation - stack `thickness` Bresenham lines at
+// perpendicular offsets - looks right on horizontal and vertical hands
+// and falls apart on diagonals. At 45 degrees the perpendicular offset
+// rounds to steps of (1,-1), i.e. 1.41px, so the stacked lines separate
+// instead of merging and the hand renders as loose parallel strands with
+// gaps between them. Filling the quad sidesteps the rounding entirely and
+// costs no more, since it touches only pixels actually inside the shape.
 static void drawThickLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
                            uint16_t color, uint8_t thickness) {
   float dx = x1 - x0;
   float dy = y1 - y0;
   float len = sqrtf(dx * dx + dy * dy);
   if (len < 1.0f) {
-    gfx.drawPixel(x0, y0, color);
+    panelDrawPixel(x0, y0, color);
     return;
   }
-  float ox = -dy / len;
-  float oy = dx / len;
-  int8_t half = thickness / 2;
-  for (int8_t i = -half; i <= half; i++) {
-    int16_t ex = (int16_t)lroundf(ox * i);
-    int16_t ey = (int16_t)lroundf(oy * i);
-    gfx.drawLine(x0 + ex, y0 + ey, x1 + ex, y1 + ey, color);
+  if (thickness <= 1) {
+    // A 1px quad is thinner than the sample grid, so scanline filling it
+    // would drop pixels. Bresenham is exactly right here.
+    gfxDrawLine(x0, y0, x1, y1, color);
+    return;
   }
+  float half = thickness / 2.0f;
+  float ox = -dy / len * half;
+  float oy = dx / len * half;
+  float qx[4] = {x0 + ox, x1 + ox, x1 - ox, x0 - ox};
+  float qy[4] = {y0 + oy, y1 + oy, y1 - oy, y0 - oy};
+  gfxFillQuad(qx, qy, color);
 }
 
 // secOfMinute carries the fraction of a second, so the second hand can be
@@ -192,7 +404,7 @@ static void drawHand(const Hand &h, uint16_t color, uint8_t thickness) {
   drawThickLine(h.tx, h.ty, h.x, h.y, color, thickness);
 }
 
-static void drawHub() { gfx.fillCircle(CX, CY, 6, COLOR_HUB); }
+static void drawHub() { gfxFillCircle(CX, CY, 6, COLOR_HUB); }
 
 // ---------------------------------------------------------------------
 // Static face (drawn once)
@@ -200,14 +412,15 @@ static void drawHub() { gfx.fillCircle(CX, CY, 6, COLOR_HUB); }
 static const char *NUMERALS[12] = {"12", "1", "2", "3", "4",  "5",
                                     "6",  "7", "8", "9", "10", "11"};
 
+static const uint8_t NUMERAL_SCALE = 2;
+
 static void drawNumeral(int i) {
   int16_t x, y;
   polarToXY(i * 30.0f, NUMERAL_R, x, y);
-  int16_t textW = strlen(NUMERALS[i]) * 12; // 6px * textSize(2)
-  gfx.setTextColor(COLOR_NUMERAL, COLOR_BG);
-  gfx.setTextSize(2);
-  gfx.setCursor(x - textW / 2, y - 8);
-  gfx.print(NUMERALS[i]);
+  int16_t textW = strlen(NUMERALS[i]) * GLYPH_W * NUMERAL_SCALE;
+  int16_t textH = GLYPH_H * NUMERAL_SCALE;
+  gfxDrawNumber(x - textW / 2, y - textH / 2, NUMERALS[i], NUMERAL_SCALE,
+                COLOR_NUMERAL, COLOR_BG);
 }
 
 // The second and minute hands are long enough to reach into the ring of
@@ -227,9 +440,9 @@ static void repairNumeralsNear(float angleDeg) {
 }
 
 static void drawFace() {
-  gfx.fillScreen(COLOR_BG);
-  gfx.drawCircle(CX, CY, RIM_OUTER_R, COLOR_RIM);
-  gfx.drawCircle(CX, CY, RIM_INNER_R, COLOR_RIM);
+  panelFillRect(0, 0, PANEL_W, PANEL_H, COLOR_BG);
+  gfxDrawCircle(CX, CY, RIM_OUTER_R, COLOR_RIM);
+  gfxDrawCircle(CX, CY, RIM_INNER_R, COLOR_RIM);
 
   for (int i = 0; i < 60; i++) {
     float angle = i * 6.0f;
@@ -241,7 +454,7 @@ static void drawFace() {
     } else {
       polarToXY(angle, MIN_TICK_OUTER_R, ox, oy);
       polarToXY(angle, MIN_TICK_INNER_R, ix, iy);
-      gfx.drawLine(ix, iy, ox, oy, COLOR_TICK);
+      gfxDrawLine(ix, iy, ox, oy, COLOR_TICK);
     }
   }
 
@@ -357,7 +570,7 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   // One SPI transaction for the whole frame. Without this LovyanGFX opens
   // and closes a transaction around every individual drawLine, and a
   // frame is made of dozens of them.
-  gfx.startWrite();
+  panelBeginBatch();
 
   eraseHand(secHand, SEC_HAND_W);
   repairNumeralsNear(secHand.angle);
@@ -391,7 +604,7 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   drawHub();
   drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
 
-  gfx.endWrite();
+  panelEndBatch();
 }
 
 // ---------------------------------------------------------------------
@@ -404,13 +617,12 @@ void setup() {
   // Backlight is handled by the panel definition (LovyanGFX drives BL
   // itself when the vendor file configures a Light_PWM block; on modules
   // where BL is tied high it is simply always on).
-  gfx.init();
-  gfx.setRotation(0);
-  gfx.fillScreen(COLOR_BG);
+  panelInit();
+  panelFillRect(0, 0, PANEL_W, PANEL_H, COLOR_BG);
 
   connectAndSyncTime();
 
-  gfx.startWrite();
+  panelBeginBatch();
   drawFace();
 
   struct tm t;
@@ -421,7 +633,7 @@ void setup() {
   drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
   drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
-  gfx.endWrite();
+  panelEndBatch();
 }
 
 void loop() {

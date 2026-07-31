@@ -1,5 +1,8 @@
 // Host-side exercise of the clock's rendering logic.
 //
+// The sketch draws everything itself now, so these tests run the real
+// line, circle and glyph code - only "set one pixel" is stubbed.
+//
 // The interesting property is that the incremental renderer (which only
 // touches what moved) must leave the panel byte-identical to a full
 // repaint of the same instant. If erasing the sweeping second hand ever
@@ -13,6 +16,7 @@
 
 uint16_t g_fb[FB_W * FB_H];
 long g_pixelWrites = 0;
+int g_batchDepth = 0;
 double g_testNow = 0;
 SerialStub Serial;
 WiFiStub WiFi;
@@ -93,7 +97,7 @@ static int sweepWorstDivergence(double from, double to, int stepMs) {
 int main() {
   setenv("TZ", TZ_INFO, 1);
   tzset();
-  gfx.init();
+  panelInit();
 
   // ---- 1. hand bearings
   {
@@ -164,10 +168,10 @@ int main() {
 
   // ---- 4. SPI transactions are balanced
   //
-  // renderHands() wraps each frame in startWrite()/endWrite(). If those
-  // ever get out of step the display stalls mid-transaction on real
-  // hardware, which is invisible to a framebuffer comparison - so check
-  // the nesting depth returns to zero explicitly.
+  // renderHands() wraps each frame in panelBeginBatch()/panelEndBatch().
+  // If those ever get out of step the display can stall mid-transaction on
+  // real hardware, which is invisible to a framebuffer comparison - so
+  // check the nesting depth returns to zero explicitly.
   {
     double base = timeAt(6, 30, 10.0);
     g_testNow = base;
@@ -178,8 +182,8 @@ int main() {
       g_testNow = now;
       loop();
     }
-    check(gfx.transactionDepth() == 0,
-          "startWrite/endWrite balanced across frames");
+    check(g_batchDepth == 0,
+          "panelBeginBatch/panelEndBatch balanced across frames");
   }
 
   // ---- 5. cost per frame stays bounded

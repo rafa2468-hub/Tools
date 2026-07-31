@@ -10,13 +10,13 @@ timestamp so the clock still runs.
 
 ```
 analog_clock/analog_clock.ino   the sketch (Arduino IDE opens this)
-analog_clock/LGFX_GC9B72.hpp    vendor panel definition - SUPPLY THIS YOURSELF
+analog_clock/<your driver>      GC9B72 driver - SUPPLY THIS YOURSELF
 platformio.ini                  PlatformIO build config, points at the above
 hosttest/                       host-side tests, no hardware needed
 ```
 
-`LGFX_GC9B72.hpp` ships with the display module and is not in this repo —
-see [Driver](#driver-lovyangfx--the-vendor-gc9b72-panel-definition) below.
+The display driver is not in this repo — see
+[Driver](#driver-bring-your-own) below.
 
 ## Hardware
 
@@ -33,18 +33,15 @@ see [Driver](#driver-lovyangfx--the-vendor-gc9b72-panel-definition) below.
 | DC / RS     | 2   | data/command (strapping pin, see below) |
 | RST         | 3   | reset |
 | MISO        | —   | not connected; the display is write-only |
-| BLK / LED   | —   | on by default; LovyanGFX drives it if the panel file configures it |
+| BLK / LED   | —   | not wired; backlight is on by default |
 | VCC         | 3V3 | **3.3V only** |
 | GND         | GND | |
 
-This is the wiring the module's own demo was verified on. Under LovyanGFX
-the pins are set in `LGFX_GC9B72.hpp`, not in the sketch — to rewire, edit
-that file.
+This is the wiring the module's own demo was verified working on. The
+pins are configured in your display driver, not in this sketch.
 
 The BLK/LED pin is left unwired and the backlight comes up on regardless,
-so the module pulls it high itself. For software brightness control,
-connect it to a free GPIO and add a `Light_PWM` block to
-`LGFX_GC9B72.hpp`.
+so the module pulls it high itself.
 
 ### GPIO2 and boot
 
@@ -53,41 +50,57 @@ choose the boot mode and must not be held LOW at that instant. A TFT's DC
 line is a high-impedance input, so in practice it doesn't disturb the
 strap — and this board does boot reliably with the display attached. Noted
 only because if it ever *doesn't*, this is the first thing to suspect:
-move DC to a non-strapping GPIO (1, 5 and 10 are free in this wiring) and
-update the pin in `LGFX_GC9B72.hpp`.
+move DC to a non-strapping GPIO (1, 5 and 10 are free in this wiring).
 
-## Driver: LovyanGFX + the vendor GC9B72 panel definition
+## Driver: bring your own
 
-The sketch needs two vendor files alongside it in `analog_clock/`:
+**This sketch depends on no graphics library.** Everything on the face —
+lines, circles, the numerals — is drawn from a single primitive: set one
+pixel. That is a deliberate response to two failed attempts to reuse an
+existing driver for this panel (see below).
 
-```
-analog_clock/LGFX_GC9B72.hpp    panel definition: pins, SPI config, init sequence
-analog_clock/GC9B72Graphics.hpp (if the vendor demo includes one)
-```
+To connect it to your display, fill in the **PANEL ADAPTER** block at the
+top of the sketch:
 
-These ship with the display module and are **not** part of LovyanGFX
-upstream — there is no public GC9B72 driver. `LGFX_GC9B72.hpp` is what
-carries the controller's register init sequence, and it also owns the pin
-assignments, so the wiring is configured there rather than in the sketch.
+| Function | Required? | What it must do |
+|---|---|---|
+| `panelInit()` | yes | bring the panel up; after it returns, pixels must stick |
+| `panelDrawPixel(x, y, color)` | yes | one RGB565 pixel |
+| `panelFillRect(x, y, w, h, color)` | strongly recommended | fast rectangle fill |
+| `panelBeginBatch()` / `panelEndBatch()` | optional | hold one SPI transaction open across a frame |
 
-### Why not Arduino_GFX
+Only `panelDrawPixel` is truly load-bearing. `panelFillRect` can be a loop
+over it, but the 360x360 background is 129,600 pixels — one SPI
+transaction each takes visible seconds, so route it through your driver's
+address-window fill if it has one. The batch hooks can be empty.
 
-An earlier version of this sketch drove the panel with Arduino_GFX's
-`Arduino_GC9C01`, on the reasoning that GalaxyCore's two 360x360 round
-controllers were register-compatible. **They are not.** That build left
-the panel powered and backlit but showing uninitialized display RAM — a
-uniform fine dither, no image. The bus was never the problem: these
-modules are 4-wire SPI, the wiring was correct, and the vendor's own demo
-ran on the identical wiring. Only the init sequence was wrong, and it is
-not something you can guess at.
+Colors are RGB565, the same format nearly every SPI TFT wants.
 
-If your panel shows something wrong once it *is* initializing:
+### Two drivers that did not work
 
-- **Mirrored or rotated image**: change `gfx.setRotation(0)` in `setup()`
-  (0-3).
-- **Image offset / partially off-screen**: adjust `panel_cfg.offset_x` /
-  `offset_y` in `LGFX_GC9B72.hpp`.
-- **Inverted colors**: toggle `panel_cfg.invert` in `LGFX_GC9B72.hpp`.
+Recorded because it cost real bench time:
+
+- **Arduino_GFX's `Arduino_GC9C01`.** GC9C01 is GalaxyCore's other
+  360x360 round controller and Arduino_GFX supports it natively, so it
+  looked like a safe substitute. It is not: the two are **not**
+  register-compatible. The panel stayed backlit showing uninitialized
+  display RAM — a uniform fine dither, no image.
+- **LovyanGFX**, including with the vendor's own `LGFX_GC9B72.hpp`.
+
+The bus was never the problem. These modules are 4-wire SPI, the wiring
+below is correct, and the vendor's own demo ran on that identical wiring.
+Only the init sequence was ever wrong — and there is no public GC9B72
+driver to substitute in, so the working init sequence has to come from
+your own driver.
+
+### If the image appears but looks wrong
+
+- **Mirrored or rotated**: swap or invert the axes in `panelDrawPixel`,
+  e.g. `gc9b72_draw_pixel(PANEL_W - 1 - x, y, color)`.
+- **Offset**: add the panel's offset in `panelDrawPixel`.
+- **Colors inverted or swapped (red/blue)**: your driver's pixel format
+  differs — either flip the invert bit in its init, or byte-swap in
+  `panelDrawPixel`.
 
 ## Building and flashing
 
@@ -102,11 +115,9 @@ the source, so the two can't drift apart.
    `https://espressif.github.io/arduino-esp32/package_esp32_index.json`,
    then install **esp32** by Espressif Systems from *Tools → Board →
    Boards Manager*.
-2. **Library**: in *Tools → Manage Libraries*, install **LovyanGFX** by
-   lovyan03. Also make sure the vendor's `LGFX_GC9B72.hpp` (and
-   `GC9B72Graphics.hpp` if the demo used one) sit in the `analog_clock`
-   folder next to the sketch — they carry the GC9B72 init sequence and the
-   pin assignments.
+2. **Display driver**: no library to install — put your own GC9B72 driver
+   in the `analog_clock` folder and wire it into the PANEL ADAPTER block
+   at the top of the sketch (see [Driver](#driver-bring-your-own)).
 3. **Open** `analog_clock/analog_clock.ino` (keep it in its
    `analog_clock` folder — the IDE requires the folder and the sketch to
    share a name).
@@ -127,9 +138,8 @@ pio run -t upload      # build and flash
 pio device monitor     # serial monitor (115200 baud)
 ```
 
-`platformio.ini` points `src_dir` at `analog_clock/` and pulls LovyanGFX
-in automatically. The vendor `LGFX_GC9B72.hpp` still has to be present in
-`analog_clock/`.
+`platformio.ini` points `src_dir` at `analog_clock/`. There are no library
+dependencies; your display driver just has to be in that folder.
 
 ### The USB CDC setting
 
@@ -217,10 +227,16 @@ development machine with no board attached:
 cd hosttest && make
 ```
 
-This compiles `analog_clock/analog_clock.ino` against stubbed
-Arduino/LovyanGFX headers
-that paint into a real 360x360 framebuffer, and drives it from a
-test-controlled clock so a full 60-second sweep runs instantly.
+This compiles `analog_clock/analog_clock.ino` with only `panelDrawPixel`
+stubbed — painting into a real 360x360 framebuffer — and drives it from a
+test-controlled clock, so a full 60-second sweep runs instantly. Because
+the sketch owns its drawing code, the tests exercise the real line, circle
+and glyph routines rather than a library's.
+
+`make preview` renders the face to `preview.png` using that same code, so
+you can see what the panel will show before flashing. Pass a time with
+`make preview T="3 25 40"`. This is worth doing after any geometry change:
+it is how the hollow-hand bug below was caught.
 
 The central check is that the incremental renderer — which only touches
 what moved — leaves the framebuffer **byte-identical to a full repaint of
@@ -234,6 +250,14 @@ hand subtends ~19 degrees).
 If you change the face geometry — hand lengths, numeral radius, text size
 — run this afterwards. Lengthening a hand until it reaches a face element
 it did not previously touch is the easiest way to reintroduce the problem.
+
+Note what the framebuffer comparison alone will *not* catch: it checks
+that the incremental render matches a full render, so a drawing routine
+that is wrong in the same way in both passes still compares equal. The
+thick-line renderer had exactly that bug — hands drawn as stacked
+Bresenham lines came apart into loose strands on diagonals, and every test
+passed because the erase pass came apart identically. `make preview` is
+what surfaced it. Hands are now drawn as filled quads.
 
 `make` also runs an **ino-check**: the Arduino IDE rewrites a `.ino`
 before compiling, generating prototypes for every function and injecting
