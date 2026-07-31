@@ -44,10 +44,10 @@ static void renderReference(double when, std::vector<uint16_t> &out) {
   readClock(t, s);
   computeHands(t, s, hourHand, minHand, secHand);
   drawFace();
-  drawHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
   out.assign(g_fb, g_fb + FB_W * FB_H);
 }
 
@@ -69,10 +69,10 @@ static int sweepWorstDivergence(double from, double to, int stepMs) {
   readClock(t, s);
   computeHands(t, s, hourHand, minHand, secHand);
   drawFace();
-  drawHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
 
   int worst = 0;
   std::vector<uint16_t> inc, ref;

@@ -103,10 +103,10 @@ int main(int argc, char **argv) {
   readClock(now, s);
   computeHands(now, s, hourHand, minHand, secHand);
   drawFace();
-  drawHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
 
   writePng("preview.png");
   printf("wrote preview.png (%02d:%02d:%04.1f)\n", hh, mm, ss);

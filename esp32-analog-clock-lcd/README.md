@@ -10,13 +10,12 @@ timestamp so the clock still runs.
 
 ```
 analog_clock/analog_clock.ino   the sketch (Arduino IDE opens this)
-analog_clock/<your driver>      GC9B72 driver - SUPPLY THIS YOURSELF
+analog_clock/GC9B72Graphics.hpp GC9B72 driver - SUPPLY THIS YOURSELF
 platformio.ini                  PlatformIO build config, points at the above
 hosttest/                       host-side tests, no hardware needed
 ```
 
-The display driver is not in this repo — see
-[Driver](#driver-bring-your-own) below.
+`GC9B72Graphics.hpp` is not in this repo — see [Driver](#driver) below.
 
 ## Hardware
 
@@ -52,27 +51,38 @@ strap — and this board does boot reliably with the display attached. Noted
 only because if it ever *doesn't*, this is the first thing to suspect:
 move DC to a non-strapping GPIO (1, 5 and 10 are free in this wiring).
 
-## Driver: bring your own
+## Driver
 
 **This sketch depends on no graphics library.** Everything on the face —
-lines, circles, the numerals — is drawn from a single primitive: set one
-pixel. That is a deliberate response to two failed attempts to reuse an
-existing driver for this panel (see below).
+lines, circles, the numerals — is drawn from two primitives: fill a
+rectangle, and set one pixel. That is a deliberate response to two failed
+attempts to reuse an existing driver for this panel (see below).
 
-To connect it to your display, fill in the **PANEL ADAPTER** block at the
-top of the sketch:
+It expects `GC9B72Graphics.hpp` in the `analog_clock` folder — a small
+hand-written driver holding the GC9B72 register init sequence, the pin
+definitions, and `setAddrWindow`. That file is not in this repo.
 
-| Function | Required? | What it must do |
-|---|---|---|
-| `panelInit()` | yes | bring the panel up; after it returns, pixels must stick |
-| `panelDrawPixel(x, y, color)` | yes | one RGB565 pixel |
-| `panelFillRect(x, y, w, h, color)` | strongly recommended | fast rectangle fill |
-| `panelBeginBatch()` / `panelEndBatch()` | optional | hold one SPI transaction open across a frame |
+Everything display-specific is in the **PANEL ADAPTER** block at the top
+of the sketch:
 
-Only `panelDrawPixel` is truly load-bearing. `panelFillRect` can be a loop
-over it, but the 360x360 background is 129,600 pixels — one SPI
-transaction each takes visible seconds, so route it through your driver's
-address-window fill if it has one. The batch hooks can be empty.
+| Function | What it does |
+|---|---|
+| `panelInit()` | pins, reset pulse, `SPI.begin()`, then `gc9b72_init()` |
+| `panelDrawPixel(x, y, color)` | one RGB565 pixel |
+| `panelFillRect(x, y, w, h, color)` | one address window, then streams |
+| `panelBeginBatch()` / `panelEndBatch()` | one SPI transaction per frame |
+
+Two things worth knowing if you adapt this to another driver:
+
+- **`panelInit()` does the bus setup.** `GC9B72Graphics.hpp` only sends
+  the register sequence — it never calls `pinMode`, `SPI.begin()`, or
+  pulses reset. Those have to happen before `gc9b72_init()` or nothing
+  reaches the panel.
+- **`panelFillRect` is not a convenience.** The clock draws in horizontal
+  runs, and the driver's own `drawPixel` opens a fresh address window per
+  pixel — around 24 `digitalWrite` calls each. Going through one window
+  per *run* instead of per pixel is what makes a 15fps sweep feasible at
+  all; the same applies to the 129,600-pixel background fill.
 
 Colors are RGB565, the same format nearly every SPI TFT wants.
 
@@ -95,9 +105,9 @@ your own driver.
 
 ### If the image appears but looks wrong
 
-- **Mirrored or rotated**: swap or invert the axes in `panelDrawPixel`,
-  e.g. `gc9b72_draw_pixel(PANEL_W - 1 - x, y, color)`.
-- **Offset**: add the panel's offset in `panelDrawPixel`.
+- **Mirrored or rotated**: adjust the MADCTL value (`cmd(0x36)`) in the
+  init sequence, or swap/invert the axes in `panelOpenWindow`.
+- **Offset**: add the panel's offset in `panelOpenWindow`.
 - **Colors inverted or swapped (red/blue)**: your driver's pixel format
   differs — either flip the invert bit in its init, or byte-swap in
   `panelDrawPixel`.
@@ -115,9 +125,9 @@ the source, so the two can't drift apart.
    `https://espressif.github.io/arduino-esp32/package_esp32_index.json`,
    then install **esp32** by Espressif Systems from *Tools → Board →
    Boards Manager*.
-2. **Display driver**: no library to install — put your own GC9B72 driver
-   in the `analog_clock` folder and wire it into the PANEL ADAPTER block
-   at the top of the sketch (see [Driver](#driver-bring-your-own)).
+2. **Display driver**: no library to install — put `GC9B72Graphics.hpp`
+   in the `analog_clock` folder next to the sketch (see
+   [Driver](#driver)).
 3. **Open** `analog_clock/analog_clock.ino` (keep it in its
    `analog_clock` folder — the IDE requires the folder and the sketch to
    share a name).
@@ -139,7 +149,7 @@ pio device monitor     # serial monitor (115200 baud)
 ```
 
 `platformio.ini` points `src_dir` at `analog_clock/`. There are no library
-dependencies; your display driver just has to be in that folder.
+dependencies; `GC9B72Graphics.hpp` just has to be in that folder.
 
 ### The USB CDC setting
 

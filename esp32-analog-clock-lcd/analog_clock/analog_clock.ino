@@ -1,14 +1,13 @@
 // Analog clock for a 2.1" round 360x360 GC9B72 SPI TFT, driven by an
 // ESP32-C3 Super Mini.
 //
-// This sketch deliberately depends on NO graphics library. Two attempts to
-// reuse an existing driver for this panel failed on real hardware -
-// Arduino_GFX's GC9C01 (GalaxyCore's two 360x360 round controllers turn
-// out not to be register-compatible) and then LovyanGFX - so everything
-// drawn here is built from a single primitive: set one pixel. Adapting to
-// whatever driver does light your panel up is then a matter of filling in
-// the three functions in the PANEL ADAPTER block below, and nothing else
-// in this file needs to know what the display is.
+// This sketch depends on NO graphics library. Two attempts to reuse an
+// existing driver for this panel failed on real hardware - Arduino_GFX's
+// GC9C01 (GalaxyCore's two 360x360 round controllers turn out not to be
+// register-compatible) and then LovyanGFX - so everything drawn here is
+// built from two primitives: fill a rectangle, and set one pixel. Those
+// live in the PANEL ADAPTER block below, wired to GC9B72Graphics.hpp, and
+// are the only code in this file that knows what the display is.
 //
 // Time is obtained over Wi-Fi via NTP (the ESP32-C3 has no RTC of its
 // own). If Wi-Fi is not configured or the connection attempt fails, the
@@ -64,18 +63,13 @@ static const int16_t PANEL_H = 360;
 // =====================================================================
 // PANEL ADAPTER
 // =====================================================================
-// The only code in this sketch that knows what the display is. Point
-// these three functions at whichever driver actually initializes your
-// panel; everything below is drawn out of panelDrawPixel and needs no
-// changes.
+// The only code in this sketch that knows what the display is. Wired
+// here to GC9B72Graphics.hpp; everything below draws through these and
+// needs no changes if the driver is swapped.
 //
-// panelFillRect exists purely for speed. A correct but slow version is
-// just a loop over panelDrawPixel, and that is what the fallback below
-// does - but filling the 360x360 background one pixel at a time means
-// 129,600 separate SPI transactions, which takes visible seconds. If your
-// driver can set an address window and stream pixels (almost all of them
-// can - it is how a fillScreen is implemented), route it through that
-// instead.
+// panelFillRect is not a convenience - it is what makes the sweep
+// possible. The clock draws in horizontal runs, and on this driver a run
+// costs one address window instead of one per pixel.
 
 #if HOSTTEST
 // The test harness supplies its own framebuffer-backed implementations.
@@ -87,35 +81,108 @@ void panelBeginBatch();
 void panelEndBatch();
 #else
 
-#include "GC9B72.h" // <-- your working custom driver
+#include <SPI.h>
+#include "GC9B72Graphics.hpp" // the working GC9B72 driver: pins, init
+                              // sequence, sendCmd/sendData, setAddrWindow
+
+// SPI clock for pixel pushing. The GC9B72 is happy well above this; back
+// it off if the wiring is long or on breadboard jumpers.
+static const uint32_t PANEL_SPI_HZ = 40000000;
+static SPISettings panelSpi(PANEL_SPI_HZ, MSBFIRST, SPI_MODE0);
+
+// Opens an address window and leaves CS asserted with DC high, ready for
+// the caller to stream pixel data and then raise CS.
+//
+// This deliberately does not reuse the driver's setAddrWindow/sendCmd/
+// sendData. Those toggle CS around every individual byte, which costs
+// about 22 digitalWrite calls per window - fine for a one-off fill, far
+// too slow when the sweep needs one every few pixels. Holding CS low
+// across the whole command sequence is the normal way to drive these
+// controllers and cuts that to six.
+static inline void panelOpenWindow(uint16_t x0, uint16_t y0, uint16_t x1,
+                                    uint16_t y1) {
+  digitalWrite(PIN_CS, LOW);
+
+  digitalWrite(PIN_DC, LOW);
+  SPI.transfer(0x2A);
+  digitalWrite(PIN_DC, HIGH);
+  SPI.transfer(x0 >> 8); SPI.transfer(x0 & 0xFF);
+  SPI.transfer(x1 >> 8); SPI.transfer(x1 & 0xFF);
+
+  digitalWrite(PIN_DC, LOW);
+  SPI.transfer(0x2B);
+  digitalWrite(PIN_DC, HIGH);
+  SPI.transfer(y0 >> 8); SPI.transfer(y0 & 0xFF);
+  SPI.transfer(y1 >> 8); SPI.transfer(y1 & 0xFF);
+
+  digitalWrite(PIN_DC, LOW);
+  SPI.transfer(0x2C); // memory write
+  digitalWrite(PIN_DC, HIGH);
+}
+
+static inline void panelCloseWindow() { digitalWrite(PIN_CS, HIGH); }
 
 static void panelInit() {
-  // Whatever your driver needs to bring the panel up. After this returns,
-  // panelDrawPixel must work and the display should be showing something
-  // (the red fill you already got is proof this part is right).
+  // GC9B72Graphics.hpp only sends the register sequence - the bus and pins
+  // are the caller's job, so they are set up here.
+  pinMode(PIN_CS, OUTPUT);
+  digitalWrite(PIN_CS, HIGH);
+  pinMode(PIN_DC, OUTPUT);
+  digitalWrite(PIN_DC, HIGH);
+  pinMode(PIN_RST, OUTPUT);
+
+  digitalWrite(PIN_RST, HIGH);
+  delay(10);
+  digitalWrite(PIN_RST, LOW);
+  delay(20);
+  digitalWrite(PIN_RST, HIGH);
+  delay(120);
+
+  SPI.begin(PIN_SCK, -1 /* MISO unused */, PIN_MOSI, -1 /* CS by hand */);
+  SPI.beginTransaction(panelSpi);
   gc9b72_init();
+  SPI.endTransaction();
 }
 
 static void panelDrawPixel(int16_t x, int16_t y, uint16_t color) {
-  if (x < 0 || y < 0 || x >= PANEL_W || y >= PANEL_H) return; // clip
-  gc9b72_draw_pixel(x, y, color);
+  if (x < 0 || y < 0 || x >= PANEL_W || y >= PANEL_H) return;
+  panelOpenWindow(x, y, x, y);
+  SPI.transfer(color >> 8);
+  SPI.transfer(color & 0xFF);
+  panelCloseWindow();
 }
 
 static void panelFillRect(int16_t x, int16_t y, int16_t w, int16_t h,
                           uint16_t color) {
-  gc9b72_fill_rect(x, y, w, h, color);
-  // If your driver has no rectangle fill, delete the line above and use:
-  //   for (int16_t j = 0; j < h; j++)
-  //     for (int16_t i = 0; i < w; i++)
-  //       panelDrawPixel(x + i, y + j, color);
+  // Clip to the panel; the drawing code above happily runs off the edge.
+  if (w <= 0 || h <= 0) return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > PANEL_W) w = PANEL_W - x;
+  if (y + h > PANEL_H) h = PANEL_H - y;
+  if (w <= 0 || h <= 0) return;
+
+  // One window for the whole rectangle, then stream. Sending a prefilled
+  // buffer in bulk rather than two SPI.transfer() calls per pixel is what
+  // makes the 129,600-pixel background fill quick rather than glacial.
+  static uint8_t buf[128]; // 64 pixels
+  for (uint16_t i = 0; i < sizeof(buf); i += 2) {
+    buf[i] = color >> 8;
+    buf[i + 1] = color & 0xFF;
+  }
+  uint32_t remaining = (uint32_t)w * h;
+  panelOpenWindow(x, y, x + w - 1, y + h - 1);
+  while (remaining) {
+    uint32_t chunk = remaining > 64 ? 64 : remaining;
+    SPI.writeBytes(buf, chunk * 2);
+    remaining -= chunk;
+  }
+  panelCloseWindow();
 }
 
-// Optional. If your driver can hold one SPI transaction open across many
-// pixel writes, start/end it here - a frame is dozens of short lines, and
-// paying transaction setup on each one is the difference between a smooth
-// sweep and a stuttering one. Leave them empty if it has no such concept.
-static void panelBeginBatch() {}
-static void panelEndBatch() {}
+// One SPI transaction per frame rather than one per primitive.
+static void panelBeginBatch() { SPI.beginTransaction(panelSpi); }
+static void panelEndBatch() { SPI.endTransaction(); }
 
 #endif
 
@@ -236,11 +303,8 @@ static void gfxDrawCircle(int16_t x0, int16_t y0, int16_t r,
 static void gfxFillCircle(int16_t x0, int16_t y0, int16_t r,
                            uint16_t color) {
   for (int16_t dy = -r; dy <= r; dy++) {
-    for (int16_t dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy <= r * r) {
-        panelDrawPixel(x0 + dx, y0 + dy, color);
-      }
-    }
+    int16_t dx = (int16_t)sqrtf((float)(r * r - dy * dy));
+    panelFillRect(x0 - dx, y0 + dy, 2 * dx + 1, 1, color);
   }
 }
 
@@ -272,12 +336,8 @@ static void gfxDrawDigit(int16_t x, int16_t y, uint8_t digit, uint8_t scale,
     uint8_t bits = DIGIT_FONT[digit][col];
     for (uint8_t row = 0; row < 7; row++) {
       if (bits & (1 << row)) {
-        for (uint8_t sy = 0; sy < scale; sy++) {
-          for (uint8_t sx = 0; sx < scale; sx++) {
-            panelDrawPixel(x + col * scale + sx, y + row * scale + sy,
-                           color);
-          }
-        }
+        panelFillRect(x + col * scale, y + row * scale, scale, scale,
+                      color);
       }
     }
   }
@@ -334,7 +394,10 @@ static void gfxFillQuad(const float *qx, const float *qy, uint16_t color) {
     if (xmax < xmin) continue;
     int16_t px0 = (int16_t)lroundf(xmin);
     int16_t px1 = (int16_t)lroundf(xmax);
-    for (int16_t x = px0; x <= px1; x++) panelDrawPixel(x, y, color);
+    // One run per scanline rather than px1-px0 separate pixel writes: on
+    // a driver that opens an address window per pixel, that is the whole
+    // difference between a smooth sweep and a slideshow.
+    panelFillRect(px0, y, px1 - px0 + 1, 1, color);
   }
 }
 
@@ -400,7 +463,7 @@ static void eraseHand(const Hand &h, uint8_t thickness) {
   drawThickLine(h.tx, h.ty, h.x, h.y, COLOR_BG, thickness);
 }
 
-static void drawHand(const Hand &h, uint16_t color, uint8_t thickness) {
+static void paintHand(const Hand &h, uint16_t color, uint8_t thickness) {
   drawThickLine(h.tx, h.ty, h.x, h.y, color, thickness);
 }
 
@@ -599,10 +662,10 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   // get right and fails silently when it's wrong), just repaint both
   // unconditionally: drawing is idempotent and costs under a thousand
   // pixels a frame.
-  drawHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
 
   panelEndBatch();
 }
@@ -618,7 +681,9 @@ void setup() {
   // itself when the vendor file configures a Light_PWM block; on modules
   // where BL is tied high it is simply always on).
   panelInit();
+  panelBeginBatch();
   panelFillRect(0, 0, PANEL_W, PANEL_H, COLOR_BG);
+  panelEndBatch();
 
   connectAndSyncTime();
 
@@ -629,10 +694,10 @@ void setup() {
   float secOfMinute;
   readClock(t, secOfMinute);
   computeHands(t, secOfMinute, hourHand, minHand, secHand);
-  drawHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
   panelEndBatch();
 }
 
