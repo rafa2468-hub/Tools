@@ -16,6 +16,7 @@
 #include <Arduino_GFX_Library.h>
 #include <WiFi.h>
 #include <time.h>
+#include <sys/time.h>
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -49,6 +50,10 @@ static const char *TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";
 // nullptr) if this device should never talk to the outside world.
 static const char *NTP_SERVER_1 = "192.168.1.5";
 static const char *NTP_SERVER_2 = "pool.ntp.org";
+
+// true  - the second hand sweeps continuously, using sub-second time.
+// false - it steps once per second, the way a quartz movement does.
+static const bool SMOOTH_SECONDS = true;
 
 // ---------------------------------------------------------------------
 // Display wiring - ESP32-C3 Super Mini
@@ -118,6 +123,12 @@ static const uint16_t COLOR_HUB = RGB565(255, 60, 60);
 // Geometry helpers
 // ---------------------------------------------------------------------
 
+// Smallest absolute angle between two bearings, in degrees (0..180).
+static float angleDelta(float a, float b) {
+  float d = fmodf(fabsf(a - b), 360.0f);
+  return d > 180.0f ? 360.0f - d : d;
+}
+
 // angleDeg: 0 = 12 o'clock, increasing clockwise.
 static void polarToXY(float angleDeg, int16_t radius, int16_t &x,
                        int16_t &y) {
@@ -149,27 +160,36 @@ static void drawThickLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
 // Hand state, tracked so each redraw only touches what changed
 // ---------------------------------------------------------------------
 struct Hand {
-  int16_t x, y;   // current tip
-  int16_t tx, ty; // current tail (only used by the second hand)
+  int16_t x, y;   // tip
+  int16_t tx, ty; // tail (the center, except for the second hand)
+  float angle;    // bearing of the tip, degrees clockwise from 12
 };
 static Hand hourHand, minHand, secHand;
 
-static void computeHands(const struct tm &t, Hand &hour, Hand &minute,
-                          Hand &sec) {
-  float secAngle = t.tm_sec * 6.0f;
-  float minAngle = t.tm_min * 6.0f + t.tm_sec * 0.1f;
-  float hourAngle = (t.tm_hour % 12) * 30.0f + t.tm_min * 0.5f;
+// secOfMinute carries the fraction of a second, so the second hand can be
+// placed between whole-second positions.
+static void computeHands(const struct tm &t, float secOfMinute, Hand &hour,
+                          Hand &minute, Hand &sec) {
+  float minOfHour = t.tm_min + secOfMinute / 60.0f;
 
-  polarToXY(hourAngle, HOUR_HAND_LEN, hour.x, hour.y);
+  sec.angle = secOfMinute * 6.0f;
+  minute.angle = minOfHour * 6.0f;
+  hour.angle = (t.tm_hour % 12) * 30.0f + minOfHour * 0.5f;
+
+  polarToXY(hour.angle, HOUR_HAND_LEN, hour.x, hour.y);
   hour.tx = CX;
   hour.ty = CY;
 
-  polarToXY(minAngle, MIN_HAND_LEN, minute.x, minute.y);
+  polarToXY(minute.angle, MIN_HAND_LEN, minute.x, minute.y);
   minute.tx = CX;
   minute.ty = CY;
 
-  polarToXY(secAngle, SEC_HAND_LEN, sec.x, sec.y);
-  polarToXY(secAngle + 180.0f, SEC_HAND_TAIL, sec.tx, sec.ty);
+  polarToXY(sec.angle, SEC_HAND_LEN, sec.x, sec.y);
+  polarToXY(sec.angle + 180.0f, SEC_HAND_TAIL, sec.tx, sec.ty);
+}
+
+static bool sameHand(const Hand &a, const Hand &b) {
+  return a.x == b.x && a.y == b.y && a.tx == b.tx && a.ty == b.ty;
 }
 
 static void eraseHand(const Hand &h, uint8_t thickness) {
@@ -187,6 +207,32 @@ static void drawHub() { gfx->fillCircle(CX, CY, 6, COLOR_HUB); }
 // ---------------------------------------------------------------------
 static const char *NUMERALS[12] = {"12", "1", "2", "3", "4",  "5",
                                     "6",  "7", "8", "9", "10", "11"};
+
+static void drawNumeral(int i) {
+  int16_t x, y;
+  polarToXY(i * 30.0f, NUMERAL_R, x, y);
+  int16_t textW = strlen(NUMERALS[i]) * 12; // 6px * textSize(2)
+  gfx->setTextColor(COLOR_NUMERAL, COLOR_BG);
+  gfx->setTextSize(2);
+  gfx->setCursor(x - textW / 2, y - 8);
+  gfx->print(NUMERALS[i]);
+}
+
+// The second and minute hands are long enough to reach into the ring of
+// numerals, so erasing one punches a hole in whichever numeral it was
+// lying across. Repaint just that numeral. The widest label ("12") spans
+// about 24px at NUMERAL_R, i.e. roughly +/-6 degrees, so a 10 degree
+// guard band covers it with room to spare - and at 30 degree spacing it
+// still matches at most one numeral per call.
+static const float NUMERAL_GUARD_DEG = 10.0f;
+
+static void repairNumeralsNear(float angleDeg) {
+  for (int i = 0; i < 12; i++) {
+    if (angleDelta(angleDeg, i * 30.0f) < NUMERAL_GUARD_DEG) {
+      drawNumeral(i);
+    }
+  }
+}
 
 static void drawFace() {
   gfx->fillScreen(COLOR_BG);
@@ -207,14 +253,8 @@ static void drawFace() {
     }
   }
 
-  gfx->setTextColor(COLOR_NUMERAL, COLOR_BG);
-  gfx->setTextSize(2);
   for (int i = 0; i < 12; i++) {
-    int16_t x, y;
-    polarToXY(i * 30.0f, NUMERAL_R, x, y);
-    int16_t textW = strlen(NUMERALS[i]) * 12; // 6px * textSize(2)
-    gfx->setCursor(x - textW / 2, y - 8);
-    gfx->print(NUMERALS[i]);
+    drawNumeral(i);
   }
 }
 
@@ -298,9 +338,66 @@ static void connectAndSyncTime() {
 }
 
 // ---------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------
+
+// Reads the wall clock with sub-second resolution. secOfMinute comes back
+// as tm_sec plus the fraction elapsed within that second (0.0 .. 60.0),
+// or as a whole number when SMOOTH_SECONDS is off.
+static void readClock(struct tm &t, float &secOfMinute) {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  localtime_r(&tv.tv_sec, &t);
+  secOfMinute = t.tm_sec;
+  if (SMOOTH_SECONDS) {
+    secOfMinute += tv.tv_usec / 1000000.0f;
+  }
+}
+
+// Redraws only what moved. Erasing is the expensive, damaging operation,
+// so it is done sparingly: the second hand every frame, the other two
+// only when they have actually shifted a pixel.
+static void renderHands(const Hand &newHour, const Hand &newMin,
+                         const Hand &newSec) {
+  bool hourMoved = !sameHand(newHour, hourHand);
+  bool minMoved = !sameHand(newMin, minHand);
+
+  eraseHand(secHand, SEC_HAND_W);
+  repairNumeralsNear(secHand.angle);
+
+  if (hourMoved) {
+    eraseHand(hourHand, HOUR_HAND_W);
+  }
+  if (minMoved) {
+    eraseHand(minHand, MIN_HAND_W);
+    // At the stock MIN_HAND_LEN the tip stops a pixel or two short of the
+    // numerals' ink, so this repair is a no-op - but it is what keeps a
+    // lengthened minute hand from scraping the numerals, which is the
+    // first thing anyone reaching for a different look will change.
+    repairNumeralsNear(minHand.angle);
+  }
+
+  hourHand = newHour;
+  minHand = newMin;
+  secHand = newSec;
+
+  // The second hand's erase runs from its tail through the center out to
+  // its tip, so it can nick the other two hands anywhere along their
+  // length - and near the center it does so even at large angular
+  // separations, because a 3px-wide hand subtends ~19 degrees at r=6.
+  // Rather than guard that with an angle threshold (which is fiddly to
+  // get right and fails silently when it's wrong), just repaint both
+  // unconditionally: drawing is idempotent and costs under a thousand
+  // pixels a frame.
+  drawHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+  drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  drawHub();
+  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+}
+
+// ---------------------------------------------------------------------
 // Arduino entry points
 // ---------------------------------------------------------------------
-static int8_t lastSecDrawn = -1;
 
 void setup() {
   Serial.begin(115200);
@@ -318,40 +415,32 @@ void setup() {
   drawFace();
 
   struct tm t;
-  getLocalTime(&t, 1000);
-  computeHands(t, hourHand, minHand, secHand);
+  float secOfMinute;
+  readClock(t, secOfMinute);
+  computeHands(t, secOfMinute, hourHand, minHand, secHand);
   drawHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
   drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
-  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
   drawHub();
-  lastSecDrawn = t.tm_sec;
+  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
 }
 
 void loop() {
   struct tm t;
-  if (!getLocalTime(&t, 200)) {
-    delay(50);
-    return;
-  }
-  if (t.tm_sec == lastSecDrawn) {
-    delay(20);
-    return;
-  }
-  lastSecDrawn = t.tm_sec;
+  float secOfMinute;
+  readClock(t, secOfMinute);
 
   Hand newHour, newMin, newSec;
-  computeHands(t, newHour, newMin, newSec);
+  computeHands(t, secOfMinute, newHour, newMin, newSec);
 
-  eraseHand(hourHand, HOUR_HAND_W);
-  eraseHand(minHand, MIN_HAND_W);
-  eraseHand(secHand, SEC_HAND_W);
+  // The sweep is quantized by the display, not by a timer: at the second
+  // hand's length one pixel of tip travel takes about 66ms, so redrawing
+  // only when a rounded coordinate actually changes gives the smoothest
+  // motion the panel can show without any wasted frames.
+  if (sameHand(newSec, secHand) && sameHand(newMin, minHand) &&
+      sameHand(newHour, hourHand)) {
+    delay(5);
+    return;
+  }
 
-  hourHand = newHour;
-  minHand = newMin;
-  secHand = newSec;
-
-  drawHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
-  drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
-  drawHub();
+  renderHands(newHour, newMin, newSec);
 }

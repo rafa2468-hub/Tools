@@ -84,6 +84,8 @@ Edit the constants at the top of `src/main.cpp` before flashing:
 - `WIFI_SSID` / `WIFI_PASSWORD` — leave `WIFI_SSID` as
   `"YOUR_WIFI_SSID"` to skip Wi-Fi/NTP entirely and run from the
   compile-time fallback clock instead.
+- `SMOOTH_SECONDS` — `true` (default) sweeps the second hand
+  continuously; `false` steps it once per second like a quartz movement.
 - `TZ_INFO` — local time zone as a POSIX TZ string. Defaults to
   `"CET-1CEST,M3.5.0,M10.5.0/3"` (Europe/Warsaw). See the note below
   before changing it.
@@ -121,18 +123,53 @@ for the UK, `EST5EDT,M3.2.0,M11.1.0` for US Eastern.
 ## How it works
 
 - `drawFace()` renders the dial (bezel, 60 tick marks, 12 numerals) once
-  at startup.
-- Each second, `loop()` reads the current time, computes new hand-tip
-  coordinates, erases the previous hour/minute/second hands by redrawing
-  them in the background color, then draws the hands at their new
-  positions. Hand and tick geometry are sized so the hands never reach
-  the tick/numeral ring, so the static face never needs to be touched
-  after startup — only the three hands and the center hub redraw each
-  second.
+  at startup. It is never repainted wholesale after that.
+- `loop()` reads the clock with microsecond resolution and places the
+  second hand at a fractional angle, so it sweeps continuously rather
+  than stepping. Redraws are triggered by *pixels*, not by a timer: a new
+  frame is drawn only when a rounded hand coordinate actually changes. At
+  the second hand's length that works out to roughly one frame every
+  66 ms — the smoothest motion the panel can resolve, with no wasted
+  redraws in between.
+- Erasing a hand means painting it in the background color, which damages
+  anything it was lying on top of. So each frame repairs what it
+  disturbed: the numeral the second hand was crossing (at most one, found
+  by angle), plus the other two hands and the center hub, which are
+  simply repainted unconditionally — drawing is idempotent, and at under
+  a thousand pixels it is cheaper than reasoning about whether they
+  overlapped.
+- The whole sweep costs about 28k pixel writes per second, roughly 2% of
+  what the SPI link can carry, so there is plenty of headroom.
 - Time itself is supplied by the ESP32 core's SNTP client
   (`configTzTime`), which keeps the system clock synced in the background
   after the initial connection; `loop()` just reads it with
   `getLocalTime()`.
+
+## Tests
+
+The rendering logic is pure computation, so it can be exercised on a
+development machine with no board attached:
+
+```sh
+cd hosttest && make
+```
+
+This compiles `src/main.cpp` against stubbed Arduino/Arduino_GFX headers
+that paint into a real 360x360 framebuffer, and drives it from a
+test-controlled clock so a full 60-second sweep runs instantly.
+
+The central check is that the incremental renderer — which only touches
+what moved — leaves the framebuffer **byte-identical to a full repaint of
+the same instant**, and that this holds on *every* frame, not just at the
+end. Comparing only the final frame is not enough: corruption that
+appears and is healed a moment later still shows up as a flicker on the
+dial, and an earlier version of this code had exactly that bug (the
+second hand clipped the minute hand near the center, where a 3px-wide
+hand subtends ~19 degrees).
+
+If you change the face geometry — hand lengths, numeral radius, text size
+— run this afterwards. Lengthening a hand until it reaches a face element
+it did not previously touch is the easiest way to reintroduce the problem.
 
 ## Limitations
 
