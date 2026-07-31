@@ -10,7 +10,7 @@
 CXX      ?= g++
 CXXFLAGS := -std=c++17 -O1 -Wall -Wno-unused-variable
 INCLUDES := -I stubs -I ../analog_clock
-PRELUDE  := -include stubs/Arduino_GFX_Library.h \
+PRELUDE  := -include stubs/LovyanGFX.hpp \
             -include stubs/WiFi.h \
             -include testtime.h
 TIMEHOOK := -Dgettimeofday=test_gettimeofday \
@@ -36,7 +36,7 @@ ino-check:
 	@command -v python3 >/dev/null || { echo "skipping ino-check (no python3)"; exit 0; }
 	@python3 ino_preprocess.py $(SKETCH) .ino_generated.cpp
 	@$(CXX) $(CXXFLAGS) -fsyntax-only $(INCLUDES) \
-	    -include stubs/Arduino_GFX_Library.h -include stubs/WiFi.h \
+	    -include stubs/LovyanGFX.hpp -include stubs/WiFi.h \
 	    .ino_generated.cpp && echo "PASS  sketch survives Arduino IDE prototype injection"
 
 clean:

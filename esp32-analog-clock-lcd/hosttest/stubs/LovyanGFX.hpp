@@ -1,5 +1,9 @@
-// Host-side stubs standing in for Arduino + Arduino_GFX, so the clock's
+// Host-side stubs standing in for Arduino + LovyanGFX, so the clock's
 // geometry and redraw logic can be exercised without hardware.
+//
+// Only the drawing calls the sketch actually uses are modelled, with
+// LovyanGFX's signatures. The panel definition itself is stubbed
+// separately in LGFX_GC9B72.hpp.
 #pragma once
 #include <cstdint>
 #include <cstdio>
@@ -26,19 +30,22 @@ inline void fbSet(int x, int y, uint16_t c) {
   g_fb[y * FB_W + x] = c;
 }
 
-class Arduino_DataBus {};
-class Arduino_HWSPI : public Arduino_DataBus {
-public:
-  Arduino_HWSPI(int8_t, int8_t, int8_t, int8_t, int8_t) {}
-};
-
-class Arduino_GFX {
+namespace lgfx {
+class LGFX_Device {
   int16_t cx = 0, cy = 0;
   uint16_t fg = 0xFFFF, bg = 0;
   uint8_t tsize = 1;
+  int writeDepth = 0;
 
 public:
-  void begin() {}
+  bool init() { return true; }
+  void setRotation(uint8_t) {}
+  // LovyanGFX reference-counts these, so nesting is legal.
+  void startWrite() { writeDepth++; }
+  void endWrite() {
+    if (writeDepth > 0) writeDepth--;
+  }
+  int transactionDepth() const { return writeDepth; }
   void fillScreen(uint16_t c) {
     for (int i = 0; i < FB_W * FB_H; i++) g_fb[i] = c;
   }
@@ -92,11 +99,7 @@ public:
     }
   }
 };
-
-class Arduino_GC9C01 : public Arduino_GFX {
-public:
-  Arduino_GC9C01(Arduino_DataBus *, int8_t, uint8_t, bool) {}
-};
+} // namespace lgfx
 
 // ---- Arduino core stubs
 struct SerialStub {

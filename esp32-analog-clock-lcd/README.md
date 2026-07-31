@@ -10,9 +10,13 @@ timestamp so the clock still runs.
 
 ```
 analog_clock/analog_clock.ino   the sketch (Arduino IDE opens this)
+analog_clock/LGFX_GC9B72.hpp    vendor panel definition - SUPPLY THIS YOURSELF
 platformio.ini                  PlatformIO build config, points at the above
 hosttest/                       host-side tests, no hardware needed
 ```
+
+`LGFX_GC9B72.hpp` ships with the display module and is not in this repo —
+see [Driver](#driver-lovyangfx--the-vendor-gc9b72-panel-definition) below.
 
 ## Hardware
 
@@ -29,46 +33,61 @@ hosttest/                       host-side tests, no hardware needed
 | DC / RS     | 2   | data/command (strapping pin, see below) |
 | RST         | 3   | reset |
 | MISO        | —   | not connected; the display is write-only |
-| BLK / LED   | —   | not driven by software (`TFT_BL` is `-1`) |
+| BLK / LED   | —   | on by default; LovyanGFX drives it if the panel file configures it |
 | VCC         | 3V3 | **3.3V only** |
 | GND         | GND | |
 
-To rewire, edit the `#define`s at the top of `analog_clock/analog_clock.ino`.
+This is the wiring the module's own demo was verified on. Under LovyanGFX
+the pins are set in `LGFX_GC9B72.hpp`, not in the sketch — to rewire, edit
+that file.
 
-If your module has a BLK/LED backlight pin and you want software control
-over it, connect it to a free GPIO and set `TFT_BL` to that number; the
-sketch will drive it HIGH at startup. Left at `-1` it is never touched,
-which is what you want when BLK is tied straight to 3V3.
+The BLK/LED pin is left unwired and the backlight comes up on regardless,
+so the module pulls it high itself. For software brightness control,
+connect it to a free GPIO and add a `Light_PWM` block to
+`LGFX_GC9B72.hpp`.
 
 ### GPIO2 and boot
 
 GPIO2 is one of the ESP32-C3's strapping pins: it is sampled at reset to
 choose the boot mode and must not be held LOW at that instant. A TFT's DC
-line is a high-impedance input, so it normally doesn't disturb the strap
-and the board boots fine. If the board ever refuses to boot with the
-display connected, this is the first thing to suspect — move DC to a
-non-strapping GPIO (1, 5 and 10 are free in this wiring) and update
-`TFT_DC`.
+line is a high-impedance input, so in practice it doesn't disturb the
+strap — and this board does boot reliably with the display attached. Noted
+only because if it ever *doesn't*, this is the first thing to suspect:
+move DC to a non-strapping GPIO (1, 5 and 10 are free in this wiring) and
+update the pin in `LGFX_GC9B72.hpp`.
 
-## Driver note: GC9B72 vs GC9C01
+## Driver: LovyanGFX + the vendor GC9B72 panel definition
 
-At the time of writing, [Arduino_GFX](https://github.com/moononournation/Arduino_GFX)
-has no driver named specifically for the GC9B72. It's a GalaxyCore round
-panel controller from the same family as, and register-compatible with,
-GC9C01 — which Arduino_GFX already supports natively at exactly 360x360.
-This sketch uses `Arduino_GC9C01`, which is the correct choice for these
-TZT/DIYUSER-style 2.1" round GC9B72 modules in practice.
+The sketch needs two vendor files alongside it in `analog_clock/`:
 
-If your panel shows something wrong out of the box:
+```
+analog_clock/LGFX_GC9B72.hpp    panel definition: pins, SPI config, init sequence
+analog_clock/GC9B72Graphics.hpp (if the vendor demo includes one)
+```
 
-- **Mirrored or rotated image**: change the rotation argument in the
-  `Arduino_GC9C01(...)` constructor (0-3), or try `setRotation()` in
-  `setup()` after `gfx->begin()`.
-- **Image offset / partially off-screen**: pass non-zero
-  `col_offset1`/`row_offset1` to the `Arduino_GC9C01` constructor (see the
-  driver's header for the full parameter list).
-- **Inverted colors**: toggle the `ips` constructor argument (currently
-  `true`).
+These ship with the display module and are **not** part of LovyanGFX
+upstream — there is no public GC9B72 driver. `LGFX_GC9B72.hpp` is what
+carries the controller's register init sequence, and it also owns the pin
+assignments, so the wiring is configured there rather than in the sketch.
+
+### Why not Arduino_GFX
+
+An earlier version of this sketch drove the panel with Arduino_GFX's
+`Arduino_GC9C01`, on the reasoning that GalaxyCore's two 360x360 round
+controllers were register-compatible. **They are not.** That build left
+the panel powered and backlit but showing uninitialized display RAM — a
+uniform fine dither, no image. The bus was never the problem: these
+modules are 4-wire SPI, the wiring was correct, and the vendor's own demo
+ran on the identical wiring. Only the init sequence was wrong, and it is
+not something you can guess at.
+
+If your panel shows something wrong once it *is* initializing:
+
+- **Mirrored or rotated image**: change `gfx.setRotation(0)` in `setup()`
+  (0-3).
+- **Image offset / partially off-screen**: adjust `panel_cfg.offset_x` /
+  `offset_y` in `LGFX_GC9B72.hpp`.
+- **Inverted colors**: toggle `panel_cfg.invert` in `LGFX_GC9B72.hpp`.
 
 ## Building and flashing
 
@@ -83,8 +102,11 @@ the source, so the two can't drift apart.
    `https://espressif.github.io/arduino-esp32/package_esp32_index.json`,
    then install **esp32** by Espressif Systems from *Tools → Board →
    Boards Manager*.
-2. **Library**: in *Tools → Manage Libraries*, install **GFX Library for
-   Arduino** by moononournation.
+2. **Library**: in *Tools → Manage Libraries*, install **LovyanGFX** by
+   lovyan03. Also make sure the vendor's `LGFX_GC9B72.hpp` (and
+   `GC9B72Graphics.hpp` if the demo used one) sit in the `analog_clock`
+   folder next to the sketch — they carry the GC9B72 init sequence and the
+   pin assignments.
 3. **Open** `analog_clock/analog_clock.ino` (keep it in its
    `analog_clock` folder — the IDE requires the folder and the sketch to
    share a name).
@@ -105,8 +127,9 @@ pio run -t upload      # build and flash
 pio device monitor     # serial monitor (115200 baud)
 ```
 
-`platformio.ini` points `src_dir` at `analog_clock/` and pulls the
-Arduino_GFX dependency in automatically.
+`platformio.ini` points `src_dir` at `analog_clock/` and pulls LovyanGFX
+in automatically. The vendor `LGFX_GC9B72.hpp` still has to be present in
+`analog_clock/`.
 
 ### The USB CDC setting
 
@@ -194,7 +217,8 @@ development machine with no board attached:
 cd hosttest && make
 ```
 
-This compiles `analog_clock/analog_clock.ino` against stubbed Arduino/Arduino_GFX headers
+This compiles `analog_clock/analog_clock.ino` against stubbed
+Arduino/LovyanGFX headers
 that paint into a real 360x360 framebuffer, and drives it from a
 test-controlled clock so a full 60-second sweep runs instantly.
 

@@ -93,7 +93,7 @@ static int sweepWorstDivergence(double from, double to, int stepMs) {
 int main() {
   setenv("TZ", TZ_INFO, 1);
   tzset();
-  gfx->begin();
+  gfx.init();
 
   // ---- 1. hand bearings
   {
@@ -162,7 +162,27 @@ int main() {
     check(worst == 0, msg);
   }
 
-  // ---- 4. cost per frame stays bounded
+  // ---- 4. SPI transactions are balanced
+  //
+  // renderHands() wraps each frame in startWrite()/endWrite(). If those
+  // ever get out of step the display stalls mid-transaction on real
+  // hardware, which is invisible to a framebuffer comparison - so check
+  // the nesting depth returns to zero explicitly.
+  {
+    double base = timeAt(6, 30, 10.0);
+    g_testNow = base;
+    struct tm t; float s;
+    readClock(t, s);
+    computeHands(t, s, hourHand, minHand, secHand);
+    for (double now = base; now < base + 3.0; now += 0.02) {
+      g_testNow = now;
+      loop();
+    }
+    check(gfx.transactionDepth() == 0,
+          "startWrite/endWrite balanced across frames");
+  }
+
+  // ---- 5. cost per frame stays bounded
   {
     g_testNow = timeAt(8, 45, 0.0);
     struct tm t; float s;

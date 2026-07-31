@@ -1,19 +1,21 @@
 // Analog clock for a 2.1" round 360x360 GC9B72 SPI TFT, driven by an
 // ESP32-C3 Super Mini.
 //
-// The GC9B72 is a GalaxyCore round-panel controller with no dedicated
-// driver in the Arduino_GFX library at the time this was written. It is
-// register-compatible with GalaxyCore's other 360x360 round part, GC9C01,
-// so this sketch drives the panel through the Arduino_GC9C01 class. If
-// your panel shows a mirrored, rotated, or offset image, see the
-// troubleshooting notes in README.md.
+// The panel is driven through LovyanGFX using the vendor's own
+// LGFX_GC9B72.hpp panel definition, which carries the GC9B72 register
+// init sequence. An earlier version of this sketch tried to reuse
+// Arduino_GFX's GC9C01 driver on the theory that GalaxyCore's two 360x360
+// round parts were register-compatible; they are not. That build left the
+// panel backlit but showing uninitialized display RAM.
 //
 // Time is obtained over Wi-Fi via NTP (the ESP32-C3 has no RTC of its
 // own). If Wi-Fi is not configured or the connection attempt fails, the
 // clock falls back to the firmware's compile timestamp and free-runs from
 // there so it still displays something useful.
 
-#include <Arduino_GFX_Library.h>
+#define LGFX_USE_V1
+#include <LovyanGFX.hpp>
+#include "LGFX_GC9B72.hpp" // vendor panel definition; declares class LGFX
 #include <WiFi.h>
 #include <time.h>
 #include <sys/time.h>
@@ -56,34 +58,15 @@ static const char *NTP_SERVER_2 = "pool.ntp.org";
 static const bool SMOOTH_SECONDS = true;
 
 // ---------------------------------------------------------------------
-// Display wiring - ESP32-C3 Super Mini
+// Display
 // ---------------------------------------------------------------------
-#define TFT_SCK 4
-#define TFT_MOSI 6
-#define TFT_MISO -1 // display is write-only, no MISO
-#define TFT_CS 7
-#define TFT_DC 2    // see the strapping-pin note below
-#define TFT_RST 3
-
-// Backlight enable (active HIGH). Set to -1 if the module's BLK pin is
-// tied straight to 3V3 (always on) or left unconnected; set it to a GPIO
-// number to control brightness/blanking from software.
-#define TFT_BL -1
-
-// Note on GPIO2: it is one of the ESP32-C3's strapping pins, sampled at
-// reset to select the boot mode, and must not be held LOW at that moment.
-// A TFT's DC line is a high-impedance input, so in practice it does not
-// disturb the strap and the board boots normally. If this board ever
-// fails to boot with the display attached, that is the first thing to
-// suspect - move DC to a non-strapping GPIO (e.g. 1, 5 or 10).
-
-// ---------------------------------------------------------------------
-// Display bus / driver
-// ---------------------------------------------------------------------
-Arduino_DataBus *bus = new Arduino_HWSPI(
-    TFT_DC, TFT_CS, TFT_SCK, TFT_MOSI, TFT_MISO);
-Arduino_GFX *gfx = new Arduino_GC9C01(bus, TFT_RST, /* rotation */ 0,
-                                       /* IPS */ true);
+// Pin assignments, SPI clock rate, panel offsets and the GC9B72 init
+// sequence all live in the vendor's LGFX_GC9B72.hpp next to this sketch.
+// LovyanGFX takes its wiring from the panel definition rather than from
+// the sketch, so there is deliberately nothing to configure here - to
+// rewire, edit that file. The wiring this was built against is recorded
+// in README.md for reference.
+static LGFX gfx;
 
 // ---------------------------------------------------------------------
 // Clock face geometry
@@ -162,7 +145,7 @@ static void drawThickLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
   float dy = y1 - y0;
   float len = sqrtf(dx * dx + dy * dy);
   if (len < 1.0f) {
-    gfx->drawPixel(x0, y0, color);
+    gfx.drawPixel(x0, y0, color);
     return;
   }
   float ox = -dy / len;
@@ -171,7 +154,7 @@ static void drawThickLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
   for (int8_t i = -half; i <= half; i++) {
     int16_t ex = (int16_t)lroundf(ox * i);
     int16_t ey = (int16_t)lroundf(oy * i);
-    gfx->drawLine(x0 + ex, y0 + ey, x1 + ex, y1 + ey, color);
+    gfx.drawLine(x0 + ex, y0 + ey, x1 + ex, y1 + ey, color);
   }
 }
 
@@ -209,7 +192,7 @@ static void drawHand(const Hand &h, uint16_t color, uint8_t thickness) {
   drawThickLine(h.tx, h.ty, h.x, h.y, color, thickness);
 }
 
-static void drawHub() { gfx->fillCircle(CX, CY, 6, COLOR_HUB); }
+static void drawHub() { gfx.fillCircle(CX, CY, 6, COLOR_HUB); }
 
 // ---------------------------------------------------------------------
 // Static face (drawn once)
@@ -221,10 +204,10 @@ static void drawNumeral(int i) {
   int16_t x, y;
   polarToXY(i * 30.0f, NUMERAL_R, x, y);
   int16_t textW = strlen(NUMERALS[i]) * 12; // 6px * textSize(2)
-  gfx->setTextColor(COLOR_NUMERAL, COLOR_BG);
-  gfx->setTextSize(2);
-  gfx->setCursor(x - textW / 2, y - 8);
-  gfx->print(NUMERALS[i]);
+  gfx.setTextColor(COLOR_NUMERAL, COLOR_BG);
+  gfx.setTextSize(2);
+  gfx.setCursor(x - textW / 2, y - 8);
+  gfx.print(NUMERALS[i]);
 }
 
 // The second and minute hands are long enough to reach into the ring of
@@ -244,9 +227,9 @@ static void repairNumeralsNear(float angleDeg) {
 }
 
 static void drawFace() {
-  gfx->fillScreen(COLOR_BG);
-  gfx->drawCircle(CX, CY, RIM_OUTER_R, COLOR_RIM);
-  gfx->drawCircle(CX, CY, RIM_INNER_R, COLOR_RIM);
+  gfx.fillScreen(COLOR_BG);
+  gfx.drawCircle(CX, CY, RIM_OUTER_R, COLOR_RIM);
+  gfx.drawCircle(CX, CY, RIM_INNER_R, COLOR_RIM);
 
   for (int i = 0; i < 60; i++) {
     float angle = i * 6.0f;
@@ -258,7 +241,7 @@ static void drawFace() {
     } else {
       polarToXY(angle, MIN_TICK_OUTER_R, ox, oy);
       polarToXY(angle, MIN_TICK_INNER_R, ix, iy);
-      gfx->drawLine(ix, iy, ox, oy, COLOR_TICK);
+      gfx.drawLine(ix, iy, ox, oy, COLOR_TICK);
     }
   }
 
@@ -371,6 +354,11 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   bool hourMoved = !sameHand(newHour, hourHand);
   bool minMoved = !sameHand(newMin, minHand);
 
+  // One SPI transaction for the whole frame. Without this LovyanGFX opens
+  // and closes a transaction around every individual drawLine, and a
+  // frame is made of dozens of them.
+  gfx.startWrite();
+
   eraseHand(secHand, SEC_HAND_W);
   repairNumeralsNear(secHand.angle);
 
@@ -402,6 +390,8 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
   drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+
+  gfx.endWrite();
 }
 
 // ---------------------------------------------------------------------
@@ -411,16 +401,16 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
 void setup() {
   Serial.begin(115200);
 
-#if TFT_BL >= 0
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);
-#endif
-
-  gfx->begin();
-  gfx->fillScreen(COLOR_BG);
+  // Backlight is handled by the panel definition (LovyanGFX drives BL
+  // itself when the vendor file configures a Light_PWM block; on modules
+  // where BL is tied high it is simply always on).
+  gfx.init();
+  gfx.setRotation(0);
+  gfx.fillScreen(COLOR_BG);
 
   connectAndSyncTime();
 
+  gfx.startWrite();
   drawFace();
 
   struct tm t;
@@ -431,6 +421,7 @@ void setup() {
   drawHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
   drawHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  gfx.endWrite();
 }
 
 void loop() {
