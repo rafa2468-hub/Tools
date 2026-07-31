@@ -42,12 +42,19 @@ test_clock: test_clock.cpp $(SKETCH) stubs/*.h testtime.h
 # further down. PlatformIO and this harness both compile the .ino as
 # ordinary C++ and so sail straight past the problem - this target is what
 # catches it.
+# NOTE the absence of -DHOSTTEST here. This compiles the *firmware* path -
+# the real panel adapter, against stubbed SPI and driver headers - because
+# that is the configuration the Arduino IDE actually builds. An earlier
+# version of this target passed -DHOSTTEST, which compiled the adapter out
+# entirely and so missed a struct declared below the adapter's function
+# definitions: green here, a wall of "'Hand' has not been declared" in the
+# IDE. Test the shape you ship.
 ino-check:
 	@command -v python3 >/dev/null || { echo "skipping ino-check (no python3)"; exit 0; }
 	@python3 ino_preprocess.py $(SKETCH) .ino_generated.cpp
 	@$(CXX) $(CXXFLAGS) -fsyntax-only $(INCLUDES) \
-	    -DHOSTTEST=1 -include stubs/panel_host.h -include stubs/WiFi.h \
-	    .ino_generated.cpp && echo "PASS  sketch survives Arduino IDE prototype injection"
+	    -include stubs/arduino_core.h -include stubs/WiFi.h \
+	    .ino_generated.cpp && echo "PASS  firmware build survives Arduino IDE prototype injection"
 
 clean:
 	rm -f test_clock .ino_generated.cpp

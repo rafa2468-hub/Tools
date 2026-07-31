@@ -55,6 +55,29 @@ static const char *NTP_SERVER_2 = "pool.ntp.org";
 // false - it steps once per second, the way a quartz movement does.
 static const bool SMOOTH_SECONDS = true;
 
+// ---------------------------------------------------------------------
+// Hand state, tracked so each redraw only touches what changed
+// ---------------------------------------------------------------------
+//
+// Declared here, above everything else, because of how the Arduino IDE
+// builds a .ino: it generates prototypes for every function in the sketch
+// and injects them immediately before the *first* function definition in
+// the file. Any type named in a signature has to already exist at that
+// point, so this struct must sit above the first function - which today
+// means above the panel adapter, not merely above the drawing code that
+// uses it. Get this wrong and the IDE emits a wall of "'Hand' has not
+// been declared" pointing at lines that look perfectly fine.
+//
+// PlatformIO and the host tests compile the .ino as ordinary C++ and
+// never reorder anything, so they stay green either way. hosttest's
+// ino-check target is what actually guards this.
+struct Hand {
+  int16_t x, y;   // tip
+  int16_t tx, ty; // tail (the center, except for the second hand)
+  float angle;    // bearing of the tip, degrees clockwise from 12
+};
+static Hand hourHand, minHand, secHand;
+
 // Panel size. Everything on the face is positioned from these, so a
 // different round panel only needs these two numbers changed.
 static const int16_t PANEL_W = 360;
@@ -220,24 +243,6 @@ static const uint16_t COLOR_MIN_HAND = RGB565(0, 200, 255);
 static const uint16_t COLOR_SEC_HAND = RGB565(255, 60, 60);
 static const uint16_t COLOR_HUB = RGB565(255, 60, 60);
 
-// ---------------------------------------------------------------------
-// Hand state, tracked so each redraw only touches what changed
-// ---------------------------------------------------------------------
-//
-// This has to be declared ahead of every function, not just ahead of the
-// ones that use it. The Arduino IDE generates prototypes for the sketch
-// and injects them immediately before the *first* function definition in
-// the file, so any type named in a signature must already exist at that
-// point. With the struct further down, the IDE emits a wall of
-// "'Hand' has not been declared". (PlatformIO compiles the .ino as plain
-// C++ and never does this, so the build stays green there either way -
-// which is exactly why it is worth a comment.)
-struct Hand {
-  int16_t x, y;   // tip
-  int16_t tx, ty; // tail (the center, except for the second hand)
-  float angle;    // bearing of the tip, degrees clockwise from 12
-};
-static Hand hourHand, minHand, secHand;
 
 // ---------------------------------------------------------------------
 // Drawing primitives
