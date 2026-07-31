@@ -211,6 +211,15 @@ If you change the face geometry — hand lengths, numeral radius, text size
 — run this afterwards. Lengthening a hand until it reaches a face element
 it did not previously touch is the easiest way to reintroduce the problem.
 
+`make` also runs an **ino-check**: the Arduino IDE rewrites a `.ino`
+before compiling, generating prototypes for every function and injecting
+them ahead of the first function definition. If a type used in a
+signature is declared below that point, the IDE build fails with a wall of
+`'X' has not been declared` — while PlatformIO, which compiles the file as
+ordinary C++, stays perfectly green. `ino_preprocess.py` reproduces that
+rewrite so the mismatch is caught here rather than in the IDE. This is why
+`struct Hand` sits above every function in the sketch.
+
 ## Limitations
 
 - No RTC battery backup: on power loss the ESP32-C3 has no way to keep

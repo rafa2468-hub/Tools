@@ -16,12 +16,28 @@ PRELUDE  := -include stubs/Arduino_GFX_Library.h \
 TIMEHOOK := -Dgettimeofday=test_gettimeofday \
             -Dsettimeofday=test_settimeofday
 
-.PHONY: all clean
-all: test_clock
+SKETCH := ../analog_clock/analog_clock.ino
+
+.PHONY: all clean ino-check
+all: ino-check test_clock
 	./test_clock
 
-test_clock: test_clock.cpp ../analog_clock/analog_clock.ino stubs/*.h testtime.h
+test_clock: test_clock.cpp $(SKETCH) stubs/*.h testtime.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PRELUDE) $(TIMEHOOK) $< -o $@
 
+# The Arduino IDE rewrites a .ino before compiling it: it generates
+# prototypes for every function and injects them ahead of the first
+# function definition. That reorders the file in a way plain C++ never
+# does, and it breaks the build if a type used in a signature is declared
+# further down. PlatformIO and this harness both compile the .ino as
+# ordinary C++ and so sail straight past the problem - this target is what
+# catches it.
+ino-check:
+	@command -v python3 >/dev/null || { echo "skipping ino-check (no python3)"; exit 0; }
+	@python3 ino_preprocess.py $(SKETCH) .ino_generated.cpp
+	@$(CXX) $(CXXFLAGS) -fsyntax-only $(INCLUDES) \
+	    -include stubs/Arduino_GFX_Library.h -include stubs/WiFi.h \
+	    .ino_generated.cpp && echo "PASS  sketch survives Arduino IDE prototype injection"
+
 clean:
-	rm -f test_clock
+	rm -f test_clock .ino_generated.cpp

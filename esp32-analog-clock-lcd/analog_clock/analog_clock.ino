@@ -120,6 +120,25 @@ static const uint16_t COLOR_SEC_HAND = RGB565(255, 60, 60);
 static const uint16_t COLOR_HUB = RGB565(255, 60, 60);
 
 // ---------------------------------------------------------------------
+// Hand state, tracked so each redraw only touches what changed
+// ---------------------------------------------------------------------
+//
+// This has to be declared ahead of every function, not just ahead of the
+// ones that use it. The Arduino IDE generates prototypes for the sketch
+// and injects them immediately before the *first* function definition in
+// the file, so any type named in a signature must already exist at that
+// point. With the struct further down, the IDE emits a wall of
+// "'Hand' has not been declared". (PlatformIO compiles the .ino as plain
+// C++ and never does this, so the build stays green there either way -
+// which is exactly why it is worth a comment.)
+struct Hand {
+  int16_t x, y;   // tip
+  int16_t tx, ty; // tail (the center, except for the second hand)
+  float angle;    // bearing of the tip, degrees clockwise from 12
+};
+static Hand hourHand, minHand, secHand;
+
+// ---------------------------------------------------------------------
 // Geometry helpers
 // ---------------------------------------------------------------------
 
@@ -155,16 +174,6 @@ static void drawThickLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
     gfx->drawLine(x0 + ex, y0 + ey, x1 + ex, y1 + ey, color);
   }
 }
-
-// ---------------------------------------------------------------------
-// Hand state, tracked so each redraw only touches what changed
-// ---------------------------------------------------------------------
-struct Hand {
-  int16_t x, y;   // tip
-  int16_t tx, ty; // tail (the center, except for the second hand)
-  float angle;    // bearing of the tip, degrees clockwise from 12
-};
-static Hand hourHand, minHand, secHand;
 
 // secOfMinute carries the fraction of a second, so the second hand can be
 // placed between whole-second positions.
