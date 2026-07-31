@@ -17,7 +17,7 @@ double g_testNow = 0;
 SerialStub Serial;
 WiFiStub WiFi;
 
-#include "main.cpp"
+#include "analog_clock.ino"
 
 static int failures = 0;
 static void check(bool ok, const char *what) {

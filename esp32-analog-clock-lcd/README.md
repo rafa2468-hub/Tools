@@ -6,6 +6,14 @@ server on the LAN (`192.168.1.5`); if Wi-Fi isn't configured, or the
 connection or sync fails, the sketch falls back to the firmware's build
 timestamp so the clock still runs.
 
+## Layout
+
+```
+analog_clock/analog_clock.ino   the sketch (Arduino IDE opens this)
+platformio.ini                  PlatformIO build config, points at the above
+hosttest/                       host-side tests, no hardware needed
+```
+
 ## Hardware
 
 - ESP32-C3 Super Mini
@@ -25,7 +33,7 @@ timestamp so the clock still runs.
 | VCC         | 3V3 | **3.3V only** |
 | GND         | GND | |
 
-To rewire, edit the `#define`s at the top of `src/main.cpp`.
+To rewire, edit the `#define`s at the top of `analog_clock/analog_clock.ino`.
 
 If your module has a BLK/LED backlight pin and you want software control
 over it, connect it to a free GPIO and set `TFT_BL` to that number; the
@@ -64,22 +72,54 @@ If your panel shows something wrong out of the box:
 
 ## Building and flashing
 
-This is a [PlatformIO](https://platformio.org/) project.
+The sketch is a single file, `analog_clock/analog_clock.ino`. It builds
+either from the Arduino IDE or from PlatformIO — there is only one copy of
+the source, so the two can't drift apart.
+
+### Arduino IDE
+
+1. **Board support**: in *File → Preferences → Additional boards manager
+   URLs* add
+   `https://espressif.github.io/arduino-esp32/package_esp32_index.json`,
+   then install **esp32** by Espressif Systems from *Tools → Board →
+   Boards Manager*.
+2. **Library**: in *Tools → Manage Libraries*, install **GFX Library for
+   Arduino** by moononournation.
+3. **Open** `analog_clock/analog_clock.ino` (keep it in its
+   `analog_clock` folder — the IDE requires the folder and the sketch to
+   share a name).
+4. **Board settings** under *Tools*:
+   - Board: **ESP32C3 Dev Module**
+   - **USB CDC On Boot: Enabled** ← see the note below
+   - Flash Size: 4MB, Partition Scheme: default
+5. Select the port and hit Upload. Serial Monitor at 115200 baud.
+
+If the board isn't detected, hold **BOOT**, tap **RESET**, release
+**BOOT** to force the bootloader, upload, then tap **RESET** again.
+
+### PlatformIO
 
 ```sh
 pio run                # build
 pio run -t upload      # build and flash
-pio device monitor      # serial monitor (115200 baud)
+pio device monitor     # serial monitor (115200 baud)
 ```
 
+`platformio.ini` points `src_dir` at `analog_clock/` and pulls the
+Arduino_GFX dependency in automatically.
+
+### The USB CDC setting
+
 The ESP32-C3 Super Mini exposes only the native USB-Serial/JTAG
-peripheral (no separate USB-UART bridge chip), which is why
-`platformio.ini` sets `ARDUINO_USB_CDC_ON_BOOT=1` — without it, `Serial`
-output over USB won't appear.
+peripheral — there is no separate USB-UART bridge chip. `Serial` therefore
+has to be routed over native USB, which is what **USB CDC On Boot:
+Enabled** does in the Arduino IDE, and what `ARDUINO_USB_CDC_ON_BOOT=1` in
+`platformio.ini` does for PlatformIO. Without it the sketch still runs,
+but the serial output (Wi-Fi and NTP progress) never appears.
 
 ## Configuration
 
-Edit the constants at the top of `src/main.cpp` before flashing:
+Edit the constants at the top of `analog_clock/analog_clock.ino` before flashing:
 
 - `WIFI_SSID` / `WIFI_PASSWORD` — leave `WIFI_SSID` as
   `"YOUR_WIFI_SSID"` to skip Wi-Fi/NTP entirely and run from the
@@ -154,7 +194,7 @@ development machine with no board attached:
 cd hosttest && make
 ```
 
-This compiles `src/main.cpp` against stubbed Arduino/Arduino_GFX headers
+This compiles `analog_clock/analog_clock.ino` against stubbed Arduino/Arduino_GFX headers
 that paint into a real 360x360 framebuffer, and drives it from a
 test-controlled clock so a full 60-second sweep runs instantly.
 

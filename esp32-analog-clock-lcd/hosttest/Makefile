@@ -9,7 +9,7 @@
 
 CXX      ?= g++
 CXXFLAGS := -std=c++17 -O1 -Wall -Wno-unused-variable
-INCLUDES := -I stubs -I ../src
+INCLUDES := -I stubs -I ../analog_clock
 PRELUDE  := -include stubs/Arduino_GFX_Library.h \
             -include stubs/WiFi.h \
             -include testtime.h
@@ -20,7 +20,7 @@ TIMEHOOK := -Dgettimeofday=test_gettimeofday \
 all: test_clock
 	./test_clock
 
-test_clock: test_clock.cpp ../src/main.cpp stubs/*.h testtime.h
+test_clock: test_clock.cpp ../analog_clock/analog_clock.ino stubs/*.h testtime.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PRELUDE) $(TIMEHOOK) $< -o $@
 
 clean:
