@@ -24,6 +24,17 @@ extern uint8_t g_bgTouched[];
 extern long g_panelOps;
 extern int g_inFillRect;
 
+// Simulates a panel that occasionally loses a write: per-mille chance that
+// an operation is silently discarded. A dropped rect loses the whole run,
+// which is what a corrupted address-window command would do.
+extern uint32_t g_dropPerMille;
+extern uint32_t g_dropRng;
+inline bool droppedWrite() {
+  if (!g_dropPerMille) return false;
+  g_dropRng = g_dropRng * 1664525u + 1013904223u;
+  return ((g_dropRng >> 16) % 1000u) < g_dropPerMille;
+}
+
 inline void panelInit() {}
 
 inline void panelDrawPixel(int16_t x, int16_t y, uint16_t color) {
@@ -32,12 +43,14 @@ inline void panelDrawPixel(int16_t x, int16_t y, uint16_t color) {
   if (color == g_bgColor && x >= 0 && y >= 0 && x < FB_W && y < FB_H)
     g_bgTouched[y * FB_W + x] = 1;
   if (x < 0 || y < 0 || x >= FB_W || y >= FB_H) return;
+  if (!g_inFillRect && droppedWrite()) return;
   g_fb[y * FB_W + x] = color;
 }
 
 inline void panelFillRect(int16_t x, int16_t y, int16_t w, int16_t h,
                           uint16_t color) {
   g_panelOps++;
+  if (droppedWrite()) return;
   g_inFillRect++;
   for (int16_t j = 0; j < h; j++)
     for (int16_t i = 0; i < w; i++) panelDrawPixel(x + i, y + j, color);

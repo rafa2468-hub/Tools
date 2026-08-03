@@ -21,6 +21,8 @@ uint16_t g_bgColor = 0xFFFF;
 uint8_t g_bgTouched[FB_W * FB_H];
 long g_panelOps = 0;
 int g_inFillRect = 0;
+uint32_t g_dropPerMille = 0;
+uint32_t g_dropRng = 1;
 double g_testNow = 0;
 SerialStub Serial;
 WiFiStub WiFi;
@@ -256,6 +258,47 @@ int main() {
     // digitalWrites and 11 SPI byte transfers each, call it 20us. Much
     // past 10k/s and the sweep cannot keep up.
     check(opsSec < 10000, "sweep stays within a sane address-window budget");
+  }
+
+  // ---- 7. dropped writes must not become permanent marks
+  //
+  // The panel does occasionally lose a write. The hand's own pixels are
+  // repainted every frame and so heal, but a pixel the hand has moved off
+  // is erased once - so a single dropped erase used to leave a red speck
+  // that nothing ever cleared, and they accumulated into comet-trails
+  // along the hand's path. Discards are now re-erased for a few frames.
+  {
+    g_dropPerMille = 0;
+    double base = timeAt(9, 3, 0.0);
+    g_testNow = base;
+    struct tm t; float s;
+    readClock(t, s);
+    computeHands(t, s, hourHand, minHand, secHand);
+    drawFace();
+    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+    drawHub();
+    paintSecondHandFresh();
+
+    g_dropPerMille = 20;              // 2% of writes lost
+    g_dropRng = 20260803u;
+    for (double now = base; now < base + 300.0; now += 0.02) {
+      g_testNow = now;
+      loop();
+    }
+    std::vector<uint16_t> inc(g_fb, g_fb + FB_W * FB_H);
+
+    g_dropPerMille = 0;               // clean reference of the same instant
+    std::vector<uint16_t> ref;
+    renderReference(g_testNow, ref);
+
+    int stray = 0;
+    for (size_t i = 0; i < ref.size(); i++) {
+      if (inc[i] == COLOR_SEC_HAND && ref[i] == COLOR_BG) stray++;
+    }
+    printf("      5 min at 2%% dropped writes -> %d stray pixels left\n",
+           stray);
+    check(stray <= 20, "dropped erases do not accumulate into trails");
   }
 
   printf("\n%s\n", failures ? "FAILURES" : "all checks passed");

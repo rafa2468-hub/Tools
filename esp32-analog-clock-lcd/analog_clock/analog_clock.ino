@@ -111,20 +111,14 @@ void panelEndBatch();
 // SPI clock for pixel pushing.
 //
 // GC9B72Graphics.hpp never calls beginTransaction, so the vendor demo ran
-// at the Arduino default of 1MHz - and it was reliable. This sketch first
-// ran the bus at 40MHz, which turned out to be too aggressive on dupont
-// jumpers: the panel picked up scattered stray pixels that the erase pass
-// had told it to clear. A corrupted address-window command sends that
-// write somewhere else and leaves the original pixel lit, which is
-// exactly what a stray looks like. The errors came in bursts, consistent
-// with Wi-Fi transmit activity disturbing the supply.
-//
-// There is no reason to run fast here. The cost of a frame is dominated
-// by per-window GPIO overhead, not by clocking: at 10MHz an address
-// window's 11 bytes take under 9us, and the sweep needs ~4500 of them a
-// second, so under 5% of the time budget. If stray pixels still appear,
-// keep halving this - 4MHz and 2MHz are still far quicker than the sweep
-// needs, and short wiring is what buys the headroom, not a bigger number.
+// at the Arduino default of 1MHz. 40MHz was tried here and was not the
+// cause of the stray pixels this sketch once left behind - that was a
+// missing erase retry, fixed in renderHands - but there is no reason to
+// run fast either. A frame's cost is dominated by per-window GPIO
+// overhead, not clocking: at 10MHz an address window's 11 bytes take
+// under 9us and the sweep needs ~7500 of them a second, so under 10% of
+// the time budget. A slower bus simply drops fewer writes, and every
+// dropped write is one the retry logic has to clean up.
 static const uint32_t PANEL_SPI_HZ = 10000000;
 static SPISettings panelSpi(PANEL_SPI_HZ, MSBFIRST, SPI_MODE0);
 
@@ -486,17 +480,27 @@ static void eraseHand(const Hand &h, uint8_t thickness) {
 // ---------------------------------------------------------------------
 // Second hand: incremental update
 // ---------------------------------------------------------------------
-// The sweeping hand is the one thing redrawn every frame, and erasing it
-// wholesale is what makes it flicker. Consecutive positions are about
-// 0.4 degrees apart, so the two lines pick the *same* pixel everywhere
-// inside r~70 and differ only towards the tip - yet erasing the whole
-// hand and repainting it leaves it dark for the entire frame. On a panel
-// with no back buffer that is visible as a stagger, and when a frame runs
-// long (background Wi-Fi work will do it) the hand can vanish outright.
+// Two properties have to hold at once here, and they pull against each
+// other.
 //
-// So the old position is not erased. Its pixels are compared against the
-// new one's and only the few that are not reused get painted back to
-// background, which leaves the hand continuously lit.
+// The hand must never be dark for long. Erasing the whole hand, doing the
+// repairs, and only then repainting it left all ~165 of its pixels dark
+// for a whole frame - visible as a stagger, and on video the hand vanished
+// outright in ~3% of camera frames.
+//
+// But every pixel must also be rewritten every frame. The panel
+// occasionally drops a write, and when each pixel is painted once and
+// never revisited, a dropped erase becomes a permanent red speck. Whole
+// comet-trails of them accumulated along the hand's path when this code
+// erased only the pixels the new position did not reuse. The wholesale
+// erase had been hiding that all along by rewriting everything ~15 times
+// a second.
+//
+// So: erase the old position and draw the new one *interleaved*, pixel by
+// pixel. Every pixel is rewritten every frame, so a dropped write is
+// corrected within ~66ms - and a pixel common to both positions is dark
+// only for the single write between its erase and its redraw, which is
+// microseconds rather than milliseconds.
 
 // Longest possible Bresenham run from tail to tip, plus slack.
 static const int16_t SEC_PX_MAX = SEC_HAND_LEN + SEC_HAND_TAIL + 8;
@@ -504,10 +508,19 @@ static int16_t secOldX[SEC_PX_MAX], secOldY[SEC_PX_MAX];
 static int16_t secNewX[SEC_PX_MAX], secNewY[SEC_PX_MAX];
 static int16_t secOldN = 0, secNewN = 0;
 
+// How many extra frames each discarded pixel is re-erased for. See the
+// retry loop in renderHands.
+static const int8_t ERASE_RETRIES = 2;
+static int16_t eraseGenX[ERASE_RETRIES][SEC_PX_MAX];
+static int16_t eraseGenY[ERASE_RETRIES][SEC_PX_MAX];
+static int16_t eraseGenN[ERASE_RETRIES] = {0};
+static int16_t thisEraseX[SEC_PX_MAX], thisEraseY[SEC_PX_MAX];
+
 // Same Bresenham as gfxDrawLine, but collecting instead of drawing, so
 // that what gets erased and what gets drawn can never disagree.
 static void collectLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
                          int16_t *xs, int16_t *ys, int16_t &n) {
+  const int16_t tailX = x0, tailY = y0;
   n = 0;
   bool steep = abs(y1 - y0) > abs(x1 - x0);
   if (steep) {
@@ -528,6 +541,24 @@ static void collectLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
     n++;
     err -= dy;
     if (err < 0) { y0 += ystep; err += dx; }
+  }
+
+  // Normalise the direction so the list always runs tail-to-tip. The
+  // swaps above order it by whichever axis is major, which flips near 45
+  // degrees - and renderHands pairs old[i] with new[i], so a flip would
+  // pair the tail of one with the tip of the other.
+  if (n > 1) {
+    int32_t d0 = (int32_t)(xs[0] - tailX) * (xs[0] - tailX) +
+                 (int32_t)(ys[0] - tailY) * (ys[0] - tailY);
+    int32_t dN = (int32_t)(xs[n - 1] - tailX) * (xs[n - 1] - tailX) +
+                 (int32_t)(ys[n - 1] - tailY) * (ys[n - 1] - tailY);
+    if (d0 > dN) {
+      for (int16_t a = 0, b = n - 1; a < b; a++, b--) {
+        int16_t t;
+        t = xs[a]; xs[a] = xs[b]; xs[b] = t;
+        t = ys[a]; ys[a] = ys[b]; ys[b] = t;
+      }
+    }
   }
 }
 
@@ -752,17 +783,27 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   collectLine(newSec.tx, newSec.ty, newSec.x, newSec.y, secNewX, secNewY,
               secNewN);
 
-  // Erase only the old second-hand pixels the new position does not
-  // reuse, and note what that erasing damaged. Rather than guess at which
-  // angles overlap - an angle threshold was tried here and was wrong near
-  // the centre, where a 3px hand subtends ~19 degrees at r=6 - each
-  // erased pixel is tested against the things it could have hit. That is
-  // exact, and it is cheap because there are only a handful of them.
+  // Erase the old position and draw the new one in one interleaved pass.
+  // Every pixel of the hand is rewritten every frame, so a write the panel
+  // drops is corrected on the next frame instead of becoming a permanent
+  // speck - and because each pixel's redraw follows its erase immediately,
+  // nothing is dark for more than a single write.
+  //
+  // Damage is assessed only for pixels the new position does *not* reuse,
+  // since those are the ones left showing background. Rather than guess at
+  // which angles overlap - an angle threshold was tried here and was wrong
+  // near the centre, where a 3px hand subtends ~19 degrees at r=6 - each
+  // such pixel is tested against what it could have hit. That is exact,
+  // and cheap, because there are only a handful of them.
   bool repairHour = false, repairMin = false, repairNums = false;
+  int16_t thisEraseN = 0;
   for (int16_t i = 0; i < secOldN; i++) {
     int16_t px = secOldX[i], py = secOldY[i];
     if (inPixelList(px, py, secNewX, secNewY, secNewN)) continue;
     panelDrawPixel(px, py, COLOR_BG);
+    thisEraseX[thisEraseN] = px;
+    thisEraseY[thisEraseN] = py;
+    thisEraseN++;
     if (pixelTouchesHand(px, py, hourHand, HOUR_HAND_W / 2.0f + 1.0f))
       repairHour = true;
     if (pixelTouchesHand(px, py, minHand, MIN_HAND_W / 2.0f + 1.0f))
@@ -770,6 +811,31 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
     int16_t dx = px - CX, dy = py - CY;
     if (dx * dx + dy * dy >= (NUMERAL_R - 16) * (NUMERAL_R - 16))
       repairNums = true;
+  }
+
+  // Erase the last few frames' discards again. They are already
+  // background, so this is invisible - it exists because the panel
+  // occasionally drops a write, and a dropped *erase* is the one that
+  // leaves a mark. The hand's own pixels are repainted every frame and so
+  // heal themselves; discarded pixels are written once and never revisited,
+  // which is how single dropped writes accumulated into comet-trails along
+  // the hand's path. Retrying each discard on the next few frames makes a
+  // stray need several consecutive drops in the same place.
+  for (int8_t g = 0; g < ERASE_RETRIES; g++) {
+    for (int16_t i = 0; i < eraseGenN[g]; i++) {
+      int16_t px = eraseGenX[g][i], py = eraseGenY[g][i];
+      // Guard against the clock stepping backwards (an NTP correction can
+      // do it) and the hand revisiting a pixel we are about to blank.
+      if (inPixelList(px, py, secNewX, secNewY, secNewN)) continue;
+      panelDrawPixel(px, py, COLOR_BG);
+      if (pixelTouchesHand(px, py, hourHand, HOUR_HAND_W / 2.0f + 1.0f))
+        repairHour = true;
+      if (pixelTouchesHand(px, py, minHand, MIN_HAND_W / 2.0f + 1.0f))
+        repairMin = true;
+      int16_t dx = px - CX, dy = py - CY;
+      if (dx * dx + dy * dy >= (NUMERAL_R - 16) * (NUMERAL_R - 16))
+        repairNums = true;
+    }
   }
 
   if (hourMoved) {
@@ -805,10 +871,20 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   drawHub(); // cheap, and in ticking mode the step is big enough to
              // reach the hub, so this is not always redundant
 
-  // The whole hand is repainted, not just the newly-uncovered pixels: a
-  // numeral or hand repair above may have painted over pixels the two
-  // positions share, and repainting is idempotent anyway.
+  // The whole hand, every frame - not just the newly-uncovered pixels. A
+  // repair above may have painted over pixels the two positions share, and
+  // repainting every pixel is also what lets a dropped write heal instead
+  // of becoming permanent.
   drawPixelList(secNewX, secNewY, secNewN, COLOR_SEC_HAND);
+
+  for (int8_t g = ERASE_RETRIES - 1; g > 0; g--) {
+    memcpy(eraseGenX[g], eraseGenX[g - 1], eraseGenN[g - 1] * sizeof(int16_t));
+    memcpy(eraseGenY[g], eraseGenY[g - 1], eraseGenN[g - 1] * sizeof(int16_t));
+    eraseGenN[g] = eraseGenN[g - 1];
+  }
+  memcpy(eraseGenX[0], thisEraseX, thisEraseN * sizeof(int16_t));
+  memcpy(eraseGenY[0], thisEraseY, thisEraseN * sizeof(int16_t));
+  eraseGenN[0] = thisEraseN;
 
   memcpy(secOldX, secNewX, secNewN * sizeof(int16_t));
   memcpy(secOldY, secNewY, secNewN * sizeof(int16_t));

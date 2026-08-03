@@ -105,26 +105,31 @@ your own driver.
 
 ### Stray pixels / comet trails
 
-Scattered pixels left behind along the second hand's path are a **bus
-integrity** symptom, not a drawing bug. The erase pass tells the panel to
-clear those pixels; if the address-window command that precedes the write
-is corrupted, the write lands elsewhere and the original pixel stays lit.
+Scattered red specks accumulating along the second hand's path mean
+**dropped writes**, and they are only visible if the drawing code lets
+them become permanent.
 
-`GC9B72Graphics.hpp` never calls `beginTransaction`, so the vendor demo
-ran at the Arduino default of **1MHz**. This sketch sets `PANEL_SPI_HZ`
-explicitly; it was originally 40MHz, which proved too aggressive on
-dupont jumper wires — strays appeared in bursts, consistent with Wi-Fi
-transmit activity disturbing the supply. It is now 10MHz.
+The panel occasionally loses a write. The hand's own pixels are repainted
+every frame, so a lost draw heals within ~66ms and is never seen. But a
+pixel the hand has *moved off* is erased once — so one lost erase leaves a
+red speck that nothing ever clears, and they pile up into comet-trails.
 
-If strays still appear, **keep halving `PANEL_SPI_HZ`** (4MHz, 2MHz). The
-sweep is nowhere near bus-limited — a frame's cost is dominated by
-per-window GPIO overhead, and at 10MHz the bus is under 5% loaded — so
-there is nothing to lose. Shorter wiring and a solid 3V3/GND pair are what
-actually buy headroom here, not a bigger number.
+The original code erased the whole hand every frame, which retried every
+pixel constantly and hid the problem entirely. Switching to erasing only
+what changed (to stop the hand flickering) removed that safety net and the
+trails appeared. Discarded pixels are now re-erased for `ERASE_RETRIES`
+further frames, so a stray needs several consecutive drops in the same
+place. `make` asserts this: five simulated minutes at a 2% drop rate
+leaves ~1 stray pixel, against ~1200 with retries disabled.
 
-Note that existing strays do not always self-clear: the hand sweeps the
-same ray a minute later and cleans up pixels that lie exactly on its path,
-but one rounded a pixel off it will persist. A reset repaints the face.
+If trails still appear, the drop rate is high enough to beat the retries,
+and that is a wiring problem. Lower `PANEL_SPI_HZ` (it is 10MHz; 4MHz and
+2MHz are still far quicker than the sweep needs — the vendor demo ran at
+1MHz), shorten the jumpers, and make sure 3V3 and GND are a solid pair.
+Raising `ERASE_RETRIES` also helps, at roughly 1500 address windows per
+second per extra generation.
+
+Existing strays clear on reset.
 
 ### If the image appears but looks wrong
 

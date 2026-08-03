@@ -16,6 +16,8 @@ uint16_t g_bgColor = 0xFFFF;
 uint8_t g_bgTouched[FB_W * FB_H];
 long g_panelOps = 0;
 int g_inFillRect = 0;
+uint32_t g_dropPerMille = 0;
+uint32_t g_dropRng = 1;
 double g_testNow = 0;
 SerialStub Serial;
 WiFiStub WiFi;
