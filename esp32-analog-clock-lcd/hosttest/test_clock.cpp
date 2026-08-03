@@ -257,8 +257,15 @@ int main() {
     }
     long perSec = g_pixelWrites / 60;
     long opsSec = g_panelOps / 60;
-    printf("      ~%ld pixel writes/second, ~%ld address windows/second\n",
-           perSec, opsSec);
+    // In PANEL_SAFE_WRITES mode every pixel is its own address window on
+    // the real panel - roughly 35us of CS toggling and byte transfers -
+    // so the pixel count, not the rect count, is what fills the frame
+    // budget. The stub counts a rect as one op, which is the streaming
+    // -mode cost; both are reported so widening a hand shows its true
+    // price.
+    printf("      ~%ld pixel writes/second (~%ld%% CPU in safe mode), "
+           "~%ld rect ops/second\n",
+           perSec, (perSec * 35) / 10000, opsSec);
     check(perSec < 60000, "sweep stays within a sane pixel budget");
     // Address windows are the real cost on this driver: roughly 6
     // digitalWrites and 11 SPI byte transfers each, call it 20us. Much

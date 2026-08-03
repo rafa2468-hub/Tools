@@ -94,7 +94,10 @@ static Hand hourHand, minHand, secHand;
 // changed" is the difference between a smooth dial and a flickering one:
 // a hand erased wholesale is dark from its erase until its repaint, and
 // the camera - and the eye - catch that window.
-static const int16_t HAND_RUNS_MAX = 160;
+// Enough rows for the longest hand's vertical extent. The second hand is
+// the tall one: tail to tip is SEC_HAND_LEN + SEC_HAND_TAIL, plus its
+// width and rounding slack.
+static const int16_t HAND_RUNS_MAX = 192;
 struct HandRuns {
   int16_t n;
   int16_t ry[HAND_RUNS_MAX], rx0[HAND_RUNS_MAX], rx1[HAND_RUNS_MAX];
@@ -305,11 +308,21 @@ static const int16_t SEC_HAND_TAIL = 20; // short tail past the center
 static const uint8_t HOUR_HAND_W = 5;
 static const uint8_t MIN_HAND_W = 3;
 static const int16_t HUB_R = 6;
-// The second hand has no width constant: it is a single-pixel Bresenham
-// line by construction (collectLine / drawPixelList), tracked as a pixel
-// list so its sweep can be updated incrementally. Widening it would mean
-// giving it the scanline-run treatment the thick hands get, not changing
-// a number here.
+
+// Second hand width, in pixels. A macro rather than a constant because it
+// also sizes the pixel-list arrays below, and so the test suite can build
+// the sketch at several widths.
+//
+// 1 is a hairline - the classic sweep-second look, and the only width
+// that uses Bresenham. 2 or 3 read more solidly from a distance. Above
+// about 5 the tail starts to look like a paddle at this dial size.
+//
+// Cost scales with area: the sweep touches roughly SEC_HAND_W times as
+// many pixels per frame, and RAM for the pixel lists grows with it too
+// (about 10KB at width 1, 30KB at width 3, against ~320KB available).
+#ifndef SEC_HAND_W
+#define SEC_HAND_W 1
+#endif
 
 #define RGB565(r, g, b) \
   ((uint16_t)((((r)&0xF8) << 8) | (((g)&0xFC) << 3) | (((b)&0xF8) >> 3)))
@@ -569,98 +582,6 @@ static bool sameHand(const Hand &a, const Hand &b) {
 // only for the single write between its erase and its redraw, which is
 // microseconds rather than milliseconds.
 
-// Longest possible Bresenham run from tail to tip, plus slack.
-static const int16_t SEC_PX_MAX = SEC_HAND_LEN + SEC_HAND_TAIL + 8;
-static int16_t secOldX[SEC_PX_MAX], secOldY[SEC_PX_MAX];
-static int16_t secNewX[SEC_PX_MAX], secNewY[SEC_PX_MAX];
-static int16_t secOldN = 0, secNewN = 0;
-
-// How many extra frames each discarded pixel is re-erased for. See the
-// retry loop in renderHands.
-static const int8_t ERASE_RETRIES = 2;
-static int16_t eraseGenX[ERASE_RETRIES][SEC_PX_MAX];
-static int16_t eraseGenY[ERASE_RETRIES][SEC_PX_MAX];
-static int16_t eraseGenN[ERASE_RETRIES] = {0};
-static int16_t thisEraseX[SEC_PX_MAX], thisEraseY[SEC_PX_MAX];
-
-
-// Same Bresenham as gfxDrawLine, but collecting instead of drawing, so
-// that what gets erased and what gets drawn can never disagree.
-static void collectLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
-                         int16_t *xs, int16_t *ys, int16_t &n) {
-  const int16_t tailX = x0, tailY = y0;
-  n = 0;
-  bool steep = abs(y1 - y0) > abs(x1 - x0);
-  if (steep) {
-    int16_t t;
-    t = x0; x0 = y0; y0 = t;
-    t = x1; x1 = y1; y1 = t;
-  }
-  if (x0 > x1) {
-    int16_t t;
-    t = x0; x0 = x1; x1 = t;
-    t = y0; y0 = y1; y1 = t;
-  }
-  int16_t dx = x1 - x0, dy = abs(y1 - y0);
-  int16_t err = dx / 2, ystep = (y0 < y1) ? 1 : -1;
-  for (; x0 <= x1 && n < SEC_PX_MAX; x0++) {
-    if (steep) { xs[n] = y0; ys[n] = x0; }
-    else       { xs[n] = x0; ys[n] = y0; }
-    n++;
-    err -= dy;
-    if (err < 0) { y0 += ystep; err += dx; }
-  }
-
-  // Normalise the direction so the list always runs tail-to-tip. The
-  // swaps above order it by whichever axis is major, which flips near 45
-  // degrees - and renderHands pairs old[i] with new[i], so a flip would
-  // pair the tail of one with the tip of the other.
-  if (n > 1) {
-    int32_t d0 = (int32_t)(xs[0] - tailX) * (xs[0] - tailX) +
-                 (int32_t)(ys[0] - tailY) * (ys[0] - tailY);
-    int32_t dN = (int32_t)(xs[n - 1] - tailX) * (xs[n - 1] - tailX) +
-                 (int32_t)(ys[n - 1] - tailY) * (ys[n - 1] - tailY);
-    if (d0 > dN) {
-      for (int16_t a = 0, b = n - 1; a < b; a++, b--) {
-        int16_t t;
-        t = xs[a]; xs[a] = xs[b]; xs[b] = t;
-        t = ys[a]; ys[a] = ys[b]; ys[b] = t;
-      }
-    }
-  }
-}
-
-static bool inPixelList(int16_t x, int16_t y, const int16_t *xs,
-                         const int16_t *ys, int16_t n) {
-  for (int16_t i = 0; i < n; i++) {
-    if (xs[i] == x && ys[i] == y) return true;
-  }
-  return false;
-}
-
-// Paints a collected pixel list, merging horizontally adjacent pixels
-// into single runs - one address window per run instead of per pixel.
-static void drawPixelList(const int16_t *xs, const int16_t *ys, int16_t n,
-                           uint16_t color) {
-  int16_t i = 0;
-  while (i < n) {
-    int16_t j = i + 1;
-    while (j < n && ys[j] == ys[i] && xs[j] == xs[j - 1] + 1) j++;
-    panelFillRect(xs[i], ys[i], j - i, 1, color);
-    i = j;
-  }
-}
-
-// Draws the second hand from scratch and records its pixels, so that the
-// next incremental update knows what is actually on the panel. Used for
-// the first paint; after that renderHands maintains the list.
-static void paintSecondHandFresh() {
-  collectLine(secHand.tx, secHand.ty, secHand.x, secHand.y, secOldX, secOldY,
-              secOldN);
-  drawPixelList(secOldX, secOldY, secOldN, COLOR_SEC_HAND);
-}
-
-
 // Rasterises a hand's quad into horizontal runs - the same geometry
 // drawThickLine paints, captured instead of drawn, so erase-by-difference
 // and the painted pixels can never disagree.
@@ -705,6 +626,134 @@ static void handQuadRuns(const Hand &h, uint8_t thickness, HandRuns &out) {
     out.n++;
   }
 }
+
+// Upper bound on the second hand's pixel count.
+//
+// At width 1 it is a Bresenham line: at most one pixel per step along the
+// major axis. Wider, it is a filled quad, so the bound is its area plus
+// the rounding slack a scanline fill can add at the edges of each row.
+#define SEC_SPAN (SEC_HAND_LEN + SEC_HAND_TAIL)
+static const int16_t SEC_PX_MAX =
+    (SEC_HAND_W <= 1) ? (SEC_SPAN + 8)
+                      : (int16_t)(SEC_SPAN * SEC_HAND_W +
+                                  2 * (SEC_SPAN + SEC_HAND_W) + 16);
+static int16_t secOldX[SEC_PX_MAX], secOldY[SEC_PX_MAX];
+static int16_t secNewX[SEC_PX_MAX], secNewY[SEC_PX_MAX];
+static int16_t secOldN = 0, secNewN = 0;
+
+// How many extra frames each discarded pixel is re-erased for. See the
+// retry loop in renderHands.
+static const int8_t ERASE_RETRIES = 2;
+static int16_t eraseGenX[ERASE_RETRIES][SEC_PX_MAX];
+static int16_t eraseGenY[ERASE_RETRIES][SEC_PX_MAX];
+static int16_t eraseGenN[ERASE_RETRIES] = {0};
+static int16_t thisEraseX[SEC_PX_MAX], thisEraseY[SEC_PX_MAX];
+
+
+// Same Bresenham as gfxDrawLine, but collecting instead of drawing, so
+// that what gets erased and what gets drawn can never disagree.
+static void collectBresenham(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+                         int16_t *xs, int16_t *ys, int16_t &n) {
+  const int16_t tailX = x0, tailY = y0;
+  n = 0;
+  bool steep = abs(y1 - y0) > abs(x1 - x0);
+  if (steep) {
+    int16_t t;
+    t = x0; x0 = y0; y0 = t;
+    t = x1; x1 = y1; y1 = t;
+  }
+  if (x0 > x1) {
+    int16_t t;
+    t = x0; x0 = x1; x1 = t;
+    t = y0; y0 = y1; y1 = t;
+  }
+  int16_t dx = x1 - x0, dy = abs(y1 - y0);
+  int16_t err = dx / 2, ystep = (y0 < y1) ? 1 : -1;
+  for (; x0 <= x1 && n < SEC_PX_MAX; x0++) {
+    if (steep) { xs[n] = y0; ys[n] = x0; }
+    else       { xs[n] = x0; ys[n] = y0; }
+    n++;
+    err -= dy;
+    if (err < 0) { y0 += ystep; err += dx; }
+  }
+
+  // Normalise the direction so the list always runs tail-to-tip. The
+  // swaps above order it by whichever axis is major, which flips near 45
+  // degrees - and renderHands pairs old[i] with new[i], so a flip would
+  // pair the tail of one with the tip of the other.
+  if (n > 1) {
+    int32_t d0 = (int32_t)(xs[0] - tailX) * (xs[0] - tailX) +
+                 (int32_t)(ys[0] - tailY) * (ys[0] - tailY);
+    int32_t dN = (int32_t)(xs[n - 1] - tailX) * (xs[n - 1] - tailX) +
+                 (int32_t)(ys[n - 1] - tailY) * (ys[n - 1] - tailY);
+    if (d0 > dN) {
+      for (int16_t a = 0, b = n - 1; a < b; a++, b--) {
+        int16_t t;
+        t = xs[a]; xs[a] = xs[b]; xs[b] = t;
+        t = ys[a]; ys[a] = ys[b]; ys[b] = t;
+      }
+    }
+  }
+}
+
+// Collects the second hand's pixels at SEC_HAND_W, as a plain pixel list.
+//
+// The list representation is what the incremental sweep is built on -
+// membership tests decide which pixels the new position reuses - so
+// widening the hand must not change it. At width 1 that is a Bresenham
+// line; wider, the same quad the thick hands use, rasterised through
+// handQuadRuns and expanded back into pixels. Sharing handQuadRuns means
+// a wide second hand has exactly the geometry of a wide minute hand, and
+// avoids the failure mode drawThickLine documents: stacking offset
+// Bresenham lines comes apart into strands on diagonals.
+static void collectHandPixels(const Hand &h, int16_t *xs, int16_t *ys,
+                               int16_t &n) {
+  if (SEC_HAND_W <= 1) {
+    collectBresenham(h.tx, h.ty, h.x, h.y, xs, ys, n);
+    return;
+  }
+  static HandRuns r;
+  handQuadRuns(h, SEC_HAND_W, r);
+  n = 0;
+  for (int16_t i = 0; i < r.n; i++) {
+    for (int16_t x = r.rx0[i]; x <= r.rx1[i] && n < SEC_PX_MAX; x++) {
+      xs[n] = x;
+      ys[n] = r.ry[i];
+      n++;
+    }
+  }
+}
+
+static bool inPixelList(int16_t x, int16_t y, const int16_t *xs,
+                         const int16_t *ys, int16_t n) {
+  for (int16_t i = 0; i < n; i++) {
+    if (xs[i] == x && ys[i] == y) return true;
+  }
+  return false;
+}
+
+// Paints a collected pixel list, merging horizontally adjacent pixels
+// into single runs - one address window per run instead of per pixel.
+static void drawPixelList(const int16_t *xs, const int16_t *ys, int16_t n,
+                           uint16_t color) {
+  int16_t i = 0;
+  while (i < n) {
+    int16_t j = i + 1;
+    while (j < n && ys[j] == ys[i] && xs[j] == xs[j - 1] + 1) j++;
+    panelFillRect(xs[i], ys[i], j - i, 1, color);
+    i = j;
+  }
+}
+
+// Draws the second hand from scratch and records its pixels, so that the
+// next incremental update knows what is actually on the panel. Used for
+// the first paint; after that renderHands maintains the list.
+static void paintSecondHandFresh() {
+  collectHandPixels(secHand, secOldX, secOldY, secOldN);
+  drawPixelList(secOldX, secOldY, secOldN, COLOR_SEC_HAND);
+}
+
+
 
 static void paintRuns(const HandRuns &r, uint16_t color) {
   for (int16_t i = 0; i < r.n; i++) {
@@ -1071,8 +1120,7 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   // One SPI transaction for the whole frame rather than one per primitive.
   panelBeginBatch();
 
-  collectLine(newSec.tx, newSec.ty, newSec.x, newSec.y, secNewX, secNewY,
-              secNewN);
+  collectHandPixels(newSec, secNewX, secNewY, secNewN);
 
   hourHand = newHour;
   minHand = newMin;

@@ -264,6 +264,23 @@ Edit the constants at the top of `analog_clock/analog_clock.ino` before flashing
   compile-time fallback clock instead.
 - `SMOOTH_SECONDS` — `true` (default) sweeps the second hand
   continuously; `false` steps it once per second like a quartz movement.
+- `SEC_HAND_W` — second hand width in pixels, default `1`. Width 1 is a
+  hairline (and the only width drawn with Bresenham); 2 or 3 read more
+  solidly from across a room. It is not free: in safe write mode every
+  pixel is its own address window (~35µs), so the sweep's share of the
+  CPU scales with the hand's area. Measured by the test suite:
+
+  | `SEC_HAND_W` | pixel writes/s | est. CPU |
+  |---|---|---|
+  | 1 | 9,700 | ~33% |
+  | 2 | 15,500 | ~54% |
+  | 3 | 18,900 | ~66% |
+  | 5 | 25,600 | ~89% |
+
+  2 or 3 is the sweet spot. 5 leaves little headroom — if frames start
+  taking longer than a pixel-step of the sweep, the motion goes back to
+  looking stepped. `HOUR_HAND_W` and `MIN_HAND_W` work the same way and
+  are much cheaper, since those hands only repaint when they step.
 - `TZ_INFO` — local time zone as a POSIX TZ string. Defaults to
   `"CET-1CEST,M3.5.0,M10.5.0/3"` (Europe/Warsaw). See the note below
   before changing it.
