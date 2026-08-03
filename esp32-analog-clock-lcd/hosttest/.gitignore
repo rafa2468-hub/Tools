@@ -1,6 +1,8 @@
 test_clock
 .ino_generated.cpp
 mut/
+diag/
 test_mut
 preview
 preview.png
+stubs/panel_host_diag.h

@@ -304,8 +304,12 @@ static const int16_t SEC_HAND_TAIL = 20; // short tail past the center
 
 static const uint8_t HOUR_HAND_W = 5;
 static const uint8_t MIN_HAND_W = 3;
-static const uint8_t SEC_HAND_W = 1;
 static const int16_t HUB_R = 6;
+// The second hand has no width constant: it is a single-pixel Bresenham
+// line by construction (collectLine / drawPixelList), tracked as a pixel
+// list so its sweep can be updated incrementally. Widening it would mean
+// giving it the scanline-run treatment the thick hands get, not changing
+// a number here.
 
 #define RGB565(r, g, b) \
   ((uint16_t)((((r)&0xF8) << 8) | (((g)&0xFC) << 3) | (((b)&0xF8) >> 3)))
@@ -656,22 +660,6 @@ static void paintSecondHandFresh() {
   drawPixelList(secOldX, secOldY, secOldN, COLOR_SEC_HAND);
 }
 
-// Perpendicular distance from a point to a hand's segment, used to work
-// out whether erasing a pixel damaged one of the other hands.
-static bool pixelTouchesHand(int16_t px, int16_t py, const Hand &h,
-                              float tol) {
-  float ax = h.tx, ay = h.ty;
-  float dx = (float)h.x - ax, dy = (float)h.y - ay;
-  float len2 = dx * dx + dy * dy;
-  float t = 0.0f;
-  if (len2 > 0.0f) {
-    t = ((px - ax) * dx + (py - ay) * dy) / len2;
-    if (t < 0.0f) t = 0.0f;
-    else if (t > 1.0f) t = 1.0f;
-  }
-  float ex = px - (ax + t * dx), ey = py - (ay + t * dy);
-  return ex * ex + ey * ey <= tol * tol;
-}
 
 // Rasterises a hand's quad into horizontal runs - the same geometry
 // drawThickLine paints, captured instead of drawn, so erase-by-difference
