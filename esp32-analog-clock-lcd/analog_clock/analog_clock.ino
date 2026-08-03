@@ -918,6 +918,20 @@ void setup() {
   panelInit();
   Serial.println("[boot] panel init done");
 
+  // Boot self-test: a moment of solid red before the face. This is the
+  // same known-good result the vendor demo produces (a red screen), sent
+  // through this sketch's own adapter - so it splits the world cleanly.
+  // Red appears: panel, wiring and init are fine, and whatever else is
+  // wrong is in this sketch. No red: the commands are not reaching the
+  // glass - reseat the wiring, power-cycle the panel. The clock's own
+  // face is a poor test for this because its background is near-black,
+  // indistinguishable from a dead panel.
+  panelBeginBatch();
+  panelFillRect(0, 0, PANEL_W, PANEL_H, RGB565(255, 0, 0));
+  panelEndBatch();
+  Serial.println("[boot] RED self-test fill sent - screen should be red now");
+  delay(1500);
+
   panelBeginBatch();
   panelFillRect(0, 0, PANEL_W, PANEL_H, COLOR_BG);
   panelEndBatch();
