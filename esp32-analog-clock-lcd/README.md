@@ -119,11 +119,19 @@ Three defenses are layered against this:
 2. **The scrub** — the backstop that bounds a stray's lifetime no matter
    what. Once a second, a hand-shaped wedge at a slowly advancing bearing
    is erased and everything it might have hit is repainted, sweeping the
-   whole dial every 6 minutes like a radar. It skips bearings near the
-   live second hand (caught next revolution) and repaints in stacking
+   whole dial every ~6–7 minutes like a radar. Bearings near the live
+   second hand are *waited on*, not skipped — the scrub holds position
+   until the hand moves clear (a few seconds), then cleans that bearing
+   before advancing. This is load-bearing: an earlier version advanced
+   past them, and because the scrub's revolution (exactly 360s) divided
+   evenly by the hand's period (exactly 60s), each bearing always met the
+   hand at the same angle — so the same bearings were skipped on every
+   revolution forever, and strays accumulated in fixed ~10° bands spaced
+   36° apart while the rest of the dial stayed clean. Fixed locations are
+   the fingerprint of that failure mode. The scrub repaints in stacking
    order, so on a healthy panel it is pixel-for-pixel invisible — the
-   tests assert both that invisibility and that a 3-minute 6%-drop burst
-   is fully healed within two revolutions.
+   tests assert that invisibility, and that a 3-minute 6%-drop burst is
+   fully healed within two revolutions.
 3. **Wi-Fi duty cycling** — the radio is off except during time syncs
    (every 6 hours, ~30s, non-blocking). Radio bursts pull hard on the
    Super Mini's small 3V3 regulator, which the display shares; keeping

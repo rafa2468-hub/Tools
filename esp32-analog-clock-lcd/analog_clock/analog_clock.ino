@@ -999,15 +999,27 @@ static uint32_t lastScrubMs = 0;
 static void scrubTick() {
   uint32_t now = millis();
   if (now - lastScrubMs < SCRUB_PERIOD_MS) return;
-  lastScrubMs = now;
 
+  // Keep clear of the live second hand - shaft side and tail side both.
+  //
+  // Crucially, a skipped bearing is NOT advanced past: the scrub waits on
+  // it (re-checking every pass, at most ~8s until the hand moves clear)
+  // and only moves on once it has actually been cleaned. The first
+  // version advanced regardless, and that was a bug with a signature: the
+  // scrub's revolution took exactly 360s and the hand's exactly 60s, so
+  // each bearing always met the hand at the same angle - and the bearings
+  // whose meeting fell inside this keep-out were skipped on every
+  // revolution forever. Strays accumulated in fixed ~10-degree bands
+  // spaced 36 degrees apart while the rest of the dial stayed clean.
+  // Waiting instead of skipping makes the schedule depend on the hand's
+  // actual position, which breaks the lock-step for good.
+  float d = angleDelta(scrubAngle, secHand.angle);
+  if (d < SCRUB_KEEPOUT_DEG || d > 180.0f - SCRUB_KEEPOUT_DEG) return;
+
+  lastScrubMs = now;
   float bearing = scrubAngle;
   scrubAngle += SCRUB_STEP_DEG;
   if (scrubAngle >= 360.0f) scrubAngle -= 360.0f;
-
-  // Keep clear of the live second hand - shaft side and tail side both.
-  float d = angleDelta(bearing, secHand.angle);
-  if (d < SCRUB_KEEPOUT_DEG || d > 180.0f - SCRUB_KEEPOUT_DEG) return;
 
   Hand v;
   v.angle = bearing;

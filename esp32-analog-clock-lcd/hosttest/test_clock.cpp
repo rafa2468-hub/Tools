@@ -364,6 +364,64 @@ int main() {
     check(diff == 0, "scrub heals the dial completely after a drop burst");
   }
 
+  // ---- 9. planted specks anywhere on the dial get cleaned
+  //
+  // Full-circle cleanup coverage. An honest caveat: this CANNOT catch the
+  // scrub resonance bug that shipped (revolution exactly 360s against the
+  // hand's exact 60s period, so keep-out-skipped bearings were skipped
+  // every revolution forever, leaving stray bands 36 degrees apart on
+  // real hardware). In simulation the frame grid is perfectly regular, so
+  // the hand's own sweep re-covers the whole annulus every minute and
+  // cleans these specks itself - mutation-testing the resonant scrub
+  // against this test passes. On hardware, frame phase drifts and writes
+  // drop, which is why the scrub must visit every bearing; that property
+  // is enforced by construction in scrubTick (wait on a kept-out bearing
+  // instead of advancing past it) rather than provable here.
+  {
+    g_dropPerMille = 0;
+    double base = timeAt(5, 47, 0.0);
+    g_testNow = base;
+    struct tm t; float s;
+    readClock(t, s);
+    computeHands(t, s, hourHand, minHand, secHand);
+    drawFace();
+    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+    drawHub();
+    paintSecondHandFresh();
+
+    // Planted 2px perpendicular to each bearing's ray - deliberately OFF
+    // the second hand's own pixel path. Specks exactly on the path get
+    // cleaned by the hand's ordinary erase cycle as it sweeps past, which
+    // masks a scrub that never visits; real strays survive precisely
+    // because they sit a pixel or two off the live path.
+    for (int i = 0; i < 60; i++) {
+      float ang = i * 6.0f + 3.0f;
+      float rad = ang * DEG_TO_RAD;
+      for (int16_t r = 40; r <= 120; r += 40) {
+        int16_t x, y;
+        polarToXY(ang, r, x, y);
+        int16_t ox = (int16_t)lroundf(2.0f * cosf(rad));
+        int16_t oy = (int16_t)lroundf(2.0f * sinf(rad));
+        g_fb[(y + oy) * FB_W + (x + ox)] = COLOR_SEC_HAND;
+      }
+    }
+
+    for (double now = base; now < base + 900.0; now += 0.02) {
+      g_testNow = now;
+      loop();
+    }
+
+    std::vector<uint16_t> inc(g_fb, g_fb + FB_W * FB_H), ref;
+    renderReference(g_testNow, ref);
+    int diff = 0;
+    for (size_t i = 0; i < ref.size(); i++)
+      if (inc[i] != ref[i]) diff++;
+    printf("      180 planted specks around the dial; after 15 min: "
+           "%d px still wrong\n", diff);
+    check(diff == 0, "scrub reaches every bearing (no resonance shadow)");
+  }
+
   printf("\n%s\n", failures ? "FAILURES" : "all checks passed");
   return failures ? 1 : 0;
 }
