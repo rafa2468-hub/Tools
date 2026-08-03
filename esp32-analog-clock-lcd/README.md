@@ -103,6 +103,29 @@ Only the init sequence was ever wrong — and there is no public GC9B72
 driver to substitute in, so the working init sequence has to come from
 your own driver.
 
+### Stray pixels / comet trails
+
+Scattered pixels left behind along the second hand's path are a **bus
+integrity** symptom, not a drawing bug. The erase pass tells the panel to
+clear those pixels; if the address-window command that precedes the write
+is corrupted, the write lands elsewhere and the original pixel stays lit.
+
+`GC9B72Graphics.hpp` never calls `beginTransaction`, so the vendor demo
+ran at the Arduino default of **1MHz**. This sketch sets `PANEL_SPI_HZ`
+explicitly; it was originally 40MHz, which proved too aggressive on
+dupont jumper wires — strays appeared in bursts, consistent with Wi-Fi
+transmit activity disturbing the supply. It is now 10MHz.
+
+If strays still appear, **keep halving `PANEL_SPI_HZ`** (4MHz, 2MHz). The
+sweep is nowhere near bus-limited — a frame's cost is dominated by
+per-window GPIO overhead, and at 10MHz the bus is under 5% loaded — so
+there is nothing to lose. Shorter wiring and a solid 3V3/GND pair are what
+actually buy headroom here, not a bigger number.
+
+Note that existing strays do not always self-clear: the hand sweeps the
+same ray a minute later and cleans up pixels that lie exactly on its path,
+but one rounded a pixel off it will persist. A reset repaints the face.
+
 ### If the image appears but looks wrong
 
 - **Mirrored or rotated**: adjust the MADCTL value (`cmd(0x36)`) in the

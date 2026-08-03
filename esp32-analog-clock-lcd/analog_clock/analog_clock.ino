@@ -108,9 +108,24 @@ void panelEndBatch();
 #include "GC9B72Graphics.hpp" // the working GC9B72 driver: pins, init
                               // sequence, sendCmd/sendData, setAddrWindow
 
-// SPI clock for pixel pushing. The GC9B72 is happy well above this; back
-// it off if the wiring is long or on breadboard jumpers.
-static const uint32_t PANEL_SPI_HZ = 40000000;
+// SPI clock for pixel pushing.
+//
+// GC9B72Graphics.hpp never calls beginTransaction, so the vendor demo ran
+// at the Arduino default of 1MHz - and it was reliable. This sketch first
+// ran the bus at 40MHz, which turned out to be too aggressive on dupont
+// jumpers: the panel picked up scattered stray pixels that the erase pass
+// had told it to clear. A corrupted address-window command sends that
+// write somewhere else and leaves the original pixel lit, which is
+// exactly what a stray looks like. The errors came in bursts, consistent
+// with Wi-Fi transmit activity disturbing the supply.
+//
+// There is no reason to run fast here. The cost of a frame is dominated
+// by per-window GPIO overhead, not by clocking: at 10MHz an address
+// window's 11 bytes take under 9us, and the sweep needs ~4500 of them a
+// second, so under 5% of the time budget. If stray pixels still appear,
+// keep halving this - 4MHz and 2MHz are still far quicker than the sweep
+// needs, and short wiring is what buys the headroom, not a bigger number.
+static const uint32_t PANEL_SPI_HZ = 10000000;
 static SPISettings panelSpi(PANEL_SPI_HZ, MSBFIRST, SPI_MODE0);
 
 // Opens an address window and leaves CS asserted with DC high, ready for
