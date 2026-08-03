@@ -32,4 +32,8 @@ extern SerialStub Serial;
 inline void pinMode(int, int) {}
 inline void digitalWrite(int, int) {}
 inline void delay(int) {}
-inline unsigned long millis() { return 0; }
+// millis() tracks the test-controlled clock so time-driven logic in the
+// sketch (the scrub cadence, the Wi-Fi re-sync schedule) advances with
+// simulated time instead of being frozen at zero.
+extern double g_testNow;
+inline unsigned long millis() { return (unsigned long)(g_testNow * 1000.0); }

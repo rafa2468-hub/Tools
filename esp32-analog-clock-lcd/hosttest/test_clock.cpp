@@ -301,6 +301,69 @@ int main() {
     check(stray <= 20, "dropped erases do not accumulate into trails");
   }
 
+  // ---- 8. strays self-heal even when drops beat the retries
+  //
+  // The erase retries cover ~200ms; a burst of dropped writes longer than
+  // that leaves permanent strays - which is exactly what happened on
+  // hardware. The scrub bounds their lifetime instead: it re-erases the
+  // hand's whole reach on a 6-minute revolution. Hammer the panel with a
+  // 6% drop rate for 3 minutes, then give the scrub two quiet
+  // revolutions, and require the dial to be byte-identical to a clean
+  // repaint - not just stray-free, fully healed, numerals and all.
+  {
+    g_dropPerMille = 0;
+    double base = timeAt(11, 20, 0.0);
+    g_testNow = base;
+    struct tm t; float s;
+    readClock(t, s);
+    computeHands(t, s, hourHand, minHand, secHand);
+    drawFace();
+    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+    drawHub();
+    paintSecondHandFresh();
+
+    g_dropPerMille = 60;
+    g_dropRng = 424242u;
+    for (double now = base; now < base + 180.0; now += 0.02) {
+      g_testNow = now;
+      loop();
+    }
+    g_dropPerMille = 0;
+    int strayAfterBurst = 0;
+    {
+      std::vector<uint16_t> snap(g_fb, g_fb + FB_W * FB_H), ref;
+      Hand sh = hourHand, sm = minHand, ss = secHand;
+      int so = secOldN;
+      std::vector<int16_t> sx(secOldX, secOldX + secOldN),
+          sy(secOldY, secOldY + secOldN);
+      renderReference(g_testNow, ref);
+      for (size_t i = 0; i < ref.size(); i++)
+        if (snap[i] != ref[i]) strayAfterBurst++;
+      std::copy(snap.begin(), snap.end(), g_fb);
+      hourHand = sh; minHand = sm; secHand = ss;
+      secOldN = so;
+      std::copy(sx.begin(), sx.end(), secOldX);
+      std::copy(sy.begin(), sy.end(), secOldY);
+    }
+
+    for (double now = base + 180.0; now < base + 180.0 + 780.0;
+         now += 0.02) {
+      g_testNow = now;
+      loop();
+    }
+    std::vector<uint16_t> inc(g_fb, g_fb + FB_W * FB_H), ref;
+    renderReference(g_testNow, ref);
+    int diff = 0;
+    for (size_t i = 0; i < ref.size(); i++)
+      if (inc[i] != ref[i]) diff++;
+    printf("      3 min at 6%% drops left %d bad px; after two scrub "
+           "revolutions: %d\n", strayAfterBurst, diff);
+    check(strayAfterBurst > 0,
+          "burst actually corrupted the dial (test is not vacuous)");
+    check(diff == 0, "scrub heals the dial completely after a drop burst");
+  }
+
   printf("\n%s\n", failures ? "FAILURES" : "all checks passed");
   return failures ? 1 : 0;
 }

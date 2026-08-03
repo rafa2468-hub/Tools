@@ -715,8 +715,39 @@ static void setFallbackTime() {
   Serial.println("Using firmware build time as a fallback clock.");
 }
 
+// ---------------------------------------------------------------------
+// Wi-Fi duty cycling
+// ---------------------------------------------------------------------
+// The radio stays OFF except during time syncs. Wi-Fi transmit bursts pull
+// hard on the Super Mini's small 3V3 regulator, and the display shares
+// that rail - the stray-pixel bursts and one outright panel latch-up both
+// line up with radio activity. An analog clock needs the network for a few
+// seconds every few hours, so the radio simply is not kept around.
+// Between syncs the time free-runs on the crystal (~1-2s/day drift, reset
+// at each sync).
+static const uint32_t RESYNC_OK_INTERVAL_MS = 6UL * 3600UL * 1000UL;
+static const uint32_t RESYNC_RETRY_MS = 15UL * 60UL * 1000UL;
+static const uint32_t RESYNC_CONNECT_TIMEOUT_MS = 20000;
+// How long the radio stays up after connecting so SNTP (restarted by
+// configTzTime, which fires a request immediately) can complete.
+static const uint32_t RESYNC_HOLD_MS = 15000;
+
+static bool resyncArmed = false; // set once initial sync has run
+static uint8_t resyncPhase = 0;  // 0 idle, 1 connecting, 2 sync window
+static uint32_t resyncDueMs = 0;
+static uint32_t resyncPhaseStartMs = 0;
+
+static bool wifiConfigured() {
+  return strcmp(WIFI_SSID, "YOUR_WIFI_SSID") != 0;
+}
+
+static void wifiOff() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
 static void connectAndSyncTime() {
-  if (strcmp(WIFI_SSID, "YOUR_WIFI_SSID") == 0) {
+  if (!wifiConfigured()) {
     Serial.println("Wi-Fi not configured, skipping NTP sync.");
     setFallbackTime();
     return;
@@ -733,21 +764,65 @@ static void connectAndSyncTime() {
   }
   Serial.println();
 
+  bool synced = false;
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Wi-Fi connect failed, using fallback time.");
     setFallbackTime();
-    return;
+  } else {
+    Serial.println("Wi-Fi connected, syncing time via NTP...");
+    configTzTime(TZ_INFO, NTP_SERVER_1, NTP_SERVER_2);
+
+    struct tm t;
+    if (getLocalTime(&t, 10000)) {
+      Serial.println("Time synced.");
+      synced = true;
+    } else {
+      Serial.println("NTP sync timed out, using fallback time.");
+      setFallbackTime();
+    }
   }
 
-  Serial.println("Wi-Fi connected, syncing time via NTP...");
-  configTzTime(TZ_INFO, NTP_SERVER_1, NTP_SERVER_2);
+  wifiOff();
+  Serial.println("Wi-Fi radio off until the next sync window.");
+  resyncArmed = true;
+  resyncPhase = 0;
+  resyncDueMs = millis() + (synced ? RESYNC_OK_INTERVAL_MS : RESYNC_RETRY_MS);
+}
 
-  struct tm t;
-  if (getLocalTime(&t, 10000)) {
-    Serial.println("Time synced.");
-  } else {
-    Serial.println("NTP sync timed out, using fallback time.");
-    setFallbackTime();
+// Non-blocking periodic re-sync, driven from loop() so the hands never
+// freeze while the radio negotiates.
+static void resyncTick() {
+  if (!resyncArmed || !wifiConfigured()) return;
+  uint32_t now = millis();
+  switch (resyncPhase) {
+    case 0:
+      if ((int32_t)(now - resyncDueMs) < 0) return;
+      Serial.println("Time re-sync: radio on, connecting...");
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      resyncPhase = 1;
+      resyncPhaseStartMs = now;
+      break;
+    case 1:
+      if (WiFi.status() == WL_CONNECTED) {
+        configTzTime(TZ_INFO, NTP_SERVER_1, NTP_SERVER_2);
+        resyncPhase = 2;
+        resyncPhaseStartMs = now;
+      } else if (now - resyncPhaseStartMs > RESYNC_CONNECT_TIMEOUT_MS) {
+        Serial.println("Time re-sync: connect failed, retrying later.");
+        wifiOff();
+        resyncPhase = 0;
+        resyncDueMs = now + RESYNC_RETRY_MS;
+      }
+      break;
+    case 2:
+      if (now - resyncPhaseStartMs > RESYNC_HOLD_MS) {
+        Serial.println("Time re-sync done, radio off.");
+        wifiOff();
+        resyncPhase = 0;
+        resyncDueMs = now + RESYNC_OK_INTERVAL_MS;
+      }
+      break;
   }
 }
 
@@ -894,6 +969,64 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
 }
 
 // ---------------------------------------------------------------------
+// Background scrub
+// ---------------------------------------------------------------------
+// The dial's self-healing backstop. The panel drops writes in bursts, and
+// any scheme that erases a pixel a fixed number of times can be beaten by
+// a burst longer than its window - the 3-attempt erase retry above
+// reduces strays but cannot bound their lifetime. This does: once a
+// second, a hand-shaped wedge at a slowly advancing bearing is erased and
+// the things it may have hit are repainted, sweeping the full circle
+// every 6 minutes like a radar. Any stray anywhere on the hand's reach is
+// gone within a revolution or two, no matter how it got there.
+//
+// The scrub is skipped while its bearing is near the second hand's (both
+// ends), so it never blanks a visible stretch of the live hand; a skipped
+// bearing is simply caught on the next revolution, by which time the hand
+// has moved on. Everything it erases is repainted in the same batch, in
+// stacking order, so on a healthy panel the scrub is pixel-for-pixel
+// invisible - the framebuffer tests assert exactly that.
+static const uint32_t SCRUB_PERIOD_MS = 1000;
+static const float SCRUB_STEP_DEG = 1.0f;  // 2.5px arc at the tip, less
+                                            // than the 3px scrub width, so
+                                            // revolutions leave no gaps
+static const uint8_t SCRUB_W = 3;
+static const float SCRUB_KEEPOUT_DEG = 25.0f;
+
+static float scrubAngle = 0.0f;
+static uint32_t lastScrubMs = 0;
+
+static void scrubTick() {
+  uint32_t now = millis();
+  if (now - lastScrubMs < SCRUB_PERIOD_MS) return;
+  lastScrubMs = now;
+
+  float bearing = scrubAngle;
+  scrubAngle += SCRUB_STEP_DEG;
+  if (scrubAngle >= 360.0f) scrubAngle -= 360.0f;
+
+  // Keep clear of the live second hand - shaft side and tail side both.
+  float d = angleDelta(bearing, secHand.angle);
+  if (d < SCRUB_KEEPOUT_DEG || d > 180.0f - SCRUB_KEEPOUT_DEG) return;
+
+  Hand v;
+  v.angle = bearing;
+  polarToXY(bearing, SEC_HAND_LEN, v.x, v.y);
+  polarToXY(bearing + 180.0f, SEC_HAND_TAIL, v.tx, v.ty);
+
+  panelBeginBatch();
+  eraseHand(v, SCRUB_W);
+  // Replay the stack over the scrubbed wedge, same order as a full
+  // repaint: numerals, hour, minute, hub, second hand.
+  repairNumeralsNear(bearing);
+  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  drawHub();
+  drawPixelList(secOldX, secOldY, secOldN, COLOR_SEC_HAND);
+  panelEndBatch();
+}
+
+// ---------------------------------------------------------------------
 // Arduino entry points
 // ---------------------------------------------------------------------
 
@@ -955,6 +1088,9 @@ void setup() {
 }
 
 void loop() {
+  resyncTick();
+  scrubTick();
+
   struct tm t;
   float secOfMinute;
   readClock(t, secOfMinute);

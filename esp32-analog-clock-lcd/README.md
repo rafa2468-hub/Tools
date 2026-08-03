@@ -105,31 +105,35 @@ your own driver.
 
 ### Stray pixels / comet trails
 
-Scattered red specks accumulating along the second hand's path mean
-**dropped writes**, and they are only visible if the drawing code lets
-them become permanent.
+Scattered red specks along the second hand's path mean the panel is
+**dropping writes**. The hand's own pixels are repainted every frame, so a
+lost draw heals invisibly — but a pixel the hand has moved off used to be
+erased exactly once, so one lost erase left a speck forever. On hardware
+the drops arrive in bursts (they correlate with Wi-Fi transmit activity),
+long enough to beat any fixed number of erase retries.
 
-The panel occasionally loses a write. The hand's own pixels are repainted
-every frame, so a lost draw heals within ~66ms and is never seen. But a
-pixel the hand has *moved off* is erased once — so one lost erase leaves a
-red speck that nothing ever clears, and they pile up into comet-trails.
+Three defenses are layered against this:
 
-The original code erased the whole hand every frame, which retried every
-pixel constantly and hid the problem entirely. Switching to erasing only
-what changed (to stop the hand flickering) removed that safety net and the
-trails appeared. Discarded pixels are now re-erased for `ERASE_RETRIES`
-further frames, so a stray needs several consecutive drops in the same
-place. `make` asserts this: five simulated minutes at a 2% drop rate
-leaves ~1 stray pixel, against ~1200 with retries disabled.
+1. **Erase retries** — each discarded pixel is re-erased for
+   `ERASE_RETRIES` further frames (~200ms). Catches isolated drops.
+2. **The scrub** — the backstop that bounds a stray's lifetime no matter
+   what. Once a second, a hand-shaped wedge at a slowly advancing bearing
+   is erased and everything it might have hit is repainted, sweeping the
+   whole dial every 6 minutes like a radar. It skips bearings near the
+   live second hand (caught next revolution) and repaints in stacking
+   order, so on a healthy panel it is pixel-for-pixel invisible — the
+   tests assert both that invisibility and that a 3-minute 6%-drop burst
+   is fully healed within two revolutions.
+3. **Wi-Fi duty cycling** — the radio is off except during time syncs
+   (every 6 hours, ~30s, non-blocking). Radio bursts pull hard on the
+   Super Mini's small 3V3 regulator, which the display shares; keeping
+   the radio off removes the suspected cause rather than just the
+   symptom.
 
-If trails still appear, the drop rate is high enough to beat the retries,
-and that is a wiring problem. Lower `PANEL_SPI_HZ` (it is 10MHz; 4MHz and
-2MHz are still far quicker than the sweep needs — the vendor demo ran at
-1MHz), shorten the jumpers, and make sure 3V3 and GND are a solid pair.
-Raising `ERASE_RETRIES` also helps, at roughly 1500 address windows per
-second per extra generation.
-
-Existing strays clear on reset.
+If specks still appear faster than the scrub clears them, the remaining
+levers are physical: a 100–470µF capacitor across the display's VCC/GND
+(the most effective single fix for supply dips), shorter jumpers, and a
+lower `PANEL_SPI_HZ` (currently 10MHz; the vendor demo ran at 1MHz).
 
 ### If the image appears but looks wrong
 
@@ -205,6 +209,10 @@ Edit the constants at the top of `analog_clock/analog_clock.ino` before flashing
   without needing internet access. `NTP_SERVER_2` is `pool.ntp.org`,
   consulted only if the local server doesn't answer; set it to `nullptr`
   if this device should never reach outside the LAN.
+- `RESYNC_OK_INTERVAL_MS` — how often the radio wakes to re-sync
+  (default 6 hours). Between syncs Wi-Fi is fully off and the time
+  free-runs on the crystal, drifting roughly 1–2 seconds per day at
+  worst — reset at each sync.
 
 The Wi-Fi network you point it at must of course be able to route to
 `192.168.1.5`.

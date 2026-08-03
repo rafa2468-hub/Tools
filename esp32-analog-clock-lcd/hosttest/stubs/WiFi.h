@@ -4,10 +4,12 @@
 
 #define WL_CONNECTED 3
 #define WIFI_STA 1
+#define WIFI_OFF 0
 
 struct WiFiStub {
   int mode(int) { return 0; }
   void begin(const char *, const char *) {}
+  void disconnect(bool = false) {}
   int status() { return WL_CONNECTED; }
 };
 extern WiFiStub WiFi;
