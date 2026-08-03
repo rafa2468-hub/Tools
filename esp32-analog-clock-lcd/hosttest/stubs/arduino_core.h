@@ -19,6 +19,7 @@
 
 struct SerialStub {
   void begin(int) {}
+  explicit operator bool() const { return true; }
   void println(const char *s = "") { printf("[serial] %s\n", s); }
   void print(char) {}
   void print(const char *) {}

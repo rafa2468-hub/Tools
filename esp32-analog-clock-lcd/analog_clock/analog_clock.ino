@@ -899,14 +899,29 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
 
 void setup() {
   Serial.begin(115200);
+  // On the C3's native USB, prints made before the host opens the port
+  // are lost. A short bounded wait keeps the boot breadcrumbs visible in
+  // a monitor that is already attached, without stalling a standalone
+  // clock that has no USB plugged in.
+  uint32_t serialWait = millis();
+  while (!Serial && millis() - serialWait < 2000) {
+    delay(10);
+  }
 
-  // Backlight is handled by the panel definition (LovyanGFX drives BL
-  // itself when the vendor file configures a Light_PWM block; on modules
-  // where BL is tied high it is simply always on).
+  // Boot breadcrumbs. Each stage announces itself so a dead display can
+  // be localised from the serial monitor alone: the last line printed
+  // names the stage that hung or crashed, and if all of them appear the
+  // sketch is running fine and the fault is on the panel side (wiring,
+  // reset, init) rather than in this code.
+  Serial.println("[boot] sketch start");
+
   panelInit();
+  Serial.println("[boot] panel init done");
+
   panelBeginBatch();
   panelFillRect(0, 0, PANEL_W, PANEL_H, COLOR_BG);
   panelEndBatch();
+  Serial.println("[boot] background filled");
 
   connectAndSyncTime();
 
@@ -922,6 +937,7 @@ void setup() {
   drawHub();
   paintSecondHandFresh();
   panelEndBatch();
+  Serial.println("[boot] face drawn, clock running");
 }
 
 void loop() {
