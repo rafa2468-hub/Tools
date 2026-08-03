@@ -468,6 +468,101 @@ static void eraseHand(const Hand &h, uint8_t thickness) {
   drawThickLine(h.tx, h.ty, h.x, h.y, COLOR_BG, thickness);
 }
 
+// ---------------------------------------------------------------------
+// Second hand: incremental update
+// ---------------------------------------------------------------------
+// The sweeping hand is the one thing redrawn every frame, and erasing it
+// wholesale is what makes it flicker. Consecutive positions are about
+// 0.4 degrees apart, so the two lines pick the *same* pixel everywhere
+// inside r~70 and differ only towards the tip - yet erasing the whole
+// hand and repainting it leaves it dark for the entire frame. On a panel
+// with no back buffer that is visible as a stagger, and when a frame runs
+// long (background Wi-Fi work will do it) the hand can vanish outright.
+//
+// So the old position is not erased. Its pixels are compared against the
+// new one's and only the few that are not reused get painted back to
+// background, which leaves the hand continuously lit.
+
+// Longest possible Bresenham run from tail to tip, plus slack.
+static const int16_t SEC_PX_MAX = SEC_HAND_LEN + SEC_HAND_TAIL + 8;
+static int16_t secOldX[SEC_PX_MAX], secOldY[SEC_PX_MAX];
+static int16_t secNewX[SEC_PX_MAX], secNewY[SEC_PX_MAX];
+static int16_t secOldN = 0, secNewN = 0;
+
+// Same Bresenham as gfxDrawLine, but collecting instead of drawing, so
+// that what gets erased and what gets drawn can never disagree.
+static void collectLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+                         int16_t *xs, int16_t *ys, int16_t &n) {
+  n = 0;
+  bool steep = abs(y1 - y0) > abs(x1 - x0);
+  if (steep) {
+    int16_t t;
+    t = x0; x0 = y0; y0 = t;
+    t = x1; x1 = y1; y1 = t;
+  }
+  if (x0 > x1) {
+    int16_t t;
+    t = x0; x0 = x1; x1 = t;
+    t = y0; y0 = y1; y1 = t;
+  }
+  int16_t dx = x1 - x0, dy = abs(y1 - y0);
+  int16_t err = dx / 2, ystep = (y0 < y1) ? 1 : -1;
+  for (; x0 <= x1 && n < SEC_PX_MAX; x0++) {
+    if (steep) { xs[n] = y0; ys[n] = x0; }
+    else       { xs[n] = x0; ys[n] = y0; }
+    n++;
+    err -= dy;
+    if (err < 0) { y0 += ystep; err += dx; }
+  }
+}
+
+static bool inPixelList(int16_t x, int16_t y, const int16_t *xs,
+                         const int16_t *ys, int16_t n) {
+  for (int16_t i = 0; i < n; i++) {
+    if (xs[i] == x && ys[i] == y) return true;
+  }
+  return false;
+}
+
+// Paints a collected pixel list, merging horizontally adjacent pixels
+// into single runs - one address window per run instead of per pixel.
+static void drawPixelList(const int16_t *xs, const int16_t *ys, int16_t n,
+                           uint16_t color) {
+  int16_t i = 0;
+  while (i < n) {
+    int16_t j = i + 1;
+    while (j < n && ys[j] == ys[i] && xs[j] == xs[j - 1] + 1) j++;
+    panelFillRect(xs[i], ys[i], j - i, 1, color);
+    i = j;
+  }
+}
+
+// Draws the second hand from scratch and records its pixels, so that the
+// next incremental update knows what is actually on the panel. Used for
+// the first paint; after that renderHands maintains the list.
+static void paintSecondHandFresh() {
+  collectLine(secHand.tx, secHand.ty, secHand.x, secHand.y, secOldX, secOldY,
+              secOldN);
+  drawPixelList(secOldX, secOldY, secOldN, COLOR_SEC_HAND);
+}
+
+// Perpendicular distance from a point to a hand's segment, used to work
+// out whether erasing a pixel damaged one of the other hands.
+static bool pixelTouchesHand(int16_t px, int16_t py, const Hand &h,
+                              float tol) {
+  float ax = h.tx, ay = h.ty;
+  float dx = (float)h.x - ax, dy = (float)h.y - ay;
+  float len2 = dx * dx + dy * dy;
+  float t = 0.0f;
+  if (len2 > 0.0f) {
+    t = ((px - ax) * dx + (py - ay) * dy) / len2;
+    if (t < 0.0f) t = 0.0f;
+    else if (t > 1.0f) t = 1.0f;
+  }
+  float ex = px - (ax + t * dx), ey = py - (ay + t * dy);
+  return ex * ex + ey * ey <= tol * tol;
+}
+
 static void paintHand(const Hand &h, uint16_t color, uint8_t thickness) {
   drawThickLine(h.tx, h.ty, h.x, h.y, color, thickness);
 }
@@ -634,17 +729,37 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
                          const Hand &newSec) {
   bool hourMoved = !sameHand(newHour, hourHand);
   bool minMoved = !sameHand(newMin, minHand);
+  float oldSecAngle = secHand.angle;
 
-  // One SPI transaction for the whole frame. Without this LovyanGFX opens
-  // and closes a transaction around every individual drawLine, and a
-  // frame is made of dozens of them.
+  // One SPI transaction for the whole frame rather than one per primitive.
   panelBeginBatch();
 
-  eraseHand(secHand, SEC_HAND_W);
-  repairNumeralsNear(secHand.angle);
+  collectLine(newSec.tx, newSec.ty, newSec.x, newSec.y, secNewX, secNewY,
+              secNewN);
+
+  // Erase only the old second-hand pixels the new position does not
+  // reuse, and note what that erasing damaged. Rather than guess at which
+  // angles overlap - an angle threshold was tried here and was wrong near
+  // the centre, where a 3px hand subtends ~19 degrees at r=6 - each
+  // erased pixel is tested against the things it could have hit. That is
+  // exact, and it is cheap because there are only a handful of them.
+  bool repairHour = false, repairMin = false, repairNums = false;
+  for (int16_t i = 0; i < secOldN; i++) {
+    int16_t px = secOldX[i], py = secOldY[i];
+    if (inPixelList(px, py, secNewX, secNewY, secNewN)) continue;
+    panelDrawPixel(px, py, COLOR_BG);
+    if (pixelTouchesHand(px, py, hourHand, HOUR_HAND_W / 2.0f + 1.0f))
+      repairHour = true;
+    if (pixelTouchesHand(px, py, minHand, MIN_HAND_W / 2.0f + 1.0f))
+      repairMin = true;
+    int16_t dx = px - CX, dy = py - CY;
+    if (dx * dx + dy * dy >= (NUMERAL_R - 16) * (NUMERAL_R - 16))
+      repairNums = true;
+  }
 
   if (hourMoved) {
     eraseHand(hourHand, HOUR_HAND_W);
+    repairHour = true;
   }
   if (minMoved) {
     eraseHand(minHand, MIN_HAND_W);
@@ -653,24 +768,36 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
     // lengthened minute hand from scraping the numerals, which is the
     // first thing anyone reaching for a different look will change.
     repairNumeralsNear(minHand.angle);
+    repairMin = true;
   }
 
   hourHand = newHour;
   minHand = newMin;
   secHand = newSec;
 
-  // The second hand's erase runs from its tail through the center out to
-  // its tip, so it can nick the other two hands anywhere along their
-  // length - and near the center it does so even at large angular
-  // separations, because a 3px-wide hand subtends ~19 degrees at r=6.
-  // Rather than guard that with an angle threshold (which is fiddly to
-  // get right and fails silently when it's wrong), just repaint both
-  // unconditionally: drawing is idempotent and costs under a thousand
-  // pixels a frame.
-  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
-  drawHub();
-  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  // Repainting has to preserve the stacking order a full repaint would
+  // produce - numerals, then hour, then minute, then hub, then the second
+  // hand. Restoring only the damaged item would put it on top of things
+  // that should cover it: repaint the hour hand alone where it crosses the
+  // minute hand and the minute hand ends up underneath, which is a real
+  // pixel difference. So any repair at all replays the whole stack. It is
+  // all additive drawing - no erasing - so it costs time, not flicker.
+  if (repairNums) repairNumeralsNear(oldSecAngle);
+  if (repairNums || repairHour || repairMin) {
+    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  }
+  drawHub(); // cheap, and in ticking mode the step is big enough to
+             // reach the hub, so this is not always redundant
+
+  // The whole hand is repainted, not just the newly-uncovered pixels: a
+  // numeral or hand repair above may have painted over pixels the two
+  // positions share, and repainting is idempotent anyway.
+  drawPixelList(secNewX, secNewY, secNewN, COLOR_SEC_HAND);
+
+  memcpy(secOldX, secNewX, secNewN * sizeof(int16_t));
+  memcpy(secOldY, secNewY, secNewN * sizeof(int16_t));
+  secOldN = secNewN;
 
   panelEndBatch();
 }
@@ -702,7 +829,7 @@ void setup() {
   paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
   paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintSecondHandFresh();
   panelEndBatch();
 }
 

@@ -12,6 +12,10 @@
 uint16_t g_fb[FB_W * FB_H];
 long g_pixelWrites = 0;
 int g_batchDepth = 0;
+uint16_t g_bgColor = 0xFFFF;
+uint8_t g_bgTouched[FB_W * FB_H];
+long g_panelOps = 0;
+int g_inFillRect = 0;
 double g_testNow = 0;
 SerialStub Serial;
 WiFiStub WiFi;
@@ -106,7 +110,7 @@ int main(int argc, char **argv) {
   paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
   paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintSecondHandFresh();
 
   writePng("preview.png");
   printf("wrote preview.png (%02d:%02d:%04.1f)\n", hh, mm, ss);

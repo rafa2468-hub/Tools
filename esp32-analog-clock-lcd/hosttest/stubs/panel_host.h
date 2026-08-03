@@ -13,19 +13,35 @@ static const int FB_W = 360, FB_H = 360;
 extern uint16_t g_fb[FB_W * FB_H];
 extern long g_pixelWrites;
 extern int g_batchDepth;
+// Marks every pixel painted in the background colour during a frame.
+// Cross-referenced afterwards against the second hand's final pixels: any
+// overlap is a pixel that went dark and then came back, i.e. flicker. The
+// trailing edge does not count - those pixels are meant to go dark.
+extern uint16_t g_bgColor;
+extern uint8_t g_bgTouched[];
+// One "op" = one address window on the real panel, which is what actually
+// costs time on this driver - not the pixel count.
+extern long g_panelOps;
+extern int g_inFillRect;
 
 inline void panelInit() {}
 
 inline void panelDrawPixel(int16_t x, int16_t y, uint16_t color) {
   g_pixelWrites++;
+  if (!g_inFillRect) g_panelOps++;
+  if (color == g_bgColor && x >= 0 && y >= 0 && x < FB_W && y < FB_H)
+    g_bgTouched[y * FB_W + x] = 1;
   if (x < 0 || y < 0 || x >= FB_W || y >= FB_H) return;
   g_fb[y * FB_W + x] = color;
 }
 
 inline void panelFillRect(int16_t x, int16_t y, int16_t w, int16_t h,
                           uint16_t color) {
+  g_panelOps++;
+  g_inFillRect++;
   for (int16_t j = 0; j < h; j++)
     for (int16_t i = 0; i < w; i++) panelDrawPixel(x + i, y + j, color);
+  g_inFillRect--;
 }
 
 inline void panelBeginBatch() { g_batchDepth++; }

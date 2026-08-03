@@ -214,19 +214,43 @@ for the UK, `EST5EDT,M3.2.0,M11.1.0` for US Eastern.
   the second hand's length that works out to roughly one frame every
   66 ms — the smoothest motion the panel can resolve, with no wasted
   redraws in between.
-- Erasing a hand means painting it in the background color, which damages
-  anything it was lying on top of. So each frame repairs what it
-  disturbed: the numeral the second hand was crossing (at most one, found
-  by angle), plus the other two hands and the center hub, which are
-  simply repainted unconditionally — drawing is idempotent, and at under
-  a thousand pixels it is cheaper than reasoning about whether they
-  overlapped.
-- The whole sweep costs about 28k pixel writes per second, roughly 2% of
-  what the SPI link can carry, so there is plenty of headroom.
+- **The second hand is never erased.** Consecutive sweep positions are
+  about 0.4° apart, so the two lines pick the same pixel everywhere inside
+  r≈70 and differ only towards the tip. Each frame collects the new
+  position's pixels, and only the old ones the new position does not reuse
+  get painted back to background. See "Why the hand is not erased" below.
+- Erasing anything damages whatever it was lying on. Each erased pixel is
+  tested against the hour hand, the minute hand and the numeral ring, and
+  only what was actually hit gets repaired. When anything is repaired the
+  whole stack is replayed in order — numerals, hour, minute, hub — because
+  restoring just the damaged item would put it on top of things that
+  should cover it.
+- The sweep costs about 27k pixel writes per second, but the number that
+  matters on this driver is ~4.5k address windows per second: each one is
+  ~6 `digitalWrite`s and 11 SPI byte transfers, so roughly 20µs. That is
+  under 10% of the time budget.
 - Time itself is supplied by the ESP32 core's SNTP client
   (`configTzTime`), which keeps the system clock synced in the background
   after the initial connection; `loop()` just reads it with
   `getLocalTime()`.
+
+### Why the hand is not erased
+
+The panel has no back buffer. A pixel painted to background and then
+repainted in the same frame is genuinely dark on the glass for however
+long that frame takes — and a frame here is milliseconds, with background
+Wi-Fi work occasionally stretching it.
+
+The first version erased the whole second hand, then repaired the numerals
+and both other hands, and only repainted the second hand at the very end.
+All ~165 of its pixels were therefore dark for the entire frame. Filmed at
+30fps, the hand was missing or half-drawn in 4 of 149 frames — twice
+absent outright. That is the stagger.
+
+Not erasing it fixes the cause rather than the odds: 2.6 pixels blink per
+frame now instead of 165, and `make` asserts that number stays low. The
+framebuffer comparison cannot catch this on its own — both versions end
+every frame with a correct image, and it only looks at end states.
 
 ## Tests
 

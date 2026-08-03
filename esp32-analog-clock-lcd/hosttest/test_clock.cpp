@@ -17,6 +17,10 @@
 uint16_t g_fb[FB_W * FB_H];
 long g_pixelWrites = 0;
 int g_batchDepth = 0;
+uint16_t g_bgColor = 0xFFFF;
+uint8_t g_bgTouched[FB_W * FB_H];
+long g_panelOps = 0;
+int g_inFillRect = 0;
 double g_testNow = 0;
 SerialStub Serial;
 WiFiStub WiFi;
@@ -47,7 +51,7 @@ static void renderReference(double when, std::vector<uint16_t> &out) {
   paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
   paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintSecondHandFresh();
   out.assign(g_fb, g_fb + FB_W * FB_H);
 }
 
@@ -72,7 +76,7 @@ static int sweepWorstDivergence(double from, double to, int stepMs) {
   paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
   paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
   drawHub();
-  paintHand(secHand, COLOR_SEC_HAND, SEC_HAND_W);
+  paintSecondHandFresh();
 
   int worst = 0;
   std::vector<uint16_t> inc, ref;
@@ -186,7 +190,50 @@ int main() {
           "panelBeginBatch/panelEndBatch balanced across frames");
   }
 
-  // ---- 5. cost per frame stays bounded
+  // ---- 5. the second hand must not blink
+  //
+  // The flicker guard, and the reason this sketch does not simply erase
+  // and repaint the hand. The panel has no back buffer, so a pixel painted
+  // to background and then repainted in the same frame is visibly dark for
+  // however long that frame takes. Erasing the whole hand made all ~165 of
+  // its pixels blink every frame; on video the hand vanished outright in
+  // ~3% of camera frames. Pixels the hand has moved off are not counted -
+  // those are supposed to go dark.
+  {
+    g_bgColor = COLOR_BG;
+    double base = timeAt(2, 14, 0.0);
+    g_testNow = base;
+    struct tm t; float s;
+    readClock(t, s);
+    computeHands(t, s, hourHand, minHand, secHand);
+    drawFace();
+    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
+    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+    drawHub();
+    paintSecondHandFresh();
+
+    long worst = 0, total = 0, frames = 0;
+    for (double now = base; now < base + 30.0; now += 0.02) {
+      g_testNow = now;
+      Hand ps = secHand;
+      memset(g_bgTouched, 0, sizeof(g_bgTouched));
+      loop();
+      if (sameHand(ps, secHand)) continue;   // hand did not move
+      long blinked = 0;
+      for (int16_t i = 0; i < secOldN; i++) {
+        if (g_bgTouched[secOldY[i] * FB_W + secOldX[i]]) blinked++;
+      }
+      worst = std::max(worst, blinked);
+      total += blinked;
+      frames++;
+    }
+    printf("      second-hand pixels that blinked: %.1f avg, %ld worst"
+           "  (hand is ~165px)\n", frames ? (double)total / frames : 0.0, worst);
+    check(worst <= 25, "second hand does not blink wholesale each frame");
+    g_bgColor = 0xFFFF;
+  }
+
+  // ---- 6. cost per frame stays bounded
   {
     g_testNow = timeAt(8, 45, 0.0);
     struct tm t; float s;
@@ -194,14 +241,21 @@ int main() {
     computeHands(t, s, hourHand, minHand, secHand);
     drawFace();
     g_pixelWrites = 0;
+    g_panelOps = 0;
     double from = timeAt(8, 45, 0.0);
     for (double now = from; now < from + 60.0; now += 0.02) {
       g_testNow = now;
       loop();
     }
     long perSec = g_pixelWrites / 60;
-    printf("      ~%ld pixel writes/second during sweep\n", perSec);
+    long opsSec = g_panelOps / 60;
+    printf("      ~%ld pixel writes/second, ~%ld address windows/second\n",
+           perSec, opsSec);
     check(perSec < 60000, "sweep stays within a sane pixel budget");
+    // Address windows are the real cost on this driver: roughly 6
+    // digitalWrites and 11 SPI byte transfers each, call it 20us. Much
+    // past 10k/s and the sweep cannot keep up.
+    check(opsSec < 10000, "sweep stays within a sane address-window budget");
   }
 
   printf("\n%s\n", failures ? "FAILURES" : "all checks passed");
