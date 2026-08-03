@@ -138,23 +138,65 @@ Three defenses are layered against this:
    the radio off removes the suspected cause rather than just the
    symptom.
 
-4. **Safe write mode** (`PANEL_SAFE_WRITES`, default `1`) — every pixel
-   goes through the vendor driver's own `drawPixel`, the one write
-   pattern this panel has demonstrably executed reliably. The faster
-   streaming path (one address window per rectangle, pixels in bulk) is
-   kept behind the flag: it is conventional and the boot self-test passes
-   through it, but it is also the only part of the sketch the vendor demo
-   never exercised, and the observed residue pattern — streamed erases
-   failing while per-pixel erases keep working — points at it. Boot's
-   background fill takes ~3s in safe mode; everything else fits the frame
-   budget with room to spare.
+4. **Safe write mode** (`PANEL_SAFE_WRITES`, default `1`) — **this is
+   what actually fixed the specks on hardware.** Every pixel goes through
+   the vendor driver's own `drawPixel`: a full address window per pixel,
+   CS toggled per byte. The faster streaming path (one window per
+   rectangle, pixels pushed in bulk) is kept behind the flag but is
+   *known to fail on this panel*. The diagnosis came from a user
+   observation that split the two paths cleanly: the minute hand — erased
+   via streaming — left residue, while the second hand — erased per pixel
+   — kept working and visibly cleaned that residue up as it swept past.
+   The scrub had been failing for the same reason: its own erases used
+   the streaming path.
 
-This layering makes the remaining diagnosis binary. **If specks persist
-in safe mode**, the write pattern is exonerated and the cause is
-physical: fit a 100–470µF capacitor across the display's VCC/GND (the
-single most effective fix for supply dips), shorten the jumpers, and try
-`PANEL_SPI_HZ` at 1MHz — the vendor demo's exact speed. **If safe mode
-is clean**, the streaming path is the culprit and stays off.
+Turning safe mode on has a consequence worth understanding: **every pixel
+now costs real time**, so the renderer must not touch pixels it does not
+have to. See below.
+
+## Never blank a pixel you are about to repaint
+
+The single most important rule in this renderer, learned the hard way
+three separate times.
+
+The panel has no back buffer. A pixel painted to background and then
+repainted in the same frame is *genuinely dark on the glass* for however
+long that frame takes — microseconds if it is the very next write,
+milliseconds if a hundred other pixels come in between. In safe write
+mode those milliseconds are real, and the eye sees them as flicker.
+
+So nothing here is ever blanked-then-repaired. `restoreStackPixel()`
+writes each vacated pixel **straight to its final colour**, walking the
+stack: second hand, hub, minute, hour, then the static face (numeral ink
+included, via an exact glyph lookup — no cell repaints). Every consumer
+uses it: the second hand's trailing edge, the thick hands' vacated
+slivers, and the scrub's wedge.
+
+Three flicker bugs all had the same shape, and each was caught only after
+it shipped:
+
+- **The whole second hand** erased at the top of the frame and repainted
+  at the bottom — dark for the entire frame, ~3% of camera frames caught
+  it missing outright.
+- **The thick hands** erased and repainted wholesale on every step (and
+  for two retry frames after), putting a ~30ms dark window on the minute
+  hand thirteen times a minute.
+- **Angle-threshold damage guesses** (`if the bearing is within 25°,
+  repaint that hand`) — wrong near the hub, where every hand overlaps
+  whatever the bearing, leaving inner pixels dark until something else
+  happened to repaint them. Exact per-pixel tests replaced all of them.
+
+The thick hands are tracked as the exact scanline runs they were painted
+with (`HandRuns`), so a step restores precisely the vacated pixels and
+repaints the hand additively — painting can never blank anything, so a
+full repaint costs time but cannot flicker. `make` asserts blink is zero
+for all three hands; the mutation that restores blank-then-repaint fails
+it at 181px on the minute hand.
+
+**If specks ever return in safe mode**, the write pattern is exonerated
+and the cause is physical: fit a 100–470µF capacitor across the display's
+VCC/GND (the single most effective fix for supply dips), shorten the
+jumpers, and try `PANEL_SPI_HZ` at 1MHz — the vendor demo's exact speed.
 
 ### If the image appears but looks wrong
 

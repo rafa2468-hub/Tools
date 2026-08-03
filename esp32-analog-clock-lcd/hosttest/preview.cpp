@@ -109,8 +109,10 @@ int main(int argc, char **argv) {
   readClock(now, s);
   computeHands(now, s, hourHand, minHand, secHand);
   drawFace();
-  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  handQuadRuns(hourHand, HOUR_HAND_W, hourRuns);
+  handQuadRuns(minHand, MIN_HAND_W, minRuns);
+  paintRuns(hourRuns, COLOR_HOUR_HAND);
+  paintRuns(minRuns, COLOR_MIN_HAND);
   drawHub();
   paintSecondHandFresh();
 

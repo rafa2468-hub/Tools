@@ -50,8 +50,10 @@ static void renderReference(double when, std::vector<uint16_t> &out) {
   readClock(t, s);
   computeHands(t, s, hourHand, minHand, secHand);
   drawFace();
-  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  handQuadRuns(hourHand, HOUR_HAND_W, hourRuns);
+  handQuadRuns(minHand, MIN_HAND_W, minRuns);
+  paintRuns(hourRuns, COLOR_HOUR_HAND);
+  paintRuns(minRuns, COLOR_MIN_HAND);
   drawHub();
   paintSecondHandFresh();
   out.assign(g_fb, g_fb + FB_W * FB_H);
@@ -75,8 +77,10 @@ static int sweepWorstDivergence(double from, double to, int stepMs) {
   readClock(t, s);
   computeHands(t, s, hourHand, minHand, secHand);
   drawFace();
-  paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-  paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+  handQuadRuns(hourHand, HOUR_HAND_W, hourRuns);
+  handQuadRuns(minHand, MIN_HAND_W, minRuns);
+  paintRuns(hourRuns, COLOR_HOUR_HAND);
+  paintRuns(minRuns, COLOR_MIN_HAND);
   drawHub();
   paintSecondHandFresh();
 
@@ -209,8 +213,10 @@ int main() {
     readClock(t, s);
     computeHands(t, s, hourHand, minHand, secHand);
     drawFace();
-    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+    handQuadRuns(hourHand, HOUR_HAND_W, hourRuns);
+    handQuadRuns(minHand, MIN_HAND_W, minRuns);
+    paintRuns(hourRuns, COLOR_HOUR_HAND);
+    paintRuns(minRuns, COLOR_MIN_HAND);
     drawHub();
     paintSecondHandFresh();
 
@@ -275,8 +281,10 @@ int main() {
     readClock(t, s);
     computeHands(t, s, hourHand, minHand, secHand);
     drawFace();
-    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+    handQuadRuns(hourHand, HOUR_HAND_W, hourRuns);
+    handQuadRuns(minHand, MIN_HAND_W, minRuns);
+    paintRuns(hourRuns, COLOR_HOUR_HAND);
+    paintRuns(minRuns, COLOR_MIN_HAND);
     drawHub();
     paintSecondHandFresh();
 
@@ -318,8 +326,10 @@ int main() {
     readClock(t, s);
     computeHands(t, s, hourHand, minHand, secHand);
     drawFace();
-    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+    handQuadRuns(hourHand, HOUR_HAND_W, hourRuns);
+    handQuadRuns(minHand, MIN_HAND_W, minRuns);
+    paintRuns(hourRuns, COLOR_HOUR_HAND);
+    paintRuns(minRuns, COLOR_MIN_HAND);
     drawHub();
     paintSecondHandFresh();
 
@@ -385,8 +395,10 @@ int main() {
     readClock(t, s);
     computeHands(t, s, hourHand, minHand, secHand);
     drawFace();
-    paintHand(hourHand, COLOR_HOUR_HAND, HOUR_HAND_W);
-    paintHand(minHand, COLOR_MIN_HAND, MIN_HAND_W);
+    handQuadRuns(hourHand, HOUR_HAND_W, hourRuns);
+    handQuadRuns(minHand, MIN_HAND_W, minRuns);
+    paintRuns(hourRuns, COLOR_HOUR_HAND);
+    paintRuns(minRuns, COLOR_MIN_HAND);
     drawHub();
     paintSecondHandFresh();
 
@@ -420,6 +432,60 @@ int main() {
     printf("      180 planted specks around the dial; after 15 min: "
            "%d px still wrong\n", diff);
     check(diff == 0, "scrub reaches every bearing (no resonance shadow)");
+  }
+
+  // ---- 10. the hour and minute hands must not blink either
+  //
+  // The second hand had a blink guard from early on; these did not, and
+  // that gap shipped. In safe write mode every pixel costs real time, so
+  // erasing a whole ~375px minute hand and repainting it left it dark for
+  // tens of milliseconds - thirteen times a minute, plus the retry frames
+  // after each step. On video both thick hands visibly flickered. They
+  // are now stepped differentially: only the vacated sliver is restored
+  // and only the newly covered pixels are inked, so the hundreds of
+  // shared pixels are never touched.
+  {
+    g_bgColor = COLOR_BG;
+    double base = timeAt(3, 41, 0.0);
+    g_testNow = base;
+    struct tm t; float s;
+    readClock(t, s);
+    computeHands(t, s, hourHand, minHand, secHand);
+    drawFace();
+    handQuadRuns(hourHand, HOUR_HAND_W, hourRuns);
+    handQuadRuns(minHand, MIN_HAND_W, minRuns);
+    paintRuns(hourRuns, COLOR_HOUR_HAND);
+    paintRuns(minRuns, COLOR_MIN_HAND);
+    drawHub();
+    paintSecondHandFresh();
+
+    long worstMin = 0, worstHour = 0, minSteps = 0;
+    for (double now = base; now < base + 120.0; now += 0.02) {
+      g_testNow = now;
+      Hand pm = minHand;
+      memset(g_bgTouched, 0, sizeof(g_bgTouched));
+      loop();
+      // How many pixels of the hand's *current* shape went dark this
+      // frame? Those are pixels that blinked; the vacated sliver is not
+      // part of the current shape and so is correctly excluded.
+      long blinkMin = 0, blinkHour = 0;
+      for (int16_t i = 0; i < minRuns.n; i++)
+        for (int16_t x = minRuns.rx0[i]; x <= minRuns.rx1[i]; x++)
+          if (g_bgTouched[minRuns.ry[i] * FB_W + x]) blinkMin++;
+      for (int16_t i = 0; i < hourRuns.n; i++)
+        for (int16_t x = hourRuns.rx0[i]; x <= hourRuns.rx1[i]; x++)
+          if (g_bgTouched[hourRuns.ry[i] * FB_W + x]) blinkHour++;
+      worstMin = std::max(worstMin, blinkMin);
+      worstHour = std::max(worstHour, blinkHour);
+      if (!sameHand(pm, minHand)) minSteps++;
+    }
+    printf("      over 2 min (%ld minute-hand steps): worst blink "
+           "minute %ld px, hour %ld px  (hands are ~375/~425px)\n",
+           minSteps, worstMin, worstHour);
+    check(minSteps > 0, "minute hand actually stepped during the window");
+    check(worstMin <= 40 && worstHour <= 40,
+          "hour and minute hands are not blanked when they step");
+    g_bgColor = 0xFFFF;
   }
 
   printf("\n%s\n", failures ? "FAILURES" : "all checks passed");

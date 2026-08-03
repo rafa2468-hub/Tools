@@ -14,6 +14,9 @@
 // clock falls back to the firmware's compile timestamp and free-runs from
 // there so it still displays something useful.
 
+#ifdef DIAGPHASE
+extern int g_phase;
+#endif
 #include <WiFi.h>
 #include <time.h>
 #include <sys/time.h>
@@ -305,7 +308,6 @@ static const int16_t SEC_HAND_TAIL = 20; // short tail past the center
 static const uint8_t HOUR_HAND_W = 5;
 static const uint8_t MIN_HAND_W = 3;
 static const uint8_t SEC_HAND_W = 1;
-static const int16_t HUB_R = 6;
 
 #define RGB565(r, g, b) \
   ((uint16_t)((((r)&0xF8) << 8) | (((g)&0xFC) << 3) | (((b)&0xF8) >> 3)))
@@ -760,7 +762,7 @@ static void eraseRunsDiff(const HandRuns &oldR, const HandRuns &newR,
   }
 }
 
-static void drawHub() { gfxFillCircle(CX, CY, HUB_R, COLOR_HUB); }
+static void drawHub() { gfxFillCircle(CX, CY, 6, COLOR_HUB); }
 
 // ---------------------------------------------------------------------
 // Static face (drawn once)
@@ -828,51 +830,17 @@ static void restoreFacePixel(int16_t x, int16_t y) {
   panelDrawPixel(x, y, numeralInkAt(x, y) ? COLOR_NUMERAL : COLOR_BG);
 }
 
-static bool pixelInRuns(int16_t x, int16_t y, const HandRuns &r) {
-  for (int16_t i = 0; i < r.n; i++) {
-    if (r.ry[i] == y) return x >= r.rx0[i] && x <= r.rx1[i];
-  }
-  return false;
-}
-
-// Paints one vacated pixel with whatever should be visible there, going
-// down the stack: second hand, hub, minute, hour, then the static face.
-//
-// This is the whole anti-flicker principle in one function. Restoring to
-// background and then repainting whatever was damaged on top leaves those
-// pixels dark for the rest of the frame - which in safe write mode is
-// milliseconds, and is precisely what made the hands flicker where the
-// second hand swept along them. Writing the final colour immediately
-// means a pixel is never wrong even for one write, and it removes the
-// need for damage flags and stacking-order repaints entirely.
-static void restoreStackPixel(int16_t x, int16_t y, const int16_t *sx,
-                               const int16_t *sy, int16_t sn) {
-  if (inPixelList(x, y, sx, sy, sn)) {
-    panelDrawPixel(x, y, COLOR_SEC_HAND);
-    return;
-  }
-  int16_t dx = x - CX, dy = y - CY;
-  if (dx * dx + dy * dy <= HUB_R * HUB_R) {
-    panelDrawPixel(x, y, COLOR_HUB);
-    return;
-  }
-  if (pixelInRuns(x, y, minRuns)) {
-    panelDrawPixel(x, y, COLOR_MIN_HAND);
-    return;
-  }
-  if (pixelInRuns(x, y, hourRuns)) {
-    panelDrawPixel(x, y, COLOR_HOUR_HAND);
-    return;
-  }
-  restoreFacePixel(x, y);
-}
-
-// Restores a sliver's pixels straight to their final colours.
-static void restoreSliver(const Sliver &s, const int16_t *sx,
-                           const int16_t *sy, int16_t sn) {
+// Restores a sliver's pixels and reports whether any of them lay on the
+// given hands, so the caller knows which hands need repainting on top.
+static void restoreSliver(const Sliver &s, const Hand &hourRef,
+                           const Hand &minRef, bool &hitHour, bool &hitMin) {
   for (int16_t i = 0; i < s.n; i++) {
     for (int16_t x = s.x0[i]; x <= s.x1[i]; x++) {
-      restoreStackPixel(x, s.y[i], sx, sy, sn);
+      restoreFacePixel(x, s.y[i]);
+      if (pixelTouchesHand(x, s.y[i], hourRef, HOUR_HAND_W / 2.0f + 1.0f))
+        hitHour = true;
+      if (pixelTouchesHand(x, s.y[i], minRef, MIN_HAND_W / 2.0f + 1.0f))
+        hitMin = true;
     }
   }
 }
@@ -1086,74 +1054,115 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
   collectLine(newSec.tx, newSec.ty, newSec.x, newSec.y, secNewX, secNewY,
               secNewN);
 
-  hourHand = newHour;
-  minHand = newMin;
-  secHand = newSec;
-
-  // Thick hands first, so hourRuns/minRuns describe the final positions
-  // before anything consults them to decide a pixel's colour.
-  //
-  // A step restores exactly the vacated pixels (old runs minus new) and
-  // then paints the hand whole. Painting is additive - it never blanks
-  // anything - so a full repaint costs time but cannot flicker, and it
-  // gives the thick hands the same dropped-write healing the second hand
-  // gets. The vacated sliver is re-restored for ERASE_RETRIES further
-  // frames; it is disjoint from the hand's own pixels by construction, so
-  // those retries darken nothing.
-  static HandRuns scratchRuns;
-  if (hourMoved) {
-    handQuadRuns(newHour, HOUR_HAND_W, scratchRuns);
-    eraseRunsDiff(hourRuns, scratchRuns, hourSliver);
-    hourRuns = scratchRuns;
-    hourSliverLeft = ERASE_RETRIES;
-  }
-  if (minMoved) {
-    handQuadRuns(newMin, MIN_HAND_W, scratchRuns);
-    eraseRunsDiff(minRuns, scratchRuns, minSliver);
-    minRuns = scratchRuns;
-    minSliverLeft = ERASE_RETRIES;
-  }
-  if (hourMoved || hourSliverLeft > 0) {
-    restoreSliver(hourSliver, secNewX, secNewY, secNewN);
-    if (!hourMoved) hourSliverLeft--;
-  }
-  if (minMoved || minSliverLeft > 0) {
-    restoreSliver(minSliver, secNewX, secNewY, secNewN);
-    if (!minMoved) minSliverLeft--;
-  }
-  // Stacking: the minute hand sits above the hour hand, and their quads
-  // always overlap near the hub - so painting the hour hand puts hour ink
-  // over minute pixels and the minute hand has to follow it. Both are
-  // additive, so this costs writes but can never blank anything.
-  if (hourMoved) paintRuns(hourRuns, COLOR_HOUR_HAND);
-  if (hourMoved || minMoved) paintRuns(minRuns, COLOR_MIN_HAND);
-
-  // The second hand's trailing edge. Each vacated pixel goes straight to
-  // its final colour - numeral ink, the minute or hour hand it was lying
-  // on, the hub - never to background followed by a repaint. That is what
-  // stops the thick hands flickering wherever the sweep grazes them.
+  // Restore the face under every pixel the second hand vacates - the
+  // trailing edge of the sweep. restoreFacePixel puts back numeral ink
+  // where the hand was crossing a numeral, so nothing here ever needs a
+  // whole numeral cell repainted. Damage flags are exact, per pixel:
+  // an angle threshold was tried once and was wrong near the centre,
+  // where a 3px hand subtends ~19 degrees at r=6.
+  bool paintHour = false, paintMin = false;
   int16_t thisEraseN = 0;
   for (int16_t i = 0; i < secOldN; i++) {
     int16_t px = secOldX[i], py = secOldY[i];
     if (inPixelList(px, py, secNewX, secNewY, secNewN)) continue;
-    restoreStackPixel(px, py, secNewX, secNewY, secNewN);
+    #ifdef DIAGPHASE
+    g_phase=1;
+    #endif
+    restoreFacePixel(px, py);
     thisEraseX[thisEraseN] = px;
     thisEraseY[thisEraseN] = py;
     thisEraseN++;
+    if (pixelTouchesHand(px, py, newHour, HOUR_HAND_W / 2.0f + 1.0f))
+      paintHour = true;
+    if (pixelTouchesHand(px, py, newMin, MIN_HAND_W / 2.0f + 1.0f))
+      paintMin = true;
   }
 
-  // Restore the last few frames' discards again - insurance against the
-  // panel dropping a write, since a dropped restore is the one that
-  // leaves a permanent mark.
+  // Restore the last few frames' discards again. Insurance against the
+  // panel dropping a write: a dropped restore is the one that leaves a
+  // permanent mark, so each discard gets several tries across separate
+  // frames.
   for (int8_t g = 0; g < ERASE_RETRIES; g++) {
     for (int16_t i = 0; i < eraseGenN[g]; i++) {
       int16_t px = eraseGenX[g][i], py = eraseGenY[g][i];
+      // Guard against the clock stepping backwards (an NTP correction can
+      // do it) and the hand revisiting a pixel we are about to blank.
       if (inPixelList(px, py, secNewX, secNewY, secNewN)) continue;
-      restoreStackPixel(px, py, secNewX, secNewY, secNewN);
+      #ifdef DIAGPHASE
+      g_phase=2;
+      #endif
+      restoreFacePixel(px, py);
+      if (pixelTouchesHand(px, py, newHour, HOUR_HAND_W / 2.0f + 1.0f))
+        paintHour = true;
+      if (pixelTouchesHand(px, py, newMin, MIN_HAND_W / 2.0f + 1.0f))
+        paintMin = true;
     }
   }
 
-  drawHub();
+  // The hour and minute hands move differentially: a step restores the
+  // face under exactly the vacated pixels (old runs minus new runs) and
+  // paints the newly covered ones, leaving the hundreds of shared pixels
+  // untouched and lit. An earlier version erased and repainted the whole
+  // hand on a step and for two retry frames after it - correct, but in
+  // safe write mode that put a ~30ms dark window on the minute hand
+  // thirteen times a minute, which reads as flicker. The vacated sliver
+  // is re-restored for ERASE_RETRIES further frames as dropped-write
+  // insurance; it is disjoint from the hand's current pixels by
+  // construction, so those retries darken nothing.
+  static HandRuns scratchRuns;
+  if (hourMoved) {
+    #ifdef DIAGPHASE
+    g_phase=3;
+    #endif
+    handQuadRuns(newHour, HOUR_HAND_W, scratchRuns);
+    eraseRunsDiff(hourRuns, scratchRuns, hourSliver);
+    restoreSliver(hourSliver, newHour, newMin, paintHour, paintMin);
+    paintHour = true; // newly covered pixels need ink
+    hourRuns = scratchRuns;
+    hourSliverLeft = ERASE_RETRIES;
+  } else if (hourSliverLeft > 0) {
+    #ifdef DIAGPHASE
+    g_phase=4;
+    #endif
+    bool dummyH = false;
+    restoreSliver(hourSliver, newHour, newMin, dummyH, paintMin);
+    hourSliverLeft--;
+  }
+  if (minMoved) {
+    #ifdef DIAGPHASE
+    g_phase=5;
+    #endif
+    handQuadRuns(newMin, MIN_HAND_W, scratchRuns);
+    eraseRunsDiff(minRuns, scratchRuns, minSliver);
+    restoreSliver(minSliver, newHour, newMin, paintHour, paintMin);
+    paintMin = true;
+    minRuns = scratchRuns;
+    minSliverLeft = ERASE_RETRIES;
+  } else if (minSliverLeft > 0) {
+    #ifdef DIAGPHASE
+    g_phase=6;
+    #endif
+    bool dummyM = false;
+    restoreSliver(minSliver, newHour, newMin, paintHour, dummyM);
+    minSliverLeft--;
+  }
+
+  hourHand = newHour;
+  minHand = newMin;
+  secHand = newSec;
+
+  // Stacking order on repaint: hour under minute under hub under second.
+  // Repainting the hour hand therefore forces the minute hand too - their
+  // quads always overlap near the hub, and hour ink laid down alone would
+  // sit on top of minute pixels it should be under. (The converse is
+  // fine: minute is already above hour.) Numerals never need replaying
+  // here - restoreFacePixel already put their ink back pixel-for-pixel
+  // wherever an erase crossed them.
+  if (paintHour) paintMin = true;
+  if (paintHour) paintRuns(hourRuns, COLOR_HOUR_HAND);
+  if (paintMin) paintRuns(minRuns, COLOR_MIN_HAND);
+  drawHub(); // cheap, and the second hand always crosses it
+
   // The whole second hand, every frame - repainting every pixel is what
   // lets a dropped write heal instead of becoming permanent.
   drawPixelList(secNewX, secNewY, secNewN, COLOR_SEC_HAND);
@@ -1243,18 +1252,41 @@ static void scrubTick() {
   // second hand is protected by the keep-out, and its only possible
   // overlap with the wedge is inside the hub, which is repainted here in
   // the same colour.
-  // Each wedge pixel is written straight to its final colour, so nothing
-  // is ever transiently dark and no repaint or damage flag is needed. An
-  // earlier version blanked the wedge and then repainted whichever hands
-  // an angle threshold guessed it had hit - wrong near the hub, where
-  // every hand overlaps whatever the bearing, which left their inner
-  // pixels dark until something else happened to repaint them.
+  // Which hands the wedge actually damaged is decided per pixel, not by
+  // an angle threshold. Every hand radiates from the hub, so near the
+  // centre the wedge overlaps all of them whatever its bearing - an angle
+  // guard gets that wrong and leaves the inner part of a hand blanked
+  // until something else repaints it, which is exactly the flicker this
+  // whole scheme exists to avoid. (The same trap was documented for the
+  // second hand's erase and then walked into again here.)
+  #ifdef DIAGPHASE
+  g_phase=7;
+  #endif
   static HandRuns wedge;
   handQuadRuns(v, SCRUB_W, wedge);
+  bool ph = false, pm = false, ps = false;
   for (int16_t i = 0; i < wedge.n; i++) {
     for (int16_t x = wedge.rx0[i]; x <= wedge.rx1[i]; x++) {
-      restoreStackPixel(x, wedge.ry[i], secOldX, secOldY, secOldN);
+      int16_t y = wedge.ry[i];
+      restoreFacePixel(x, y);
+      if (pixelTouchesHand(x, y, hourHand, HOUR_HAND_W / 2.0f + 1.0f))
+        ph = true;
+      if (pixelTouchesHand(x, y, minHand, MIN_HAND_W / 2.0f + 1.0f))
+        pm = true;
+      if (!ps && inPixelList(x, y, secOldX, secOldY, secOldN)) ps = true;
     }
+  }
+
+  // Stacking order, and hour forces minute for the same reason as in
+  // renderHands: their quads overlap near the hub.
+  if (ph) pm = true;
+  if (ph) paintRuns(hourRuns, COLOR_HOUR_HAND);
+  if (pm) paintRuns(minRuns, COLOR_MIN_HAND);
+  drawHub();
+  // The second hand sits on top of everything, so it needs replacing if
+  // the wedge touched it or if a repainted hand covered it.
+  if (ps || pm || ph) {
+    drawPixelList(secOldX, secOldY, secOldN, COLOR_SEC_HAND);
   }
 
   panelEndBatch();
