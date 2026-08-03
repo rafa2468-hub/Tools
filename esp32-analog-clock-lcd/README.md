@@ -138,10 +138,23 @@ Three defenses are layered against this:
    the radio off removes the suspected cause rather than just the
    symptom.
 
-If specks still appear faster than the scrub clears them, the remaining
-levers are physical: a 100–470µF capacitor across the display's VCC/GND
-(the most effective single fix for supply dips), shorter jumpers, and a
-lower `PANEL_SPI_HZ` (currently 10MHz; the vendor demo ran at 1MHz).
+4. **Safe write mode** (`PANEL_SAFE_WRITES`, default `1`) — every pixel
+   goes through the vendor driver's own `drawPixel`, the one write
+   pattern this panel has demonstrably executed reliably. The faster
+   streaming path (one address window per rectangle, pixels in bulk) is
+   kept behind the flag: it is conventional and the boot self-test passes
+   through it, but it is also the only part of the sketch the vendor demo
+   never exercised, and the observed residue pattern — streamed erases
+   failing while per-pixel erases keep working — points at it. Boot's
+   background fill takes ~3s in safe mode; everything else fits the frame
+   budget with room to spare.
+
+This layering makes the remaining diagnosis binary. **If specks persist
+in safe mode**, the write pattern is exonerated and the cause is
+physical: fit a 100–470µF capacitor across the display's VCC/GND (the
+single most effective fix for supply dips), shorten the jumpers, and try
+`PANEL_SPI_HZ` at 1MHz — the vendor demo's exact speed. **If safe mode
+is clean**, the streaming path is the culprit and stays off.
 
 ### If the image appears but looks wrong
 

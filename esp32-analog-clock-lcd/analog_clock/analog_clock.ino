@@ -176,12 +176,37 @@ static void panelInit() {
   SPI.endTransaction();
 }
 
+// Write-path selection.
+//
+// 1 (safe): every pixel goes through the vendor driver's own drawPixel -
+//   full address window per pixel, CS toggled around every byte, exactly
+//   the write pattern the module's demo used and the one thing this panel
+//   has demonstrably executed reliably. Slower, but measured against the
+//   frame budget it still fits several times over; the visible cost is
+//   the boot background fill taking ~2-3s.
+//
+// 0 (fast): one address window per rectangle, pixels streamed in bulk
+//   with CS held low. This is how SPI TFTs are conventionally driven and
+//   the boot self-test passes through it - but it is also the one part of
+//   this sketch the vendor demo never exercised, and residue observed on
+//   the running clock (unerased trailing pixels of the minute hand,
+//   specks recurring in fixed zones) is consistent with this path
+//   intermittently failing under load while per-pixel writes keep
+//   working: the second hand, whose erase is per-pixel, visibly cleans up
+//   after the streaming erases. Until the streaming path is proven clean
+//   on this hardware, safe mode is the default.
+#define PANEL_SAFE_WRITES 1
+
 static void panelDrawPixel(int16_t x, int16_t y, uint16_t color) {
   if (x < 0 || y < 0 || x >= PANEL_W || y >= PANEL_H) return;
+#if PANEL_SAFE_WRITES
+  drawPixel(x, y, color); // the vendor driver's own, known-good on glass
+#else
   panelOpenWindow(x, y, x, y);
   SPI.transfer(color >> 8);
   SPI.transfer(color & 0xFF);
   panelCloseWindow();
+#endif
 }
 
 static void panelFillRect(int16_t x, int16_t y, int16_t w, int16_t h,
@@ -194,6 +219,13 @@ static void panelFillRect(int16_t x, int16_t y, int16_t w, int16_t h,
   if (y + h > PANEL_H) h = PANEL_H - y;
   if (w <= 0 || h <= 0) return;
 
+#if PANEL_SAFE_WRITES
+  for (int16_t j = 0; j < h; j++) {
+    for (int16_t i = 0; i < w; i++) {
+      panelDrawPixel(x + i, y + j, color);
+    }
+  }
+#else
   // One window for the whole rectangle, then stream. Sending a prefilled
   // buffer in bulk rather than two SPI.transfer() calls per pixel is what
   // makes the 129,600-pixel background fill quick rather than glacial.
@@ -210,6 +242,7 @@ static void panelFillRect(int16_t x, int16_t y, int16_t w, int16_t h,
     remaining -= chunk;
   }
   panelCloseWindow();
+#endif
 }
 
 // One SPI transaction per frame rather than one per primitive.
@@ -515,6 +548,12 @@ static int16_t eraseGenX[ERASE_RETRIES][SEC_PX_MAX];
 static int16_t eraseGenY[ERASE_RETRIES][SEC_PX_MAX];
 static int16_t eraseGenN[ERASE_RETRIES] = {0};
 static int16_t thisEraseX[SEC_PX_MAX], thisEraseY[SEC_PX_MAX];
+
+// Vacated hour/minute positions being re-erased over the next frames -
+// the same insurance as the second hand's generations, but a whole hand
+// shape at a time since those hands step rarely.
+static Hand prevHourErase, prevMinErase;
+static int8_t hourEraseLeft = 0, minEraseLeft = 0;
 
 // Same Bresenham as gfxDrawLine, but collecting instead of drawing, so
 // that what gets erased and what gets drawn can never disagree.
@@ -913,8 +952,22 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
     }
   }
 
+  // The hour and minute hands get the same dropped-write insurance as the
+  // second hand's discards: the position vacated by a step is re-erased on
+  // the next ERASE_RETRIES frames as well. Residue was observed trailing
+  // the minute hand on hardware - erase writes the panel lost - and a
+  // single erase has no second chance without this. Each re-erase blanks
+  // pixels the barely-moved hand still occupies, so it forces a repaint of
+  // that hand in the same frame; the repaint immediately follows, keeping
+  // any dark interval to microseconds.
   if (hourMoved) {
     eraseHand(hourHand, HOUR_HAND_W);
+    prevHourErase = hourHand;
+    hourEraseLeft = ERASE_RETRIES;
+    repairHour = true;
+  } else if (hourEraseLeft > 0) {
+    eraseHand(prevHourErase, HOUR_HAND_W);
+    hourEraseLeft--;
     repairHour = true;
   }
   if (minMoved) {
@@ -924,6 +977,13 @@ static void renderHands(const Hand &newHour, const Hand &newMin,
     // lengthened minute hand from scraping the numerals, which is the
     // first thing anyone reaching for a different look will change.
     repairNumeralsNear(minHand.angle);
+    prevMinErase = minHand;
+    minEraseLeft = ERASE_RETRIES;
+    repairMin = true;
+  } else if (minEraseLeft > 0) {
+    eraseHand(prevMinErase, MIN_HAND_W);
+    repairNumeralsNear(prevMinErase.angle);
+    minEraseLeft--;
     repairMin = true;
   }
 
