@@ -38,17 +38,29 @@ public class NativePlayerPlugin extends Plugin {
     private MediaPlayer player;
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest; // API 26+
+    private boolean hasFocus = false;
     private boolean playWhenReady = false;
     private boolean prepared = false;
     private float volume = 1.0f;
     private boolean resumeOnFocusGain = false;
+    private android.net.wifi.WifiManager.WifiLock wifiLock;
+    private String currentSource = "";
 
     // The playback queue lives here so tracks auto-advance even while the screen
     // is off (the web layer is suspended then and can't drive the "next track"
-    // logic). Sources are http(s) URLs (Jellyfin) or local file paths.
+    // logic). Sources are http(s) URLs (Jellyfin) or local file paths. The
+    // parallel metadata lists let us update the lock screen / car display
+    // natively on advance — the web layer can't do it while suspended.
     private final java.util.List<String> queue = new java.util.ArrayList<>();
+    private final java.util.List<String> titles = new java.util.ArrayList<>();
+    private final java.util.List<String> artists = new java.util.ArrayList<>();
+    private final java.util.List<String> albums = new java.util.ArrayList<>();
     private int queueIndex = -1;
     private String repeatMode = "off"; // off | all | one
+    // Consecutive failures while auto-advancing; caps how far we'll skip through
+    // a broken queue (e.g. server unreachable) before giving up.
+    private int errorStreak = 0;
+    private static final int MAX_ERROR_SKIPS = 3;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable ticker;
@@ -119,31 +131,41 @@ public class NativePlayerPlugin extends Plugin {
         if (ticker != null) { handler.removeCallbacks(ticker); ticker = null; }
     }
 
+    // Request audio focus ONCE and hold it for the whole listening session.
+    // Rebuilding an AudioFocusRequest on every track (as this used to do)
+    // orphans the previous request, and the stale request can deliver a focus
+    // LOSS to our listener mid-playback — which showed up as random pauses.
     private int requestFocus() {
         if (audioManager == null) return AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+        if (hasFocus) return AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
         try {
+            int res;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                AudioAttributes attrs = new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build();
-                focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                    .setAudioAttributes(attrs)
-                    .setOnAudioFocusChangeListener(focusListener, handler)
-                    .setWillPauseWhenDucked(false)
-                    .build();
-                return audioManager.requestAudioFocus(focusRequest);
+                if (focusRequest == null) {
+                    AudioAttributes attrs = new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build();
+                    focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                        .setAudioAttributes(attrs)
+                        .setOnAudioFocusChangeListener(focusListener, handler)
+                        .setWillPauseWhenDucked(false)
+                        .build();
+                }
+                res = audioManager.requestAudioFocus(focusRequest);
             } else {
-                return audioManager.requestAudioFocus(
+                res = audioManager.requestAudioFocus(
                     focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
             }
+            if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) hasFocus = true;
+            return res;
         } catch (Exception e) {
             return AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
         }
     }
 
     private void abandonFocus() {
-        if (audioManager == null) return;
+        if (audioManager == null || !hasFocus) return;
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (focusRequest != null) audioManager.abandonAudioFocusRequest(focusRequest);
@@ -151,6 +173,57 @@ public class NativePlayerPlugin extends Plugin {
                 audioManager.abandonAudioFocus(focusListener);
             }
         } catch (Exception e) { /* ignore */ }
+        hasFocus = false;
+    }
+
+    // Hold a Wi-Fi lock while streaming. With the screen off Android puts Wi-Fi
+    // into power save, which stalls a Jellyfin stream mid-track and reads as a
+    // random pause. Only needed for network sources, not local files.
+    private void acquireWifiLock() {
+        try {
+            if (currentSource == null || !currentSource.startsWith("http")) return;
+            if (wifiLock == null) {
+                android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager)
+                    getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wm == null) return;
+                wifiLock = wm.createWifiLock(
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "musicplayer:stream");
+                wifiLock.setReferenceCounted(false);
+            }
+            if (!wifiLock.isHeld()) wifiLock.acquire();
+        } catch (Exception e) { /* ignore */ }
+    }
+
+    private void releaseWifiLock() {
+        try { if (wifiLock != null && wifiLock.isHeld()) wifiLock.release(); } catch (Exception e) { /* ignore */ }
+    }
+
+    // Push the current track's metadata straight to the media session that the
+    // @jofr plugin owns, so the lock screen / car display updates on a native
+    // auto-advance (the web layer is frozen with the screen off and can't do
+    // it). Fully reflective and best-effort: if the plugin's internals change,
+    // the title just stops updating natively instead of crashing.
+    private void updateSessionMetadata(int index) {
+        try {
+            if (index < 0 || index >= titles.size()) return;
+            com.getcapacitor.PluginHandle handle = getBridge().getPlugin("MediaSession");
+            if (handle == null) return;
+            Object plugin = handle.getInstance();
+            if (plugin == null) return;
+            java.lang.reflect.Field f = plugin.getClass().getDeclaredField("service");
+            f.setAccessible(true);
+            Object svc = f.get(plugin);
+            if (svc == null) return;
+            svc.getClass().getMethod("setTitle", String.class).invoke(svc, titles.get(index));
+            svc.getClass().getMethod("setArtist", String.class).invoke(svc, artists.get(index));
+            svc.getClass().getMethod("setAlbum", String.class).invoke(svc, albums.get(index));
+            try {
+                int dur = (player != null && prepared) ? player.getDuration() : 0;
+                svc.getClass().getMethod("setDuration", long.class).invoke(svc, (long) Math.max(0, dur));
+                svc.getClass().getMethod("setPosition", long.class).invoke(svc, 0L);
+            } catch (Throwable ignored) { /* optional */ }
+            svc.getClass().getMethod("update").invoke(svc);
+        } catch (Throwable t) { /* best effort only */ }
     }
 
     // Release the current player without emitting playback events.
@@ -169,6 +242,7 @@ public class NativePlayerPlugin extends Plugin {
         // The play intent is decided by the caller (load/loadData) so that a
         // play() arriving during an async local-file load isn't lost.
         playWhenReady = autoplay;
+        currentSource = (path == null) ? "" : path;
         emit("loadstart");
         try {
             player = new MediaPlayer();
@@ -203,7 +277,16 @@ public class NativePlayerPlugin extends Plugin {
                 d.put("what", what);
                 d.put("extra", extra);
                 emit("error", d);
+                boolean wanted = playWhenReady;
                 releasePlayer();
+                // A single bad track (transient network drop, missing file) used
+                // to stop playback dead until the user intervened. Skip to the
+                // next one instead, capped so a wholly unreachable queue can't
+                // spin forever.
+                if (wanted && !queue.isEmpty() && errorStreak < MAX_ERROR_SKIPS) {
+                    errorStreak++;
+                    handler.postDelayed(() -> advanceOnCompletion(), 500);
+                }
                 return true;
             });
             player.prepareAsync();
@@ -224,6 +307,9 @@ public class NativePlayerPlugin extends Plugin {
             }
             player.setVolume(volume, volume);
             player.start();
+            acquireWifiLock();
+            // Real playback started — the queue is healthy again.
+            errorStreak = 0;
             emit("play");
             emit("playing");
             startTicker();
@@ -235,6 +321,7 @@ public class NativePlayerPlugin extends Plugin {
             if (player != null && player.isPlaying()) {
                 player.pause();
                 stopTicker();
+                releaseWifiLock();
                 emit("pause");
             }
         } catch (Exception e) { /* ignore */ }
@@ -244,34 +331,45 @@ public class NativePlayerPlugin extends Plugin {
     // queue and plays it — all natively, so it works with the screen off. Emits
     // "advanced" (with the new index) so the web layer can catch up its UI when
     // it wakes; at the end of the queue emits "pause" + "ended" instead.
+    private boolean playable(int i) {
+        if (i < 0 || i >= queue.size()) return false;
+        String s = queue.get(i);
+        return s != null && s.length() > 0;
+    }
+
+    private void playIndex(int i) {
+        queueIndex = i;
+        setDataSourceAndPrepare(queue.get(i), true);
+        // Update the lock screen / car display right away — the web layer can't
+        // while the screen is off.
+        updateSessionMetadata(i);
+        JSObject d = new JSObject();
+        d.put("index", i);
+        emit("advanced", d);
+    }
+
+    private void emitStopped() {
+        emit("pause");
+        emit("ended");
+    }
+
     private void advanceOnCompletion() {
-        if ("one".equals(repeatMode) && queueIndex >= 0 && queueIndex < queue.size()) {
-            setDataSourceAndPrepare(queue.get(queueIndex), true);
-            JSObject d = new JSObject();
-            d.put("index", queueIndex);
-            emit("advanced", d);
-            return;
-        }
-        int next = queueIndex + 1;
-        if (next >= queue.size()) {
-            if ("all".equals(repeatMode) && !queue.isEmpty()) {
-                next = 0;
-            } else {
-                emit("pause");
-                emit("ended");
-                return;
+        int n = queue.size();
+        if (n == 0) { emitStopped(); return; }
+        if ("one".equals(repeatMode) && playable(queueIndex)) { playIndex(queueIndex); return; }
+        // Walk forward to the next PLAYABLE entry. Entries can be empty when a
+        // local file hasn't been written to disk yet; playing "" would throw and
+        // kill playback, so skip over them instead of stopping.
+        int idx = queueIndex;
+        for (int step = 0; step < n; step++) {
+            idx++;
+            if (idx >= n) {
+                if ("all".equals(repeatMode)) idx = 0;
+                else { emitStopped(); return; }
             }
+            if (playable(idx)) { playIndex(idx); return; }
         }
-        if (next >= 0 && next < queue.size()) {
-            queueIndex = next;
-            setDataSourceAndPrepare(queue.get(next), true);
-            JSObject d = new JSObject();
-            d.put("index", next);
-            emit("advanced", d);
-        } else {
-            emit("pause");
-            emit("ended");
-        }
+        emitStopped();
     }
 
     // ---- plugin API ----
@@ -279,24 +377,72 @@ public class NativePlayerPlugin extends Plugin {
     // Replace the playback queue and current index WITHOUT touching the player.
     // The web layer starts the current track itself (via load/loadData); this
     // just tells native what to auto-advance through when a track completes.
+    private static java.util.List<String> toList(com.getcapacitor.JSArray arr) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        if (arr == null) return out;
+        for (int i = 0; i < arr.length(); i++) {
+            try {
+                String s = arr.getString(i);
+                out.add(s == null ? "" : s);
+            } catch (Exception e) { out.add(""); }
+        }
+        return out;
+    }
+
     @PluginMethod
     public void setQueue(PluginCall call) {
-        com.getcapacitor.JSArray arr = call.getArray("sources");
+        final java.util.List<String> nextSources = toList(call.getArray("sources"));
+        final java.util.List<String> nextTitles = toList(call.getArray("titles"));
+        final java.util.List<String> nextArtists = toList(call.getArray("artists"));
+        final java.util.List<String> nextAlbums = toList(call.getArray("albums"));
         final int index = call.getInt("index", -1);
         final String repeat = call.getString("repeat", "off");
-        final java.util.List<String> next = new java.util.ArrayList<>();
-        if (arr != null) {
-            for (int i = 0; i < arr.length(); i++) {
-                try { next.add(arr.getString(i)); } catch (Exception e) { next.add(""); }
-            }
-        }
         getActivity().runOnUiThread(() -> {
             queue.clear();
-            queue.addAll(next);
+            queue.addAll(nextSources);
+            titles.clear();
+            titles.addAll(nextTitles);
+            artists.clear();
+            artists.addAll(nextArtists);
+            albums.clear();
+            albums.addAll(nextAlbums);
+            // Pad metadata so index lookups are always in range.
+            while (titles.size() < queue.size()) titles.add("");
+            while (artists.size() < queue.size()) artists.add("");
+            while (albums.size() < queue.size()) albums.add("");
             queueIndex = index;
             repeatMode = repeat;
+            errorStreak = 0;
         });
         call.resolve();
+    }
+
+    // Fill in one queue entry's source after the web layer has written that
+    // local file to disk. Cheap: no re-sending of the whole queue.
+    @PluginMethod
+    public void setSource(PluginCall call) {
+        final int index = call.getInt("index", -1);
+        final String source = call.getString("source", "");
+        getActivity().runOnUiThread(() -> {
+            if (index >= 0 && index < queue.size()) queue.set(index, source);
+        });
+        call.resolve();
+    }
+
+    // Report whether a local track has already been written to disk, so the web
+    // layer can reuse it instead of shipping the bytes across the bridge again
+    // (e.g. after an app restart). Returns an empty path when not present.
+    @PluginMethod
+    public void resolvePersisted(PluginCall call) {
+        final String name = call.getString("name", "");
+        JSObject ret = new JSObject();
+        try {
+            File f = new File(new File(getContext().getFilesDir(), "tracks"), name);
+            ret.put("path", (f.exists() && f.length() > 0) ? f.getAbsolutePath() : "");
+        } catch (Exception e) {
+            ret.put("path", "");
+        }
+        call.resolve(ret);
     }
 
     @PluginMethod
@@ -309,12 +455,7 @@ public class NativePlayerPlugin extends Plugin {
     @PluginMethod
     public void skipTo(PluginCall call) {
         final int index = call.getInt("index", -1);
-        getActivity().runOnUiThread(() -> {
-            if (index >= 0 && index < queue.size()) {
-                queueIndex = index;
-                setDataSourceAndPrepare(queue.get(index), true);
-            }
-        });
+        getActivity().runOnUiThread(() -> { if (playable(index)) playIndex(index); });
         call.resolve();
     }
 
@@ -409,6 +550,7 @@ public class NativePlayerPlugin extends Plugin {
         getActivity().runOnUiThread(() -> {
             playWhenReady = false;
             releasePlayer();
+            releaseWifiLock();
             abandonFocus();
         });
         call.resolve();
@@ -443,6 +585,7 @@ public class NativePlayerPlugin extends Plugin {
     protected void handleOnDestroy() {
         super.handleOnDestroy();
         releasePlayer();
+        releaseWifiLock();
         abandonFocus();
     }
 }

@@ -835,7 +835,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.21';
+const APP_VERSION = '1.7.22';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1034,6 +1034,10 @@ function _blobToBase64(blob) {
     r.readAsDataURL(blob);
   });
 }
+// The track whose url loadTrack is about to assign to audio.src. Lets the
+// native adapter resolve a local blob: url back to its track (and so to a file
+// on disk) instead of re-encoding the bytes for every play.
+let _nativeSrcTrack = null;
 function _extForMime(m) {
   m = (m || '').toLowerCase();
   if (m.indexOf('mpeg') >= 0) return 'mp3';
@@ -1090,13 +1094,28 @@ class NativeAudioAdapter {
     const p = this._plugin();
     if (!val) { if (p) p.stop(); return; }
     if (val.indexOf('blob:') === 0) {
-      // Local file: pull the bytes out of the WebView and hand them to native.
-      fetch(val).then((r) => r.blob()).then((b) => _blobToBase64(b).then((data) => ({ data, type: b.type })))
+      // Local file. Prefer writing it to disk once and playing it by path: the
+      // same file then backs the native auto-advance queue, and replays cost no
+      // bridge traffic at all. Falls back to shipping the bytes directly.
+      const track = _nativeSrcTrack;
+      const viaBytes = () => fetch(val)
+        .then((r) => r.blob())
+        .then((b) => _blobToBase64(b).then((data) => ({ data, type: b.type })))
         .then(({ data, type }) => {
-          if (seq !== this._loadSeq) return; // a newer track was selected meanwhile
-          const pl = this._plugin(); if (pl) pl.loadData({ data, ext: _extForMime(type), autoplay: this._playIntent });
-        })
-        .catch(() => { if (seq === this._loadSeq) this._emit('error'); });
+          if (seq !== this._loadSeq) return;
+          const pl = this._plugin();
+          if (pl) pl.loadData({ data, ext: _extForMime(type), autoplay: this._playIntent });
+        });
+      const started = (track && track.url === val)
+        ? nativeSourceForTrack(track).then((path) => {
+            if (seq !== this._loadSeq) return;
+            const pl = this._plugin();
+            if (!pl) return;
+            if (path) { pl.load({ url: path, autoplay: this._playIntent }); return; }
+            return viaBytes();
+          })
+        : viaBytes();
+      started.catch(() => { if (seq === this._loadSeq) this._emit('error'); });
     } else {
       if (p) p.load({ url: val, autoplay: this._playIntent }); // http(s) stream (Jellyfin) or file path
     }
@@ -1963,52 +1982,108 @@ function loadQueueCurrent(autoplay) {
 // ---------- Native auto-advance queue ----------
 // The native MediaPlayer plays http(s) URLs (Jellyfin) and local file paths,
 // but not JavaScript blob: URLs, so local tracks are written to disk once and
-// referenced by path. Resolving is cheap after the first time (path cached on
-// the track). Returns a source string the native queue can play.
-async function nativeSourceForTrack(t) {
+// then referenced by path.
+function nativePlayerPlugin() {
+  const C = window.Capacitor;
+  return (C && C.Plugins && C.Plugins.NativePlayer) ? C.Plugins.NativePlayer : null;
+}
+// The source native can play for a track, WITHOUT any async work: a Jellyfin
+// URL, an already-known local path, or '' when the local file isn't on disk yet
+// (native skips empty entries rather than stopping).
+function nativeSourceSync(t) {
   if (!t) return '';
   if ((t.source || 'local') === 'jellyfin') return t.url || '';
-  if (t._nativePath) return t._nativePath;
-  try {
-    const blob = t.blob || await (await fetch(t.url)).blob();
-    const data = await _blobToBase64(blob);
-    const ext = _extForMime(blob.type);
-    const p = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.NativePlayer;
-    if (p) {
-      const res = await p.persist({ data, name: t.id + '.' + ext });
+  return t._nativePath || '';
+}
+function nativeFileName(t, mime) {
+  return t.id + '.' + _extForMime(mime || (t.blob && t.blob.type) || '');
+}
+// Write one local track to disk so native can play it by path. Deduped per
+// track, and cheap on repeat sessions: we ask native whether the file already
+// exists before shipping the (large) bytes across the bridge.
+const _persistInFlight = new Map();
+function nativeSourceForTrack(t) {
+  if (!t) return Promise.resolve('');
+  if ((t.source || 'local') === 'jellyfin') return Promise.resolve(t.url || '');
+  if (t._nativePath) return Promise.resolve(t._nativePath);
+  if (_persistInFlight.has(t.id)) return _persistInFlight.get(t.id);
+  const job = (async () => {
+    const p = nativePlayerPlugin();
+    if (!p) return '';
+    try {
+      const blob = t.blob || await (await fetch(t.url)).blob();
+      const name = nativeFileName(t, blob.type);
+      // Already on disk from an earlier session? Then no transfer at all.
+      try {
+        const hit = await p.resolvePersisted({ name });
+        if (hit && hit.path) { t._nativePath = hit.path; return hit.path; }
+      } catch (e) { /* fall through to a full write */ }
+      const data = await _blobToBase64(blob);
+      const res = await p.persist({ data, name });
       if (res && res.path) { t._nativePath = res.path; return res.path; }
-    }
-  } catch (e) { /* fall through */ }
-  return t.url || '';
+    } catch (e) { /* leave unresolved; native will skip it */ }
+    return '';
+  })();
+  _persistInFlight.set(t.id, job);
+  job.then(() => _persistInFlight.delete(t.id), () => _persistInFlight.delete(t.id));
+  return job;
 }
 let _nativeQueueSeq = 0;
-const NATIVE_QUEUE_WINDOW = 60; // how many local tracks ahead to pre-save to disk
+// How many local tracks ahead of the current one to keep written to disk. Small
+// and rolling: enough to auto-advance through a locked screen, without dumping
+// the whole library to disk (or hogging the bridge) up front.
+const NATIVE_QUEUE_AHEAD = 6;
+// Hand the queue to native IMMEDIATELY using only what we know synchronously,
+// then fill in local file paths in the background. Doing the file writes first
+// (as this used to) meant the native queue stayed empty until every write
+// finished — so a local track that ended in the meantime had nothing to advance
+// to, and the bridge traffic starved playback.
 async function syncNativeQueue() {
   if (!IS_NATIVE) return;
-  const p = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.NativePlayer;
+  const p = nativePlayerPlugin();
   if (!p) return;
   const seq = ++_nativeQueueSeq;
-  const ids = state.queue.slice();
-  const start = state.queuePos;
+  const sources = [], titles = [], artists = [], albums = [];
+  for (const id of state.queue) {
+    const t = trackById(id);
+    sources.push(nativeSourceSync(t));
+    titles.push(t ? (t.title || '') : '');
+    artists.push(t ? (artistOf(t) || '') : '');
+    albums.push(t && albumOf(t) !== UNSORTED ? (albumOf(t) || '') : '');
+  }
   try {
-    const sources = [];
-    for (let i = 0; i < ids.length; i++) {
-      const t = trackById(ids[i]);
-      if (!t) { sources.push(''); continue; }
-      if ((t.source || 'local') === 'jellyfin') { sources.push(t.url || ''); continue; }
-      if (t._nativePath) { sources.push(t._nativePath); continue; }
-      // Local file not yet on disk: only persist within a forward window so a
-      // huge "all songs" queue doesn't write the entire library up front.
-      if (i >= start && i <= start + NATIVE_QUEUE_WINDOW) {
-        sources.push(await nativeSourceForTrack(t));
-        if (seq !== _nativeQueueSeq) return; // queue changed while persisting
-      } else {
-        sources.push('');
-      }
+    await p.setQueue({ sources, titles, artists, albums, index: state.queuePos, repeat: state.repeat || 'off' });
+  } catch (e) { return; }
+  fillNativeQueueAhead(seq);
+}
+// Background: write the next few local files to disk, one at a time, patching
+// each into the native queue as it lands. Yields between tracks so encoding
+// never competes with playback.
+let _fillingAhead = false;
+let _fillAgain = false;
+async function fillNativeQueueAhead(seq) {
+  const p = nativePlayerPlugin();
+  if (!p) return;
+  // A burst of queued 'advanced' events (delivered together when the screen
+  // wakes) must not stack up overlapping passes — coalesce into one re-run.
+  if (_fillingAhead) { _fillAgain = true; return; }
+  _fillingAhead = true;
+  try {
+    let filled = 0;
+    for (let i = state.queuePos; i < state.queue.length && filled < NATIVE_QUEUE_AHEAD; i++) {
+      if (seq !== _nativeQueueSeq) return; // queue changed under us
+      const t = trackById(state.queue[i]);
+      if (!t || (t.source || 'local') === 'jellyfin' || t._nativePath) continue;
+      const src = await nativeSourceForTrack(t);
+      if (seq !== _nativeQueueSeq) return;
+      if (src) { try { await p.setSource({ index: i, source: src }); } catch (e) { /* ignore */ } }
+      filled++;
+      await new Promise(r => setTimeout(r, 60));
     }
-    if (seq !== _nativeQueueSeq) return;
-    await p.setQueue({ sources, index: state.queuePos, repeat: state.repeat || 'off' });
-  } catch (e) { /* ignore */ }
+  } finally {
+    _fillingAhead = false;
+    if (_fillAgain) { _fillAgain = false; fillNativeQueueAhead(_nativeQueueSeq); }
+  }
 }
 // Native told us it auto-advanced (screen was likely off). Catch the UI up to
 // the track native is now playing, without touching the audio (native owns it).
@@ -2018,6 +2093,10 @@ function handleNativeAdvanced(index) {
   resetPlaybackErrors();
   loadTrack(trackById(state.queue[index]), true, true);
   saveResume(true);
+  // Keep the rolling window of on-disk files ahead of playback. Deliberately
+  // does NOT re-send the queue/index — native owns the position now, and a
+  // stale index from a late-delivered event would rewind it.
+  fillNativeQueueAhead(_nativeQueueSeq);
 }
 
 function setQueue(indices, startIndex) {
@@ -3012,7 +3091,7 @@ function loadTrack(track, autoplay, nativeAlreadyPlaying) {
   playbackIntended = !!autoplay;
   state.playingTrack = track;
   state.playingSource = track.source || 'local';
-  if (!nativeAlreadyPlaying) audio.src = track.url;
+  if (!nativeAlreadyPlaying) { _nativeSrcTrack = track; audio.src = track.url; }
   titleEl.textContent = track.title;
   subtitleEl.textContent = subtitleFor(track);
   setNowPlayingArt(track.pictureUrl || albumArtUrlFor(albumOf(track)));
