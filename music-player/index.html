@@ -835,7 +835,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.25';
+const APP_VERSION = '1.7.26';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -2129,6 +2129,12 @@ function nativeSourceForTrack(t) {
   return job;
 }
 let _nativeQueueSeq = 0;
+// Whether native has been told about the CURRENT queue. Cleared whenever the
+// queue is rebuilt. The boot/resume preload deliberately doesn't sync (it would
+// start downloads at launch), so pressing play on the preloaded track has to
+// sync before playback — otherwise native has an empty queue and simply stops
+// at the end of that first song.
+let _nativeQueueSynced = false;
 // How many local tracks ahead of the current one to keep written to disk. Small
 // and rolling: enough to auto-advance through a locked screen, without dumping
 // the whole library to disk (or hogging the bridge) up front.
@@ -2136,7 +2142,10 @@ let _nativeQueueSeq = 0;
 // keep a deep window). Jellyfin tracks are downloaded over the network, so
 // prefetch fewer — an un-downloaded one still streams rather than being lost.
 const NATIVE_AHEAD_LOCAL = 8;
-const NATIVE_AHEAD_STREAM = 3;
+// Counts the current track too, so 5 keeps roughly four songs cached ahead —
+// enough to keep playing from disk through a locked screen in the car, where
+// the web layer is frozen and can't fetch any more.
+const NATIVE_AHEAD_STREAM = 5;
 // Hand the queue to native IMMEDIATELY using only what we know synchronously,
 // then fill in local file paths in the background. Doing the file writes first
 // (as this used to) meant the native queue stayed empty until every write
@@ -2160,6 +2169,7 @@ async function syncNativeQueue() {
   }
   try {
     await p.setQueue({ sources, fallbacks, titles, artists, albums, index: state.queuePos, repeat: state.repeat || 'off' });
+    _nativeQueueSynced = true;
   } catch (e) { return; }
   fillNativeQueueAhead(seq);
 }
@@ -2214,6 +2224,7 @@ function setQueue(indices, startIndex) {
   // consecutive-error streak. (Auto-advance via nextTrack does NOT call
   // setQueue, so the cap still works across a failing queue.)
   resetPlaybackErrors();
+  _nativeQueueSynced = false; // a new queue must reach native before playback
   // indices: array of track indices into state.tracks
   // startIndex: which track to play first (an index present in indices)
   // The queue itself is stored as track ids, not indices.
@@ -3155,6 +3166,10 @@ async function playWithFallback(reason) {
   // First real play arms the native media session (foreground-only). Boot/resume
   // preloads don't reach here with intent, so the service never starts at boot.
   armNativeMediaSession();
+  // Make sure native knows the queue before playback starts, so it can
+  // auto-advance (covers pressing play on the boot/resume-preloaded track,
+  // which never went through loadQueueCurrent's sync).
+  if (IS_NATIVE && !_nativeQueueSynced) syncNativeQueue();
   const startedSrc = audio.src;
   try {
     await audio.play();
@@ -3897,9 +3912,13 @@ document.addEventListener('visibilitychange', () => {
 audio.addEventListener('ended', () => {
   playbackErrorStreak = 0;
   // On native the player owns the queue and auto-advances itself (so it works
-  // with the screen off). An 'ended' here means the end of the queue — nothing
-  // more to do. On web, advance to the next track as before.
-  if (IS_NATIVE) return;
+  // with the screen off), emitting 'ended' only once ITS queue is exhausted.
+  // If the app still has tracks queued, the two are out of sync — advance here
+  // rather than letting playback just stop.
+  if (IS_NATIVE) {
+    const hasMore = state.queuePos >= 0 && state.queuePos < state.queue.length - 1;
+    if (!hasMore && state.repeat !== 'all') return; // genuinely the end
+  }
   nextTrack(true);
 });
 audio.addEventListener('error', () => {
