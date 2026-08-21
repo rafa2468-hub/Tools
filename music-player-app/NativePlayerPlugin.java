@@ -52,6 +52,15 @@ public class NativePlayerPlugin extends Plugin {
     // parallel metadata lists let us update the lock screen / car display
     // natively on advance — the web layer can't do it while suspended.
     private final java.util.List<String> queue = new java.util.ArrayList<>();
+    // Per-track alternate source, used when the primary fails (e.g. a direct
+    // Jellyfin file the device can't decode falls back to a transcode). Retried
+    // natively so it still works while the screen is off and JS is frozen.
+    private final java.util.List<String> fallbacks = new java.util.ArrayList<>();
+    private String currentFallback = "";
+    private boolean triedFallback = false;
+    // Counters surfaced to the UI so playback problems can be identified on the
+    // device without a debugger attached.
+    private int bufferingCount = 0, focusLossCount = 0, errorCount = 0;
     private final java.util.List<String> titles = new java.util.ArrayList<>();
     private final java.util.List<String> artists = new java.util.ArrayList<>();
     private final java.util.List<String> albums = new java.util.ArrayList<>();
@@ -68,10 +77,12 @@ public class NativePlayerPlugin extends Plugin {
     private final AudioManager.OnAudioFocusChangeListener focusListener = focusChange -> {
         switch (focusChange) {
             case AudioManager.AUDIOFOCUS_LOSS:
+                focusLossCount++; emitDiag();
                 resumeOnFocusGain = false;
                 internalPause();
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+                focusLossCount++; emitDiag();
                 resumeOnFocusGain = isPlaying();
                 internalPause();
                 break;
@@ -101,6 +112,14 @@ public class NativePlayerPlugin extends Plugin {
 
     private void emit(String event, JSObject data) {
         notifyListeners(event, data);
+    }
+
+    private void emitDiag() {
+        JSObject d = new JSObject();
+        d.put("buffering", bufferingCount);
+        d.put("focusLoss", focusLossCount);
+        d.put("errors", errorCount);
+        emit("diag", d);
     }
 
     private boolean isPlaying() {
@@ -238,7 +257,13 @@ public class NativePlayerPlugin extends Plugin {
     }
 
     private void setDataSourceAndPrepare(String path, boolean autoplay) {
+        setDataSourceAndPrepare(path, autoplay, "");
+    }
+
+    private void setDataSourceAndPrepare(String path, boolean autoplay, String fallback) {
         releasePlayer();
+        currentFallback = (fallback == null) ? "" : fallback;
+        triedFallback = false;
         // The play intent is decided by the caller (load/loadData) so that a
         // play() arriving during an async local-file load isn't lost.
         playWhenReady = autoplay;
@@ -272,12 +297,36 @@ public class NativePlayerPlugin extends Plugin {
                 stopTicker();
                 advanceOnCompletion();
             });
+            // A stalled network read (Jellyfin stream) surfaces here, not as an
+            // error. Counting it distinguishes "the stream ran dry" from a real
+            // pause when diagnosing playback complaints.
+            player.setOnInfoListener((mp, what, extra) -> {
+                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    bufferingCount++;
+                    emitDiag();
+                }
+                return false;
+            });
             player.setOnErrorListener((mp, what, extra) -> {
                 JSObject d = new JSObject();
                 d.put("what", what);
                 d.put("extra", extra);
                 emit("error", d);
+                errorCount++;
+                emitDiag();
                 boolean wanted = playWhenReady;
+                // Before giving up on this track, try its alternate source (a
+                // direct file that won't decode falls back to a transcode).
+                if (wanted && !triedFallback && currentFallback.length() > 0) {
+                    final String alt = currentFallback;
+                    triedFallback = true;
+                    releasePlayer();
+                    handler.postDelayed(() -> {
+                        setDataSourceAndPrepare(alt, true, "");
+                        triedFallback = true;
+                    }, 250);
+                    return true;
+                }
                 releasePlayer();
                 // A single bad track (transient network drop, missing file) used
                 // to stop playback dead until the user intervened. Skip to the
@@ -339,7 +388,7 @@ public class NativePlayerPlugin extends Plugin {
 
     private void playIndex(int i) {
         queueIndex = i;
-        setDataSourceAndPrepare(queue.get(i), true);
+        setDataSourceAndPrepare(queue.get(i), true, i < fallbacks.size() ? fallbacks.get(i) : "");
         // Update the lock screen / car display right away — the web layer can't
         // while the screen is off.
         updateSessionMetadata(i);
@@ -392,6 +441,7 @@ public class NativePlayerPlugin extends Plugin {
     @PluginMethod
     public void setQueue(PluginCall call) {
         final java.util.List<String> nextSources = toList(call.getArray("sources"));
+        final java.util.List<String> nextFallbacks = toList(call.getArray("fallbacks"));
         final java.util.List<String> nextTitles = toList(call.getArray("titles"));
         final java.util.List<String> nextArtists = toList(call.getArray("artists"));
         final java.util.List<String> nextAlbums = toList(call.getArray("albums"));
@@ -400,6 +450,9 @@ public class NativePlayerPlugin extends Plugin {
         getActivity().runOnUiThread(() -> {
             queue.clear();
             queue.addAll(nextSources);
+            fallbacks.clear();
+            fallbacks.addAll(nextFallbacks);
+            while (fallbacks.size() < queue.size()) fallbacks.add("");
             titles.clear();
             titles.addAll(nextTitles);
             artists.clear();
@@ -442,6 +495,17 @@ public class NativePlayerPlugin extends Plugin {
         } catch (Exception e) {
             ret.put("path", "");
         }
+        call.resolve(ret);
+    }
+
+    // Current playback-health counters, so the UI can show them on demand even
+    // if some change events were missed while the web layer was suspended.
+    @PluginMethod
+    public void getDiag(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("buffering", bufferingCount);
+        ret.put("focusLoss", focusLossCount);
+        ret.put("errors", errorCount);
         call.resolve(ret);
     }
 
@@ -491,8 +555,9 @@ public class NativePlayerPlugin extends Plugin {
     @PluginMethod
     public void load(PluginCall call) {
         final String url = call.getString("url", "");
+        final String fallback = call.getString("fallback", "");
         final boolean autoplay = Boolean.TRUE.equals(call.getBoolean("autoplay", false));
-        getActivity().runOnUiThread(() -> setDataSourceAndPrepare(url, autoplay));
+        getActivity().runOnUiThread(() -> setDataSourceAndPrepare(url, autoplay, fallback));
         call.resolve();
     }
 
