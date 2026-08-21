@@ -835,7 +835,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.24';
+const APP_VERSION = '1.7.25';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1081,7 +1081,7 @@ class NativeAudioAdapter {
     p.addListener('diag', (d) => {
       try {
         if (!d) return;
-        state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0 };
+        state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, mode: d.mode || '' };
       } catch (e) { /* ignore */ }
     });
   }
@@ -1129,7 +1129,7 @@ class NativeAudioAdapter {
       // Jellyfin: fetch the file to disk first and play that. Streaming it
       // straight into the player is what ran dry mid-song. If the download
       // fails we still stream, so playback never depends on it succeeding.
-      if (track && (track.source || 'local') === 'jellyfin' && alt && p && p.download) {
+      if (track && (track.source || 'local') === 'jellyfin' && p && p.download) {
         const slow = setTimeout(() => { try { showToast('Buffering…'); } catch (e) { /* ignore */ } }, 1200);
         nativeSourceForTrack(track).then((path) => {
           clearTimeout(slow);
@@ -1778,14 +1778,16 @@ function jfItemToTrack(item, config) {
     title: item.Name || 'Unknown',
     artist,
     album: albumName,
-    // Direct file when the device can decode it, transcode otherwise. The
-    // transcode URL is kept as a fallback so a file that turns out to be
-    // unplayable is retried rather than skipped. Only direct files are
-    // downloadable (a transcode has no length to verify), so fallbackUrl also
-    // marks a track as cacheable.
     container: jfContainer,
     url: jfDirect ? JF.directStreamUrl(config, item.Id) : JF.streamUrl(config, item.Id),
-    fallbackUrl: jfDirect ? JF.streamUrl(config, item.Id) : '',
+    // The original file. Always worth caching, even when the container is
+    // unknown: Jellyfin only exposes Path to admin accounts, so jfDirect is
+    // false for plenty of perfectly playable files. Gating the download on it
+    // meant nothing was ever cached.
+    cacheUrl: JF.directStreamUrl(config, item.Id),
+    // A transcoded stream the server will always produce. Last resort for
+    // playback, and the queue fallback — so an entry is never left unplayable.
+    fallbackUrl: JF.streamUrl(config, item.Id),
     pictureUrl,
     indexNumber: item.IndexNumber || 0,
     parentIndexNumber: item.ParentIndexNumber || 0,
@@ -2080,19 +2082,25 @@ function nativeSourceForTrack(t) {
   if ((t.source || 'local') === 'jellyfin') {
     const job = (async () => {
       const p = nativePlayerPlugin();
-      // Only cache direct (non-transcoded) files: a transcode has no length to
-      // verify against, so a truncated download would be indistinguishable from
-      // a complete one — the very failure we're fixing.
-      if (!p || !p.download || !t.fallbackUrl) return '';
+      if (!p || !p.download) return '';
       const name = jellyfinCacheName(t);
+      // Floor for a complete file (~96 kbps). Lets us reject a truncated
+      // download even when the server sends no Content-Length.
+      const minBytes = Math.floor((t.durationSec || 0) * 12000);
       try {
         const hit = await p.cachedPath({ name });
         if (hit && hit.path) { t._nativePath = hit.path; return hit.path; }
       } catch (e) { /* fall through to download */ }
-      try {
-        const res = await p.download({ url: t.url, name });
-        if (res && res.path) { t._nativePath = res.path; return res.path; }
-      } catch (e) { /* stream instead */ }
+      // Prefer the original file; if the server won't serve it (permissions,
+      // odd container), cache a transcoded copy instead. Either way playback
+      // ends up reading from disk rather than the network.
+      for (const url of [t.cacheUrl, t.fallbackUrl]) {
+        if (!url) continue;
+        try {
+          const res = await p.download({ url, name, minBytes });
+          if (res && res.path) { t._nativePath = res.path; return res.path; }
+        } catch (e) { /* try the next source */ }
+      }
       return '';
     })();
     _persistInFlight.set(t.id, job);
@@ -2143,7 +2151,9 @@ async function syncNativeQueue() {
   for (const id of state.queue) {
     const t = trackById(id);
     sources.push(nativeSourceSync(t));
-    fallbacks.push((t && t.fallbackUrl) ? t.fallbackUrl : '');
+    // Always a playable stream URL for Jellyfin, so an entry whose download
+    // hasn't finished still plays instead of being treated as unplayable.
+    fallbacks.push((t && (t.fallbackUrl || t.url)) ? (t.fallbackUrl || t.url) : '');
     titles.push(t ? (t.title || '') : '');
     artists.push(t ? (artistOf(t) || '') : '');
     albums.push(t && albumOf(t) !== UNSORTED ? (albumOf(t) || '') : '');
@@ -2752,8 +2762,10 @@ function openSettingsSheet() {
 // "focus" counts audio-focus losses (something else grabbed the audio).
 function diagLine() {
   const d = state.diag;
-  if (!d || (!d.buffering && !d.focusLoss && !d.errors)) return '';
-  return ` · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
+  if (!d) return '';
+  const src = d.mode ? ` · src ${d.mode}` : '';
+  const dl = d.downloads ? ` · dl ${d.downloads}` : '';
+  return `${src}${dl} · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
 }
 async function refreshDiag() {
   const p = nativePlayerPlugin();
@@ -2761,7 +2773,7 @@ async function refreshDiag() {
   try {
     const d = await p.getDiag();
     if (!d) return;
-    state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0 };
+    state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, mode: d.mode || '' };
     const el = document.getElementById('diag-line');
     if (el) el.textContent = `Music Player v${APP_VERSION}${diagLine()}`;
   } catch (e) { /* ignore */ }

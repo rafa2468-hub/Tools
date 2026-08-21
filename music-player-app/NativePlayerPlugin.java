@@ -60,7 +60,7 @@ public class NativePlayerPlugin extends Plugin {
     private boolean triedFallback = false;
     // Counters surfaced to the UI so playback problems can be identified on the
     // device without a debugger attached.
-    private int bufferingCount = 0, focusLossCount = 0, errorCount = 0;
+    private int bufferingCount = 0, focusLossCount = 0, errorCount = 0, downloadCount = 0;
     private final java.util.List<String> titles = new java.util.ArrayList<>();
     private final java.util.List<String> artists = new java.util.ArrayList<>();
     private final java.util.List<String> albums = new java.util.ArrayList<>();
@@ -114,12 +114,20 @@ public class NativePlayerPlugin extends Plugin {
         notifyListeners(event, data);
     }
 
-    private void emitDiag() {
+    private JSObject diagObject() {
         JSObject d = new JSObject();
         d.put("buffering", bufferingCount);
         d.put("focusLoss", focusLossCount);
         d.put("errors", errorCount);
-        emit("diag", d);
+        d.put("downloads", downloadCount);
+        // Whether the current track is playing from disk or off the network —
+        // the quickest way to tell whether caching is actually working.
+        d.put("mode", currentSource.startsWith("http") ? "stream" : "file");
+        return d;
+    }
+
+    private void emitDiag() {
+        emit("diag", diagObject());
     }
 
     private boolean isPlaying() {
@@ -549,6 +557,7 @@ public class NativePlayerPlugin extends Plugin {
     public void download(PluginCall call) {
         final String url = call.getString("url", "");
         final String name = call.getString("name", "");
+        final long minBytes = call.getInt("minBytes", 0).longValue();
         if (url.length() == 0 || name.length() == 0) { call.reject("bad args"); return; }
         new Thread(() -> {
             java.net.HttpURLConnection conn = null;
@@ -572,7 +581,11 @@ public class NativePlayerPlugin extends Plugin {
                     String cl = conn.getHeaderField("Content-Length");
                     if (cl != null) expected = Long.parseLong(cl.trim());
                 } catch (Exception e) { expected = -1; }
-                if (expected <= 0) { call.reject("no length"); return; }
+                // A transcode is sent without a length. Rather than refuse to
+                // cache it, accept the download only if it reaches a plausible
+                // size for the track's duration — enough to catch a truncated
+                // response, which is the failure that matters here.
+                if (expected <= 0 && minBytes <= 0) { call.reject("no length"); return; }
                 part = new File(streamCacheDir(), name + ".part");
                 java.io.InputStream in = conn.getInputStream();
                 FileOutputStream fos = new FileOutputStream(part);
@@ -585,8 +598,10 @@ public class NativePlayerPlugin extends Plugin {
                 }
                 fos.close();
                 in.close();
-                if (total < expected) { part.delete(); call.reject("incomplete"); return; }
+                long required = (expected > 0) ? expected : minBytes;
+                if (total < required) { part.delete(); call.reject("incomplete"); return; }
                 if (!part.renameTo(out)) { part.delete(); call.reject("rename failed"); return; }
+                downloadCount++;
                 trimCache();
                 JSObject ret = new JSObject();
                 ret.put("path", out.getAbsolutePath());
@@ -620,11 +635,7 @@ public class NativePlayerPlugin extends Plugin {
     // if some change events were missed while the web layer was suspended.
     @PluginMethod
     public void getDiag(PluginCall call) {
-        JSObject ret = new JSObject();
-        ret.put("buffering", bufferingCount);
-        ret.put("focusLoss", focusLossCount);
-        ret.put("errors", errorCount);
-        call.resolve(ret);
+        call.resolve(diagObject());
     }
 
     @PluginMethod
