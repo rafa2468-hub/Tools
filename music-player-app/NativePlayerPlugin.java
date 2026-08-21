@@ -380,15 +380,28 @@ public class NativePlayerPlugin extends Plugin {
     // queue and plays it — all natively, so it works with the screen off. Emits
     // "advanced" (with the new index) so the web layer can catch up its UI when
     // it wakes; at the end of the queue emits "pause" + "ended" instead.
+    private String at(java.util.List<String> list, int i) {
+        if (i < 0 || i >= list.size()) return "";
+        String s = list.get(i);
+        return s == null ? "" : s;
+    }
+
+    // An entry is playable if it has either a primary source (a downloaded
+    // file) or a fallback (the live stream) — so a track that hasn't finished
+    // downloading still plays instead of being skipped.
     private boolean playable(int i) {
         if (i < 0 || i >= queue.size()) return false;
-        String s = queue.get(i);
-        return s != null && s.length() > 0;
+        return at(queue, i).length() > 0 || at(fallbacks, i).length() > 0;
     }
 
     private void playIndex(int i) {
         queueIndex = i;
-        setDataSourceAndPrepare(queue.get(i), true, i < fallbacks.size() ? fallbacks.get(i) : "");
+        String primary = at(queue, i);
+        String alt = at(fallbacks, i);
+        // Prefer the downloaded file; otherwise stream, with no further retry.
+        String src = primary.length() > 0 ? primary : alt;
+        String fb = primary.length() > 0 ? alt : "";
+        setDataSourceAndPrepare(src, true, fb);
         // Update the lock screen / car display right away — the web layer can't
         // while the screen is off.
         updateSessionMetadata(i);
@@ -480,6 +493,111 @@ public class NativePlayerPlugin extends Plugin {
             if (index >= 0 && index < queue.size()) queue.set(index, source);
         });
         call.resolve();
+    }
+
+    // ---- Jellyfin download cache ----
+    // Streaming a Jellyfin track straight into MediaPlayer proved unreliable:
+    // the connection runs dry mid-song (buffering underruns) and a stream that
+    // ends early looks like "track finished", which skips. Downloading the file
+    // first and playing it from disk removes the network from playback
+    // entirely — the same thing that made local files reliable.
+    private static final long MAX_CACHE_BYTES = 1536L * 1024L * 1024L; // ~1.5 GB
+
+    private File streamCacheDir() {
+        File dir = new File(getContext().getCacheDir(), "stream");
+        if (!dir.exists()) dir.mkdirs();
+        return dir;
+    }
+
+    // Keep the cache bounded: drop the least recently modified files first.
+    private void trimCache() {
+        try {
+            File[] files = streamCacheDir().listFiles();
+            if (files == null) return;
+            long total = 0;
+            for (File f : files) total += f.length();
+            if (total <= MAX_CACHE_BYTES) return;
+            java.util.Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            for (File f : files) {
+                if (total <= MAX_CACHE_BYTES) break;
+                long len = f.length();
+                if (f.delete()) total -= len;
+            }
+        } catch (Exception e) { /* ignore */ }
+    }
+
+    @PluginMethod
+    public void cachedPath(PluginCall call) {
+        final String name = call.getString("name", "");
+        JSObject ret = new JSObject();
+        try {
+            File f = new File(streamCacheDir(), name);
+            boolean ok = f.exists() && f.length() > 0;
+            if (ok) f.setLastModified(System.currentTimeMillis()); // LRU touch
+            ret.put("path", ok ? f.getAbsolutePath() : "");
+        } catch (Exception e) {
+            ret.put("path", "");
+        }
+        call.resolve(ret);
+    }
+
+    // Download a track to the cache and return its path. Rejects (so the caller
+    // falls back to streaming) when the server won't tell us the length, since
+    // without it a truncated download can't be told from a complete one — that
+    // is exactly the failure we're trying to eliminate.
+    @PluginMethod
+    public void download(PluginCall call) {
+        final String url = call.getString("url", "");
+        final String name = call.getString("name", "");
+        if (url.length() == 0 || name.length() == 0) { call.reject("bad args"); return; }
+        new Thread(() -> {
+            java.net.HttpURLConnection conn = null;
+            File part = null;
+            try {
+                File out = new File(streamCacheDir(), name);
+                if (out.exists() && out.length() > 0) {
+                    JSObject ret = new JSObject();
+                    ret.put("path", out.getAbsolutePath());
+                    call.resolve(ret);
+                    return;
+                }
+                conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                conn.setConnectTimeout(20000);
+                conn.setReadTimeout(30000);
+                conn.setInstanceFollowRedirects(true);
+                int code = conn.getResponseCode();
+                if (code != 200) { call.reject("http " + code); return; }
+                long expected = -1;
+                try {
+                    String cl = conn.getHeaderField("Content-Length");
+                    if (cl != null) expected = Long.parseLong(cl.trim());
+                } catch (Exception e) { expected = -1; }
+                if (expected <= 0) { call.reject("no length"); return; }
+                part = new File(streamCacheDir(), name + ".part");
+                java.io.InputStream in = conn.getInputStream();
+                FileOutputStream fos = new FileOutputStream(part);
+                byte[] buf = new byte[65536];
+                long total = 0;
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    fos.write(buf, 0, n);
+                    total += n;
+                }
+                fos.close();
+                in.close();
+                if (total < expected) { part.delete(); call.reject("incomplete"); return; }
+                if (!part.renameTo(out)) { part.delete(); call.reject("rename failed"); return; }
+                trimCache();
+                JSObject ret = new JSObject();
+                ret.put("path", out.getAbsolutePath());
+                call.resolve(ret);
+            } catch (Exception e) {
+                try { if (part != null && part.exists()) part.delete(); } catch (Exception ig) { /* ignore */ }
+                call.reject("download failed: " + e.getMessage());
+            } finally {
+                try { if (conn != null) conn.disconnect(); } catch (Exception ig) { /* ignore */ }
+            }
+        }).start();
     }
 
     // Report whether a local track has already been written to disk, so the web
