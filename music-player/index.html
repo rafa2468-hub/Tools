@@ -835,7 +835,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.22';
+const APP_VERSION = '1.7.23';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1077,6 +1077,13 @@ class NativeAudioAdapter {
     p.addListener('error', () => { this._emit('error'); });
     // Native auto-advanced to the next queue track on its own (screen off).
     p.addListener('advanced', (d) => { try { handleNativeAdvanced(d && d.index); } catch (e) { /* ignore */ } });
+    // Playback-health counters (buffering stalls, audio-focus losses, errors).
+    p.addListener('diag', (d) => {
+      try {
+        if (!d) return;
+        state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0 };
+      } catch (e) { /* ignore */ }
+    });
   }
   _emit(type) {
     const ls = this._listeners[type];
@@ -1117,7 +1124,10 @@ class NativeAudioAdapter {
         : viaBytes();
       started.catch(() => { if (seq === this._loadSeq) this._emit('error'); });
     } else {
-      if (p) p.load({ url: val, autoplay: this._playIntent }); // http(s) stream (Jellyfin) or file path
+      // http(s) stream (Jellyfin) or file path. Pass the track's alternate
+      // source so native can retry it without waking the web layer.
+      const alt = (_nativeSrcTrack && _nativeSrcTrack.url === val && _nativeSrcTrack.fallbackUrl) ? _nativeSrcTrack.fallbackUrl : '';
+      if (p) p.load({ url: val, fallback: alt, autoplay: this._playIntent });
     }
   }
   get currentSrc() { return this._currentSrc; }
@@ -1213,6 +1223,8 @@ const state = {
   source: 'local',     // 'local' | 'jellyfin'
   search: '',          // lowercased current search query (empty = no filter)
   sleep: { expiresAt: 0, intervalId: 0 },
+  // Playback-health counters reported by the native player (see diagLine()).
+  diag: null,
   playlists: [],       // reference to state.local.playlists or state.jellyfin.playlists
   currentPlaylist: null, // playlist record when view === 'playlist-detail'
   local: { tracks: [], playlists: [] },
@@ -1572,6 +1584,29 @@ const JF = {
     const s = size || 600;
     return `${this.trimUrl(config.serverUrl)}/Items/${itemId}/Images/${t}?fillHeight=${s}&fillWidth=${s}&quality=90`;
   },
+  // Containers Android decodes natively. For these we stream the ORIGINAL file
+  // (static=true) instead of asking Jellyfin to transcode. Jellyfin throttles a
+  // transcoded progressive stream once the client buffers ahead, which stalls
+  // playback every ~30s; serving the file directly avoids that entirely, sounds
+  // better, and spares the server's CPU. Anything else still transcodes.
+  DIRECT_CONTAINERS: ['mp3', 'm4a', 'm4b', 'aac', 'flac', 'ogg', 'oga', 'opus', 'wav'],
+  containerOf(item) {
+    const c = (item && item.Container) ? String(item.Container).toLowerCase() : '';
+    if (c) return c.split(',')[0].trim();
+    const path = (item && item.Path) ? String(item.Path) : '';
+    const m = path.match(/\.([A-Za-z0-9]+)$/);
+    return m ? m[1].toLowerCase() : '';
+  },
+  // The original file, unmodified. Used when the container is known-playable.
+  directStreamUrl(config, itemId) {
+    const params = new URLSearchParams({
+      UserId: config.userId,
+      DeviceId: config.deviceId,
+      api_key: config.accessToken,
+      static: 'true',
+    });
+    return `${this.trimUrl(config.serverUrl)}/Audio/${itemId}/stream?${params}`;
+  },
   streamUrl(config, itemId) {
     const params = new URLSearchParams({
       UserId: config.userId,
@@ -1609,7 +1644,7 @@ const JF = {
   async fetchPlaylistItems(config, playlistId) {
     const params = new URLSearchParams({
       UserId: config.userId,
-      Fields: 'AlbumId,Album,Artists,AlbumArtist,RunTimeTicks,UserData',
+      Fields: 'AlbumId,Album,Artists,AlbumArtist,RunTimeTicks,UserData,Path',
       Limit: '5000',
     });
     const url = `${this.trimUrl(config.serverUrl)}/Playlists/${playlistId}/Items?${params}`;
@@ -1720,7 +1755,15 @@ function jfItemToTrack(item, config) {
     title: item.Name || 'Unknown',
     artist,
     album: albumName,
-    url: JF.streamUrl(config, item.Id),
+    // Direct file when the device can decode it, transcode otherwise. The
+    // transcode URL is kept as a fallback so a file that turns out to be
+    // unplayable is retried rather than skipped.
+    url: JF.DIRECT_CONTAINERS.indexOf(JF.containerOf(item)) >= 0
+      ? JF.directStreamUrl(config, item.Id)
+      : JF.streamUrl(config, item.Id),
+    fallbackUrl: JF.DIRECT_CONTAINERS.indexOf(JF.containerOf(item)) >= 0
+      ? JF.streamUrl(config, item.Id)
+      : '',
     pictureUrl,
     indexNumber: item.IndexNumber || 0,
     parentIndexNumber: item.ParentIndexNumber || 0,
@@ -2043,16 +2086,17 @@ async function syncNativeQueue() {
   const p = nativePlayerPlugin();
   if (!p) return;
   const seq = ++_nativeQueueSeq;
-  const sources = [], titles = [], artists = [], albums = [];
+  const sources = [], fallbacks = [], titles = [], artists = [], albums = [];
   for (const id of state.queue) {
     const t = trackById(id);
     sources.push(nativeSourceSync(t));
+    fallbacks.push((t && t.fallbackUrl) ? t.fallbackUrl : '');
     titles.push(t ? (t.title || '') : '');
     artists.push(t ? (artistOf(t) || '') : '');
     albums.push(t && albumOf(t) !== UNSORTED ? (albumOf(t) || '') : '');
   }
   try {
-    await p.setQueue({ sources, titles, artists, albums, index: state.queuePos, repeat: state.repeat || 'off' });
+    await p.setQueue({ sources, fallbacks, titles, artists, albums, index: state.queuePos, repeat: state.repeat || 'off' });
   } catch (e) { return; }
   fillNativeQueueAhead(seq);
 }
@@ -2636,10 +2680,35 @@ function openSettingsSheet() {
         ? 'Your password is not stored — only the access token. Refresh re-fetches your library.'
         : 'The server must allow CORS from <code>' + escapeHtml(location.origin) + '</code>. On Jellyfin: Dashboard → Networking → CORS Hosts.'}
     </div>
-    <div class="conn-hint" style="text-align:center;opacity:0.6">Music Player v${APP_VERSION}</div>
+    <div class="conn-hint" id="diag-line" style="text-align:center;opacity:0.6">Music Player v${APP_VERSION}${diagLine()}</div>
   `;
   sheetBackdrop.classList.add('visible');
   sheetBackdrop.dataset.settings = 'jellyfin';
+  // Pull the live counters and re-draw just that line, so opening Settings
+  // always shows current numbers even if change events were missed while the
+  // app was suspended.
+  refreshDiag();
+}
+
+// Playback-health counters from the native player. Shown under the version so
+// a stall can be identified on the phone without attaching a debugger:
+// "buffering" counts stream underruns (network/server can't keep up),
+// "focus" counts audio-focus losses (something else grabbed the audio).
+function diagLine() {
+  const d = state.diag;
+  if (!d || (!d.buffering && !d.focusLoss && !d.errors)) return '';
+  return ` · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
+}
+async function refreshDiag() {
+  const p = nativePlayerPlugin();
+  if (!p || !p.getDiag) return;
+  try {
+    const d = await p.getDiag();
+    if (!d) return;
+    state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0 };
+    const el = document.getElementById('diag-line');
+    if (el) el.textContent = `Music Player v${APP_VERSION}${diagLine()}`;
+  } catch (e) { /* ignore */ }
 }
 
 async function handleSettingsAction(act) {
