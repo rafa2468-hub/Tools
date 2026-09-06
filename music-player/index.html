@@ -835,7 +835,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.26';
+const APP_VERSION = '1.7.27';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1081,7 +1081,7 @@ class NativeAudioAdapter {
     p.addListener('diag', (d) => {
       try {
         if (!d) return;
-        state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, mode: d.mode || '' };
+        state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, mode: d.mode || '' };
       } catch (e) { /* ignore */ }
     });
   }
@@ -2156,7 +2156,7 @@ async function syncNativeQueue() {
   const p = nativePlayerPlugin();
   if (!p) return;
   const seq = ++_nativeQueueSeq;
-  const sources = [], fallbacks = [], titles = [], artists = [], albums = [];
+  const sources = [], fallbacks = [], titles = [], artists = [], albums = [], durations = [];
   for (const id of state.queue) {
     const t = trackById(id);
     sources.push(nativeSourceSync(t));
@@ -2166,9 +2166,10 @@ async function syncNativeQueue() {
     titles.push(t ? (t.title || '') : '');
     artists.push(t ? (artistOf(t) || '') : '');
     albums.push(t && albumOf(t) !== UNSORTED ? (albumOf(t) || '') : '');
+    durations.push(String((t && t.durationSec) || 0));
   }
   try {
-    await p.setQueue({ sources, fallbacks, titles, artists, albums, index: state.queuePos, repeat: state.repeat || 'off' });
+    await p.setQueue({ sources, fallbacks, titles, artists, albums, durations, index: state.queuePos, repeat: state.repeat || 'off' });
     _nativeQueueSynced = true;
   } catch (e) { return; }
   fillNativeQueueAhead(seq);
@@ -2775,8 +2776,12 @@ function diagLine() {
   const d = state.diag;
   if (!d) return '';
   const src = d.mode ? ` · src ${d.mode}` : '';
-  const dl = d.downloads ? ` · dl ${d.downloads}` : '';
-  return `${src}${dl} · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
+  const dl = ` · dl ${d.downloads || 0}`;
+  // Why downloads failed, when they did — the difference between "caching is
+  // off" and "caching is being refused", which look identical otherwise.
+  const fail = d.dlFails ? ` · dlfail ${d.dlFails}${d.lastDlError ? ` (${d.lastDlError})` : ''}` : '';
+  const cut = d.truncated ? ` · cut ${d.truncated}` : '';
+  return `${src}${dl}${fail}${cut} · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
 }
 async function refreshDiag() {
   const p = nativePlayerPlugin();
@@ -2784,7 +2789,7 @@ async function refreshDiag() {
   try {
     const d = await p.getDiag();
     if (!d) return;
-    state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, mode: d.mode || '' };
+    state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, mode: d.mode || '' };
     const el = document.getElementById('diag-line');
     if (el) el.textContent = `Music Player v${APP_VERSION}${diagLine()}`;
   } catch (e) { /* ignore */ }
