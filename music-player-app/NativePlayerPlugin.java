@@ -61,6 +61,14 @@ public class NativePlayerPlugin extends Plugin {
     // Counters surfaced to the UI so playback problems can be identified on the
     // device without a debugger attached.
     private int bufferingCount = 0, focusLossCount = 0, errorCount = 0, downloadCount = 0;
+    private int truncatedCount = 0, dlFailCount = 0;
+    private String lastDlError = "";
+    // Progress tracking, used to tell a real end-of-track from a stream that
+    // simply stopped early (which MediaPlayer reports identically).
+    private int lastPositionMs = 0, durationMs = 0, pendingSeekMs = 0, lastResumeAtMs = 0;
+    // Per-track duration from the server, for when the player can't report one
+    // (a transcode arrives without a length).
+    private final java.util.List<Integer> durationsSec = new java.util.ArrayList<>();
     private final java.util.List<String> titles = new java.util.ArrayList<>();
     private final java.util.List<String> artists = new java.util.ArrayList<>();
     private final java.util.List<String> albums = new java.util.ArrayList<>();
@@ -120,6 +128,9 @@ public class NativePlayerPlugin extends Plugin {
         d.put("focusLoss", focusLossCount);
         d.put("errors", errorCount);
         d.put("downloads", downloadCount);
+        d.put("dlFails", dlFailCount);
+        d.put("lastDlError", lastDlError);
+        d.put("truncated", truncatedCount);
         // Whether the current track is playing from disk or off the network —
         // the quickest way to tell whether caching is actually working.
         d.put("mode", currentSource.startsWith("http") ? "stream" : "file");
@@ -128,6 +139,16 @@ public class NativePlayerPlugin extends Plugin {
 
     private void emitDiag() {
         emit("diag", diagObject());
+    }
+
+    // Record why a download failed. Without this a failure is invisible — the
+    // app silently streams instead, which is exactly how caching appeared to be
+    // working when it was not.
+    private void failDownload(PluginCall call, String reason) {
+        dlFailCount++;
+        lastDlError = reason == null ? "" : reason;
+        handler.post(this::emitDiag);
+        call.reject(reason);
     }
 
     private boolean isPlaying() {
@@ -141,8 +162,9 @@ public class NativePlayerPlugin extends Plugin {
             public void run() {
                 if (player != null && prepared) {
                     try {
+                        lastPositionMs = player.getCurrentPosition();
                         JSObject d = new JSObject();
-                        d.put("position", player.getCurrentPosition() / 1000.0);
+                        d.put("position", lastPositionMs / 1000.0);
                         int dur = player.getDuration();
                         d.put("duration", dur > 0 ? dur / 1000.0 : 0);
                         emit("timeupdate", d);
@@ -270,6 +292,16 @@ public class NativePlayerPlugin extends Plugin {
 
     private void setDataSourceAndPrepare(String path, boolean autoplay, String fallback) {
         releasePlayer();
+        String next = (path == null) ? "" : path;
+        // Only reset resume bookkeeping when this is genuinely a different
+        // source — re-preparing the same one is how we recover a truncated
+        // stream, and that must not clear where we got to.
+        if (!next.equals(currentSource)) {
+            lastResumeAtMs = 0;
+            pendingSeekMs = 0;
+        }
+        lastPositionMs = 0;
+        durationMs = 0;
         currentFallback = (fallback == null) ? "" : fallback;
         triedFallback = false;
         // The play intent is decided by the caller (load/loadData) so that a
@@ -297,13 +329,20 @@ public class NativePlayerPlugin extends Plugin {
                 JSObject d = new JSObject();
                 int dur = 0;
                 try { dur = mp.getDuration(); } catch (Exception e) { /* ignore */ }
+                durationMs = dur;
                 d.put("duration", dur > 0 ? dur / 1000.0 : 0);
                 emit("loadedmetadata", d);
+                // Recovering a truncated stream: pick up where it cut out.
+                if (pendingSeekMs > 0) {
+                    try { mp.seekTo(pendingSeekMs); } catch (Exception e) { /* ignore */ }
+                    lastPositionMs = pendingSeekMs;
+                    pendingSeekMs = 0;
+                }
                 if (playWhenReady) internalPlay();
             });
             player.setOnCompletionListener(mp -> {
                 stopTicker();
-                advanceOnCompletion();
+                handleCompletion();
             });
             // A stalled network read (Jellyfin stream) surfaces here, not as an
             // error. Counting it distinguishes "the stream ran dry" from a real
@@ -423,6 +462,40 @@ public class NativePlayerPlugin extends Plugin {
         emit("ended");
     }
 
+    // How long the current track really is: the player's own figure when it has
+    // one, otherwise the duration the server reported for this queue entry.
+    private int expectedDurationMs() {
+        if (durationMs > 0) return durationMs;
+        if (queueIndex >= 0 && queueIndex < durationsSec.size()) {
+            int s = durationsSec.get(queueIndex);
+            if (s > 0) return s * 1000;
+        }
+        return 0;
+    }
+
+    // MediaPlayer reports a stream that died mid-track exactly the same way as a
+    // track that finished. Telling them apart by position is what stops a
+    // dropped connection from being heard as "song cut short, next song".
+    private void handleCompletion() {
+        int expected = expectedDurationMs();
+        boolean truncated = expected > 0 && lastPositionMs > 0 && lastPositionMs < expected - 5000;
+        // Only retry while we're still making forward progress; if a retry
+        // returns to the same spot the source is genuinely short, so move on
+        // rather than looping on it.
+        if (truncated && lastPositionMs > lastResumeAtMs + 1000) {
+            truncatedCount++;
+            lastResumeAtMs = lastPositionMs;
+            int resumeAt = lastPositionMs;
+            String src = currentSource;
+            String fb = currentFallback;
+            emitDiag();
+            setDataSourceAndPrepare(src, true, fb);
+            pendingSeekMs = resumeAt;
+            return;
+        }
+        advanceOnCompletion();
+    }
+
     private void advanceOnCompletion() {
         int n = queue.size();
         if (n == 0) { emitStopped(); return; }
@@ -466,6 +539,7 @@ public class NativePlayerPlugin extends Plugin {
         final java.util.List<String> nextTitles = toList(call.getArray("titles"));
         final java.util.List<String> nextArtists = toList(call.getArray("artists"));
         final java.util.List<String> nextAlbums = toList(call.getArray("albums"));
+        final java.util.List<String> nextDurations = toList(call.getArray("durations"));
         final int index = call.getInt("index", -1);
         final String repeat = call.getString("repeat", "off");
         getActivity().runOnUiThread(() -> {
@@ -484,6 +558,13 @@ public class NativePlayerPlugin extends Plugin {
             while (titles.size() < queue.size()) titles.add("");
             while (artists.size() < queue.size()) artists.add("");
             while (albums.size() < queue.size()) albums.add("");
+            durationsSec.clear();
+            for (String s : nextDurations) {
+                int v = 0;
+                try { v = (int) Double.parseDouble(s); } catch (Exception e) { v = 0; }
+                durationsSec.add(v);
+            }
+            while (durationsSec.size() < queue.size()) durationsSec.add(0);
             queueIndex = index;
             repeatMode = repeat;
             errorStreak = 0;
@@ -558,7 +639,7 @@ public class NativePlayerPlugin extends Plugin {
         final String url = call.getString("url", "");
         final String name = call.getString("name", "");
         final long minBytes = call.getInt("minBytes", 0).longValue();
-        if (url.length() == 0 || name.length() == 0) { call.reject("bad args"); return; }
+        if (url.length() == 0 || name.length() == 0) { failDownload(call, "bad args"); return; }
         new Thread(() -> {
             java.net.HttpURLConnection conn = null;
             File part = null;
@@ -572,10 +653,12 @@ public class NativePlayerPlugin extends Plugin {
                 }
                 conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
                 conn.setConnectTimeout(20000);
-                conn.setReadTimeout(30000);
+                // Generous: a server-side transcode can pause between chunks,
+                // and on mobile data a large file streams in slowly.
+                conn.setReadTimeout(60000);
                 conn.setInstanceFollowRedirects(true);
                 int code = conn.getResponseCode();
-                if (code != 200) { call.reject("http " + code); return; }
+                if (code != 200) { failDownload(call, "http " + code); return; }
                 long expected = -1;
                 try {
                     String cl = conn.getHeaderField("Content-Length");
@@ -585,7 +668,7 @@ public class NativePlayerPlugin extends Plugin {
                 // cache it, accept the download only if it reaches a plausible
                 // size for the track's duration — enough to catch a truncated
                 // response, which is the failure that matters here.
-                if (expected <= 0 && minBytes <= 0) { call.reject("no length"); return; }
+                if (expected <= 0 && minBytes <= 0) { failDownload(call, "no length"); return; }
                 part = new File(streamCacheDir(), name + ".part");
                 java.io.InputStream in = conn.getInputStream();
                 FileOutputStream fos = new FileOutputStream(part);
@@ -599,8 +682,8 @@ public class NativePlayerPlugin extends Plugin {
                 fos.close();
                 in.close();
                 long required = (expected > 0) ? expected : minBytes;
-                if (total < required) { part.delete(); call.reject("incomplete"); return; }
-                if (!part.renameTo(out)) { part.delete(); call.reject("rename failed"); return; }
+                if (total < required) { part.delete(); failDownload(call, "incomplete " + total + "/" + required); return; }
+                if (!part.renameTo(out)) { part.delete(); failDownload(call, "rename failed"); return; }
                 downloadCount++;
                 trimCache();
                 JSObject ret = new JSObject();
@@ -608,7 +691,7 @@ public class NativePlayerPlugin extends Plugin {
                 call.resolve(ret);
             } catch (Exception e) {
                 try { if (part != null && part.exists()) part.delete(); } catch (Exception ig) { /* ignore */ }
-                call.reject("download failed: " + e.getMessage());
+                failDownload(call, String.valueOf(e.getClass().getSimpleName()) + ": " + e.getMessage());
             } finally {
                 try { if (conn != null) conn.disconnect(); } catch (Exception ig) { /* ignore */ }
             }
