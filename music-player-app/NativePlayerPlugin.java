@@ -61,7 +61,7 @@ public class NativePlayerPlugin extends Plugin {
     // Counters surfaced to the UI so playback problems can be identified on the
     // device without a debugger attached.
     private int bufferingCount = 0, focusLossCount = 0, errorCount = 0, downloadCount = 0;
-    private int truncatedCount = 0, dlFailCount = 0;
+    private int truncatedCount = 0, dlFailCount = 0, shortFileCount = 0;
     private String lastDlError = "";
     // Progress tracking, used to tell a real end-of-track from a stream that
     // simply stopped early (which MediaPlayer reports identically).
@@ -131,6 +131,7 @@ public class NativePlayerPlugin extends Plugin {
         d.put("dlFails", dlFailCount);
         d.put("lastDlError", lastDlError);
         d.put("truncated", truncatedCount);
+        d.put("shortFiles", shortFileCount);
         // Whether the current track is playing from disk or off the network —
         // the quickest way to tell whether caching is actually working.
         d.put("mode", currentSource.startsWith("http") ? "stream" : "file");
@@ -464,13 +465,25 @@ public class NativePlayerPlugin extends Plugin {
 
     // How long the current track really is: the player's own figure when it has
     // one, otherwise the duration the server reported for this queue entry.
+    // Take the LONGER of what the player reports and what the server said. A
+    // half-written cache file makes the player report the short file's own
+    // length, so position reaches "the end" and a truncated track looks like a
+    // clean finish — trusting the player alone made this undetectable.
     private int expectedDurationMs() {
-        if (durationMs > 0) return durationMs;
+        int fromServer = 0;
         if (queueIndex >= 0 && queueIndex < durationsSec.size()) {
             int s = durationsSec.get(queueIndex);
-            if (s > 0) return s * 1000;
+            if (s > 0) fromServer = s * 1000;
         }
-        return 0;
+        return Math.max(durationMs > 0 ? durationMs : 0, fromServer);
+    }
+
+    private void deleteCacheFile(String path) {
+        try {
+            if (path == null || path.length() == 0 || path.startsWith("http")) return;
+            File f = new File(path);
+            if (f.exists()) f.delete();
+        } catch (Exception e) { /* ignore */ }
     }
 
     // MediaPlayer reports a stream that died mid-track exactly the same way as a
@@ -478,20 +491,42 @@ public class NativePlayerPlugin extends Plugin {
     // dropped connection from being heard as "song cut short, next song".
     private void handleCompletion() {
         int expected = expectedDurationMs();
-        boolean truncated = expected > 0 && lastPositionMs > 0 && lastPositionMs < expected - 5000;
+        boolean short_ = expected > 0 && lastPositionMs > 0 && lastPositionMs < expected - 5000;
         // Only retry while we're still making forward progress; if a retry
         // returns to the same spot the source is genuinely short, so move on
         // rather than looping on it.
-        if (truncated && lastPositionMs > lastResumeAtMs + 1000) {
-            truncatedCount++;
-            lastResumeAtMs = lastPositionMs;
+        boolean progressed = lastPositionMs > lastResumeAtMs + 1000;
+        if (short_ && progressed) {
             int resumeAt = lastPositionMs;
-            String src = currentSource;
-            String fb = currentFallback;
-            emitDiag();
-            setDataSourceAndPrepare(src, true, fb);
-            pendingSeekMs = resumeAt;
-            return;
+            boolean fromFile = !currentSource.startsWith("http");
+            if (fromFile) {
+                // The cached file is incomplete. Bin it so it gets fetched
+                // again, and finish this track from the network rather than
+                // cutting it short.
+                shortFileCount++;
+                deleteCacheFile(currentSource);
+                JSObject bad = new JSObject();
+                bad.put("index", queueIndex);
+                emit("badcache", bad);
+                if (currentFallback.length() > 0) {
+                    String fb = currentFallback;
+                    emitDiag();
+                    setDataSourceAndPrepare(fb, true, "");
+                    pendingSeekMs = resumeAt;
+                    lastResumeAtMs = resumeAt;
+                    return;
+                }
+                emitDiag();
+            } else {
+                truncatedCount++;
+                String src = currentSource;
+                String fb = currentFallback;
+                emitDiag();
+                setDataSourceAndPrepare(src, true, fb);
+                pendingSeekMs = resumeAt;
+                lastResumeAtMs = resumeAt;
+                return;
+            }
         }
         advanceOnCompletion();
     }
@@ -664,10 +699,11 @@ public class NativePlayerPlugin extends Plugin {
                     String cl = conn.getHeaderField("Content-Length");
                     if (cl != null) expected = Long.parseLong(cl.trim());
                 } catch (Exception e) { expected = -1; }
-                // A transcode is sent without a length. Rather than refuse to
-                // cache it, accept the download only if it reaches a plausible
-                // size for the track's duration — enough to catch a truncated
-                // response, which is the failure that matters here.
+                // A transcode is sent without a length, so size is the only
+                // completeness signal we have. minBytes is derived from the
+                // track's duration by the caller; it must be generous enough to
+                // reject a half-finished download, since a file that passes
+                // here is trusted from then on.
                 if (expected <= 0 && minBytes <= 0) { failDownload(call, "no length"); return; }
                 part = new File(streamCacheDir(), name + ".part");
                 java.io.InputStream in = conn.getInputStream();

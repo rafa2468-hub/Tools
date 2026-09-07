@@ -835,7 +835,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.27';
+const APP_VERSION = '1.7.28';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1077,11 +1077,14 @@ class NativeAudioAdapter {
     p.addListener('error', () => { this._emit('error'); });
     // Native auto-advanced to the next queue track on its own (screen off).
     p.addListener('advanced', (d) => { try { handleNativeAdvanced(d && d.index); } catch (e) { /* ignore */ } });
+    // A cached file turned out to be incomplete and has been deleted. Forget
+    // the path so the track is fetched again next time it comes round.
+    p.addListener('badcache', (d) => { try { forgetCachedTrack(d && d.index); } catch (e) { /* ignore */ } });
     // Playback-health counters (buffering stalls, audio-focus losses, errors).
     p.addListener('diag', (d) => {
       try {
         if (!d) return;
-        state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, mode: d.mode || '' };
+        state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, shortFiles: d.shortFiles | 0, mode: d.mode || '' };
       } catch (e) { /* ignore */ }
     });
   }
@@ -2084,9 +2087,11 @@ function nativeSourceForTrack(t) {
       const p = nativePlayerPlugin();
       if (!p || !p.download) return '';
       const name = jellyfinCacheName(t);
-      // Floor for a complete file (~96 kbps). Lets us reject a truncated
-      // download even when the server sends no Content-Length.
-      const minBytes = Math.floor((t.durationSec || 0) * 12000);
+      // Completeness floor for downloads the server sends without a length
+      // (transcodes). The stream is requested at up to 320 kbps, so ~24 kB/s
+      // is comfortably below a real file yet still rejects the half-finished
+      // downloads that were being cached and then played short.
+      const minBytes = Math.floor((t.durationSec || 0) * 24000);
       try {
         const hit = await p.cachedPath({ name });
         if (hit && hit.path) { t._nativePath = hit.path; return hit.path; }
@@ -2205,6 +2210,16 @@ async function fillNativeQueueAhead(seq) {
     _fillingAhead = false;
     if (_fillAgain) { _fillAgain = false; fillNativeQueueAhead(_nativeQueueSeq); }
   }
+}
+// Native found a cached file to be incomplete and deleted it. Drop our record
+// of it so the next play re-downloads rather than reusing a bad file, and clear
+// the queue entry so native streams it in the meantime.
+function forgetCachedTrack(index) {
+  if (typeof index !== 'number' || index < 0 || index >= state.queue.length) return;
+  const t = trackById(state.queue[index]);
+  if (t) delete t._nativePath;
+  const p = nativePlayerPlugin();
+  if (p) { try { p.setSource({ index, source: '' }); } catch (e) { /* ignore */ } }
 }
 // Native told us it auto-advanced (screen was likely off). Catch the UI up to
 // the track native is now playing, without touching the audio (native owns it).
@@ -2781,7 +2796,8 @@ function diagLine() {
   // off" and "caching is being refused", which look identical otherwise.
   const fail = d.dlFails ? ` · dlfail ${d.dlFails}${d.lastDlError ? ` (${d.lastDlError})` : ''}` : '';
   const cut = d.truncated ? ` · cut ${d.truncated}` : '';
-  return `${src}${dl}${fail}${cut} · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
+  const bad = d.shortFiles ? ` · badfile ${d.shortFiles}` : '';
+  return `${src}${dl}${fail}${cut}${bad} · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
 }
 async function refreshDiag() {
   const p = nativePlayerPlugin();
@@ -2789,7 +2805,7 @@ async function refreshDiag() {
   try {
     const d = await p.getDiag();
     if (!d) return;
-    state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, mode: d.mode || '' };
+    state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, shortFiles: d.shortFiles | 0, mode: d.mode || '' };
     const el = document.getElementById('diag-line');
     if (el) el.textContent = `Music Player v${APP_VERSION}${diagLine()}`;
   } catch (e) { /* ignore */ }
