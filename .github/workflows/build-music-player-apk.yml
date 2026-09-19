@@ -29,7 +29,14 @@ jobs:
           distribution: zulu
           java-version: '17'
 
+      # Pin the packages: the action's default set still includes the legacy
+      # 'tools' package, which Google removed from the SDK repository — sdkmanager
+      # then exits 1 and the build dies before anything is even staged. The runner
+      # already ships the SDK, and Gradle/Capacitor fetch the platform and
+      # build-tools they need, so platform-tools alone is enough.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
       # Cache Gradle downloads so re-runs finish faster
       - uses: actions/cache@v4
