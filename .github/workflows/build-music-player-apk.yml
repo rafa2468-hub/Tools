@@ -34,7 +34,7 @@ jobs:
       # then exits 1 and the build dies before anything is even staged. The runner
       # already ships the SDK, and Gradle/Capacitor fetch the platform and
       # build-tools they need, so platform-tools alone is enough.
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools'
 
