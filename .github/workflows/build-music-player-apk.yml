@@ -11,7 +11,13 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: that label moves to Ubuntu 26 on
+    # 2026-10-19, which can shift the preinstalled JDK and Android SDK and
+    # break this build with no change on our side. The tradeoff is that newer
+    # runner images (and their toolchain/security updates) now need a manual
+    # bump here — worth it, since this workflow is the only route the APK
+    # takes to the phone. Today this is a no-op: ubuntu-latest is 24.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Needed so the build can publish the APK as a GitHub Release asset.
     permissions:
@@ -39,7 +45,7 @@ jobs:
           packages: 'platform-tools'
 
       # Cache Gradle downloads so re-runs finish faster
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.gradle/caches
@@ -138,7 +144,7 @@ jobs:
         run: test -f music-player-debug.apk && echo "APK staged"
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: music-player-apk
           path: music-player-debug.apk
