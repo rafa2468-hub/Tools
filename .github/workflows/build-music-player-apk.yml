@@ -69,7 +69,7 @@ jobs:
         working-directory: music-player-app
         run: npx cap add android
 
-      - name: Apply custom MainActivity + AudioFocus plugin
+      - name: Apply custom MainActivity + native player plugins
         working-directory: music-player-app
         run: |
           dest="android/app/src/main/java/com/brokis/musicplayer"
@@ -77,16 +77,20 @@ jobs:
           cp MainActivity.java "$dest/MainActivity.java"
           cp AudioFocusPlugin.java "$dest/AudioFocusPlugin.java"
           cp NativePlayerPlugin.java "$dest/NativePlayerPlugin.java"
+          cp PlaybackService.java "$dest/PlaybackService.java"
           echo "--- copied java sources ---"; ls -1 "$dest"
 
-      - name: Add media-playback foreground-service permissions to manifest
+      - name: Add media-playback service + permissions to manifest
         working-directory: music-player-app
         run: |
           M="android/app/src/main/AndroidManifest.xml"
-          # The media-session plugin runs a foregroundServiceType=mediaPlayback
-          # service; Android 14 (targetSdk 34) requires these permissions declared.
+          # NativePlayerPlugin runs PlaybackService as a foregroundServiceType=
+          # mediaPlayback service; Android 14 (targetSdk 34) requires these
+          # permissions and the service's type declared.
           sed -i '/android.permission.INTERNET/a\    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.WAKE_LOCK"/>' "$M"
+          sed -i 's#</application>#    <service android:name="com.brokis.musicplayer.PlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback"/>\n    </application>#' "$M"
           echo "--- manifest permissions ---"; grep -i "uses-permission" "$M"
+          echo "--- manifest service ---"; grep -q 'com.brokis.musicplayer.PlaybackService' "$M" && grep -i "PlaybackService" "$M"
 
       - name: Generate launcher icons from the PWA icon (best-effort)
         working-directory: music-player-app
