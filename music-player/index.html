@@ -658,6 +658,21 @@
   .conn-status.ok { color: var(--accent-2); background: rgba(74,214,255,0.08); }
   .conn-status.err { color: var(--danger); background: rgba(255,93,108,0.08); }
   .conn-hint { font-size: 11px; color: var(--muted); padding: 0 18px 12px; line-height: 1.5; }
+  .playback-log {
+    display: block;
+    width: calc(100% - 36px);
+    margin: 4px 18px 0;
+    height: 50vh;
+    resize: none;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font: 11px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre;
+    overflow: auto;
+  }
 
   .lib-footer {
     padding: 18px 18px 24px;
@@ -835,7 +850,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.30';
+const APP_VERSION = '1.7.31';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1177,6 +1192,14 @@ class NativeAudioAdapter {
 }
 
 const audio = IS_NATIVE ? new NativeAudioAdapter() : document.getElementById('audio');
+if (IS_NATIVE) {
+  nativeLog(`web app v${APP_VERSION} loaded`);
+  // When the app is opened or put away: events the player sent while the
+  // screen was off arrive in a burst at the "opened" line.
+  document.addEventListener('visibilitychange', () => {
+    nativeLog(document.visibilityState === 'visible' ? 'opened (in front)' : 'put in the background');
+  });
+}
 const fileInput = document.getElementById('file-input');
 const folderInput = document.getElementById('folder-input');
 const folderPickLabel = document.getElementById('folder-pick');
@@ -2067,6 +2090,17 @@ function nativePlayerPlugin() {
   const C = window.Capacitor;
   return (C && C.Plugins && C.Plugins.NativePlayer) ? C.Plugins.NativePlayer : null;
 }
+// Add a line to the native playback log (Settings → Playback log) for things
+// only the web layer knows about: its own Next / Previous, the sleep timer,
+// the app coming to the front. Native logs everything that reaches the player.
+function nativeLog(message) {
+  const p = nativePlayerPlugin();
+  if (!p || !p.log) return;
+  try {
+    const r = p.log({ message: String(message) });
+    if (r && r.catch) r.catch(() => {});
+  } catch (e) { /* ignore */ }
+}
 // A local track's file on disk, if it's been written yet ('' until then —
 // native skips empty entries rather than stopping).
 function nativeSourceSync(t) {
@@ -2763,6 +2797,9 @@ function openSettingsSheet() {
         : 'The server must allow CORS from <code>' + escapeHtml(location.origin) + '</code>. On Jellyfin: Dashboard → Networking → CORS Hosts.'}
     </div>
     <div class="conn-hint" id="diag-line" style="text-align:center;opacity:0.6">Music Player v${APP_VERSION}${diagLine()}</div>
+    ${IS_NATIVE ? `<div class="settings-row" style="padding-top:0">
+      <button class="secondary" data-settings-act="showlog" type="button">Playback log</button>
+    </div>` : ''}
   `;
   sheetBackdrop.classList.add('visible');
   sheetBackdrop.dataset.settings = 'jellyfin';
@@ -2807,8 +2844,50 @@ async function refreshDiag() {
   } catch (e) { /* ignore */ }
 }
 
+// The native playback log: every start, stop, skip and pause with its cause.
+// Shown in a box with a Copy button, so it can be pasted into a message.
+async function showPlaybackLog() {
+  const p = nativePlayerPlugin();
+  let text = '';
+  try {
+    const r = (p && p.getLog) ? await p.getLog() : null;
+    text = (r && r.text) || '';
+  } catch (e) { /* ignore */ }
+  await refreshDiag();
+  const full = `Music Player v${APP_VERSION}${diagLine()}\n` + (text || '(the log is empty)\n');
+  sheetBody.innerHTML = `
+    <div class="sheet-title">Playback log</div>
+    <textarea id="playback-log" class="playback-log" readonly spellcheck="false">${escapeHtml(full)}</textarea>
+    <div class="settings-row">
+      <button class="primary" data-settings-act="copylog" type="button">Copy</button>
+      <button class="secondary" data-settings-act="cancel" type="button">Close</button>
+    </div>
+  `;
+  const box = document.getElementById('playback-log');
+  if (box) box.scrollTop = box.scrollHeight; // newest lines at the bottom
+}
+
+function copyPlaybackLog() {
+  const box = document.getElementById('playback-log');
+  if (!box) return;
+  let copied = false;
+  // execCommand runs inside the tap itself, which the Android WebView needs;
+  // the async clipboard API is the fallback.
+  try { box.select(); copied = document.execCommand('copy'); } catch (e) { copied = false; }
+  if (copied) { showToast('Playback log copied'); return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(box.value).then(
+      () => showToast('Playback log copied'),
+      () => showToast('Copy failed: select the text and copy it'));
+    return;
+  }
+  showToast('Copy failed: select the text and copy it');
+}
+
 async function handleSettingsAction(act) {
   if (act === 'cancel') { closeSheet(); return; }
+  if (act === 'showlog') { await showPlaybackLog(); return; }
+  if (act === 'copylog') { copyPlaybackLog(); return; }
   if (act === 'disconnect') {
     closeSheet();
     if (!confirm('Disconnect from Jellyfin? The cached library will be cleared from this device.')) return;
@@ -3358,6 +3437,7 @@ function setSleepTimer(minutes) {
         clearInterval(state.sleep.intervalId);
         state.sleep.intervalId = 0;
         state.sleep.expiresAt = 0;
+        nativeLog('sleep timer ran out, pausing');
         audio.pause();
         showToast('Sleep timer expired');
         refreshNowPlayingSubtitle();
@@ -3418,7 +3498,7 @@ function playPause() {
 
 function nextTrack(auto) {
   if (state.queue.length === 0) return;
-  if (!auto) resetPlaybackErrors(); // user pressed Next — fresh intent
+  if (!auto) { resetPlaybackErrors(); nativeLog('Next pressed'); } // user pressed Next — fresh intent
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
     playWithFallback('repeatOne');
@@ -3441,6 +3521,7 @@ function nextTrack(auto) {
 function prevTrack() {
   if (state.queue.length === 0) return;
   resetPlaybackErrors();
+  nativeLog('Previous pressed');
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
   let pos = state.queuePos - 1;
   if (pos < 0) pos = state.queue.length - 1;
@@ -3902,6 +3983,7 @@ audio.addEventListener('ended', () => {
   if (IS_NATIVE) {
     const hasMore = state.queuePos >= 0 && state.queuePos < state.queue.length - 1;
     if (!hasMore && state.repeat !== 'all') return; // genuinely the end
+    nativeLog('player ran out of queue but the app has more, moving on');
   }
   nextTrack(true);
 });
@@ -3923,7 +4005,7 @@ audio.addEventListener('error', () => {
     }
     return;
   }
-  if (IS_NATIVE) audio._jsError = false;
+  if (IS_NATIVE) { audio._jsError = false; nativeLog('a local file could not be handed to the player'); }
   if (!playbackIntended) {
     showToast('Could not load track');
     if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';

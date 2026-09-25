@@ -71,6 +71,8 @@ public class PlaybackService extends Service {
             foreground = true;
         } catch (Throwable t) {
             // Refused (app in the background on Android 12+): carry on without it.
+            NativePlayerPlugin plugin = NativePlayerPlugin.instance;
+            if (plugin != null) plugin.plog("foreground service refused: " + t.getClass().getSimpleName());
         }
     }
 

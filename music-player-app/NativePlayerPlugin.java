@@ -29,13 +29,20 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -72,6 +79,17 @@ public class NativePlayerPlugin extends Plugin {
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest; // API 26+
     private boolean hasFocus = false;
+    // A call (or another app) has the audio for now and Android hasn't handed
+    // it back yet. hasFocus stays true through this, so without the flag a play
+    // press during a call started the music over the call.
+    private boolean focusSuspended = false;
+    // Polls for the end of a call while a play press is being held for it.
+    private Runnable callWatch;
+    private long callWatchSince = 0;
+    private static final long CALL_WATCH_MS = 2000;
+    // A held play press is dropped after this long, rather than starting the
+    // music hours later.
+    private static final long CALL_WATCH_MAX_MS = 2 * 60 * 60 * 1000L;
     // What the listener wants: true = playing, or trying to (loading, or
     // recovering a dropped stream). Every play/pause path sets it; recovery and
     // the car's play/pause toggle read it.
@@ -159,20 +177,36 @@ public class NativePlayerPlugin extends Plugin {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable ticker;
 
+    // Playback log: a timestamped line for everything that starts, stops or
+    // changes playback, and what caused it (app, car, notification, unplug,
+    // call, error, app restart). The counters say how often; this says what
+    // and when. Kept in a file so it survives the app being killed, and copied
+    // out from Settings.
+    private static final int LOG_KEEP = 1500;
+    private final ArrayDeque<String> logLines = new ArrayDeque<>();
+    private final ExecutorService logWriter = Executors.newSingleThreadExecutor();
+    private int logAppends = 0;
+    private final SimpleDateFormat logTime = new SimpleDateFormat("MM-dd HH:mm:ss", Locale.US);
+
     private final AudioManager.OnAudioFocusChangeListener focusListener = focusChange -> {
         switch (focusChange) {
             case AudioManager.AUDIOFOCUS_LOSS:
                 // Another app took the audio for good; give it up so the next
                 // play() asks for it again instead of playing over them.
                 focusLossCount++; emitDiag();
+                plog("focus lost for good (another app took the audio)" + modeNote());
                 hasFocus = false;
-                userPause();
+                focusSuspended = false;
+                userPause("focus lost");
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
                 // A call or a spoken prompt. Pause, and resume after it if we
-                // were playing.
+                // were playing (or a play press is already waiting for it).
                 focusLossCount++; emitDiag();
-                resumeOnFocusGain = playWhenReady;
+                focusSuspended = true;
+                resumeOnFocusGain = resumeOnFocusGain || playWhenReady;
+                plog("focus lost for now (call or prompt)" + modeNote()
+                    + (resumeOnFocusGain ? ", will resume after it" : ""));
                 if (playWhenReady) {
                     playWhenReady = false;
                     if (retryRunnable != null) { cancelRetry(); needsReload = true; }
@@ -184,9 +218,15 @@ public class NativePlayerPlugin extends Plugin {
                 // Keep playing at full volume. Self-ducking here could leave the
                 // output stuck quiet if the matching GAIN never arrived, and it
                 // is not needed for a music player.
+                plog("focus: duck request ignored, kept playing");
                 break;
             case AudioManager.AUDIOFOCUS_GAIN:
-                if (resumeOnFocusGain) { resumeOnFocusGain = false; userPlay(); }
+                // Also how a request made during a call is granted, once the
+                // call ends.
+                hasFocus = true;
+                focusSuspended = false;
+                plog("focus back" + (resumeOnFocusGain ? ", resuming" : ""));
+                if (resumeOnFocusGain) { resumeOnFocusGain = false; userPlay("focus back"); }
                 break;
             default:
                 break;
@@ -205,7 +245,7 @@ public class NativePlayerPlugin extends Plugin {
                 emitDiag();
                 // Also cancels a pending resume after a call — otherwise the
                 // call ending would restart the music on the speaker.
-                userPause();
+                userPause("unplug: audio output disconnected");
             });
         }
     };
@@ -213,6 +253,8 @@ public class NativePlayerPlugin extends Plugin {
     @Override
     public void load() {
         instance = this;
+        loadLog();
+        plog("--- app process started ---");
         audioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
         try {
             session = new MediaSession(getContext(), "MusicPlayer");
@@ -235,21 +277,32 @@ public class NativePlayerPlugin extends Plugin {
             // play button do nothing.
             KeyEvent ev = mediaButtonIntent == null ? null
                 : (KeyEvent) mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+            if (ev != null && ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() == 0) {
+                plog("button from car/Bluetooth: " + KeyEvent.keyCodeToString(ev.getKeyCode()));
+            }
             if (ev != null && ev.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
                 if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() == 0) {
-                    if (playWhenReady) userPause(); else userPlay();
+                    if (playWhenReady) userPause(FROM_SESSION); else userPlay(FROM_SESSION);
                 }
                 return true;
             }
             return super.onMediaButtonEvent(mediaButtonIntent);
         }
-        @Override public void onPlay() { userPlay(); }
-        @Override public void onPause() { userPause(); }
-        @Override public void onSkipToNext() { skipNext(); }
-        @Override public void onSkipToPrevious() { skipPrevious(); }
-        @Override public void onSeekTo(long pos) { seekToMs((int) pos); }
-        @Override public void onStop() { userPause(); stopService(); }
+        @Override public void onPlay() { userPlay(FROM_SESSION); }
+        @Override public void onPause() { userPause(FROM_SESSION); }
+        @Override public void onSkipToNext() { skipNext(FROM_SESSION); }
+        @Override public void onSkipToPrevious() { skipPrevious(FROM_SESSION); }
+        @Override public void onSeekTo(long pos) { seekToMs((int) pos, FROM_SESSION); }
+        @Override public void onStop() { userPause(FROM_SESSION + " stop"); stopService(); }
     };
+
+    // Where a command came from, for the playback log. Car and Bluetooth
+    // buttons, the lock screen and the media controls Android draws in the
+    // notification shade all reach the session the same way, so they can't be
+    // told apart. The notification's own buttons come through PlaybackService.
+    private static final String FROM_APP = "app";
+    private static final String FROM_SESSION = "car/lock screen";
+    private static final String FROM_NOTIFICATION = "notification";
 
     private void activateSession() {
         try { if (session != null && !session.isActive()) session.setActive(true); } catch (Exception e) { /* ignore */ }
@@ -405,7 +458,10 @@ public class NativePlayerPlugin extends Plugin {
         try {
             Intent i = new Intent(getContext(), PlaybackService.class).setAction(PlaybackService.ACTION_START);
             getContext().startService(i);
-        } catch (Throwable t) { /* background start refused: play on without it */ }
+        } catch (Throwable t) {
+            // Background start refused: play on without it.
+            plog("foreground service start refused: " + t.getClass().getSimpleName());
+        }
     }
 
     private void stopService() {
@@ -420,7 +476,10 @@ public class NativePlayerPlugin extends Plugin {
         if (resumeOnFocusGain) return;
         idleStop = () -> {
             idleStop = null;
-            if (!playWhenReady && !isPlaying()) stopService();
+            if (!playWhenReady && !isPlaying()) {
+                plog("paused 10 min: notification removed, service stopped");
+                stopService();
+            }
         };
         handler.postDelayed(idleStop, IDLE_STOP_MS);
     }
@@ -431,16 +490,17 @@ public class NativePlayerPlugin extends Plugin {
 
     // Notification buttons, relayed by PlaybackService.
     void handleServiceAction(String action) {
-        if (PlaybackService.ACTION_PLAY.equals(action)) userPlay();
-        else if (PlaybackService.ACTION_PAUSE.equals(action)) userPause();
-        else if (PlaybackService.ACTION_NEXT.equals(action)) skipNext();
-        else if (PlaybackService.ACTION_PREV.equals(action)) skipPrevious();
-        else if (PlaybackService.ACTION_STOP.equals(action)) { userPause(); stopService(); }
+        if (PlaybackService.ACTION_PLAY.equals(action)) userPlay(FROM_NOTIFICATION);
+        else if (PlaybackService.ACTION_PAUSE.equals(action)) userPause(FROM_NOTIFICATION);
+        else if (PlaybackService.ACTION_NEXT.equals(action)) skipNext(FROM_NOTIFICATION);
+        else if (PlaybackService.ACTION_PREV.equals(action)) skipPrevious(FROM_NOTIFICATION);
+        else if (PlaybackService.ACTION_STOP.equals(action)) { userPause(FROM_NOTIFICATION + " stop"); stopService(); }
     }
 
     // The app was swiped away from recents. Keep playing if it's playing;
     // otherwise clear the notification.
     void onTaskRemoved() {
+        plog("app swiped away from recents" + (playWhenReady || isPlaying() ? ", still playing" : ""));
         if (!playWhenReady && !isPlaying()) stopService();
     }
 
@@ -474,6 +534,175 @@ public class NativePlayerPlugin extends Plugin {
 
     private void emitDiag() {
         emit("diag", diagObject());
+    }
+
+    // ---- playback log ----
+
+    private File logFile() {
+        return new File(getContext().getFilesDir(), "playback-log.txt");
+    }
+
+    // Pick up the log from before this process started (it's how an app
+    // restart shows up), trimmed to the newest LOG_KEEP lines.
+    private void loadLog() {
+        synchronized (logLines) {
+            try (BufferedReader r = new BufferedReader(new FileReader(logFile()))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    logLines.addLast(line);
+                    if (logLines.size() > LOG_KEEP) logLines.removeFirst();
+                }
+            } catch (Exception e) { /* no log yet */ }
+        }
+        rewriteLog();
+    }
+
+    private void rewriteLog() {
+        final List<String> snapshot;
+        synchronized (logLines) {
+            snapshot = new ArrayList<>(logLines);
+            logAppends = 0;
+        }
+        final File f = logFile();
+        try {
+            logWriter.execute(() -> {
+                try (FileOutputStream out = new FileOutputStream(f, false)) {
+                    StringBuilder sb = new StringBuilder();
+                    for (String l : snapshot) sb.append(l).append('\n');
+                    out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+                } catch (Exception e) { /* ignore */ }
+            });
+        } catch (Exception e) { /* writer shut down */ }
+    }
+
+    // Add one line. The file is appended to (off the main thread) and rewritten
+    // from the newest lines once it has doubled, so it stays small.
+    void plog(String msg) {
+        final String line = logTime.format(new Date()) + "  " + msg;
+        boolean trim;
+        synchronized (logLines) {
+            logLines.addLast(line);
+            while (logLines.size() > LOG_KEEP) logLines.removeFirst();
+            trim = ++logAppends >= LOG_KEEP;
+        }
+        if (trim) { rewriteLog(); return; }
+        final File f = logFile();
+        try {
+            logWriter.execute(() -> {
+                try (FileOutputStream out = new FileOutputStream(f, true)) {
+                    out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+                } catch (Exception e) { /* ignore */ }
+            });
+        } catch (Exception e) { /* writer shut down */ }
+    }
+
+    private static String fmt(int ms) {
+        int s = Math.max(0, ms) / 1000;
+        return (s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60);
+    }
+
+    // Queue entry i as the log names it: position and title.
+    private String trackLabel(int i) {
+        if (i < 0 || i >= ids.size()) return "(no track)";
+        String t = at(titles, i);
+        if (t.length() > 40) t = t.substring(0, 40) + "...";
+        return "#" + i + " \"" + t + "\"";
+    }
+
+    // What kind of source a path is: a downloaded Jellyfin file, one of the
+    // listener's own files, the original file streamed, or a transcode.
+    private String srcKind(String path) {
+        if (path == null || path.length() == 0) return "nothing";
+        if (!path.startsWith("http")) return isStreamCacheFile(path) ? "downloaded file" : "local file";
+        String trans = jellyfinUrl(transcodeTemplate, queueIndex);
+        return (trans.length() > 0 && trans.equals(path)) ? "transcode" : "stream";
+    }
+
+    private String modeNote() {
+        int m = AudioManager.MODE_NORMAL;
+        try { if (audioManager != null) m = audioManager.getMode(); } catch (Exception e) { /* ignore */ }
+        if (m == AudioManager.MODE_NORMAL) return "";
+        if (m == AudioManager.MODE_RINGTONE) return " [phone ringing]";
+        if (m == AudioManager.MODE_IN_CALL) return " [phone call]";
+        if (m == AudioManager.MODE_IN_COMMUNICATION) return " [voice/video call]";
+        return " [phone mode " + m + "]";
+    }
+
+    // ---- calls ----
+
+    // A phone or voice/video call is ringing or in progress (WhatsApp-style
+    // calls set MODE_IN_COMMUNICATION).
+    private boolean inCall() {
+        try {
+            if (audioManager == null) return false;
+            int m = audioManager.getMode();
+            return m == AudioManager.MODE_RINGTONE || m == AudioManager.MODE_IN_CALL
+                || m == AudioManager.MODE_IN_COMMUNICATION || m == AudioManager.MODE_CALL_SCREENING
+                || m == AudioManager.MODE_CALL_REDIRECT || m == AudioManager.MODE_COMMUNICATION_REDIRECT;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // Decide whether a play request may start the music now. A car,
+    // Bluetooth, lock-screen or notification press during a call is held and
+    // starts the music when the call ends. A tap in the app itself always goes
+    // ahead (it's deliberate, and covers a phone that leaves its call mode
+    // stuck); Android's own focus answer still keeps it off a real phone call.
+    private boolean gatePlay(String from) {
+        if (!FROM_APP.equals(from) && inCall()) {
+            holdForCall(from);
+            return false;
+        }
+        if (focusSuspended) {
+            // Paused for something that never handed the audio back, and the
+            // listener has pressed play: ask for it again.
+            focusSuspended = false;
+            hasFocus = false;
+        }
+        return true;
+    }
+
+    // Remember a play press until the call ends. Android's focus GAIN normally
+    // resumes it; the watch covers a call that never took focus from us.
+    private void holdForCall(String why) {
+        playWhenReady = false;
+        resumeOnFocusGain = true;
+        cancelIdleStop();
+        plog("play (" + why + ") held: call in progress" + modeNote() + ", starts when it ends");
+        startCallWatch();
+        publishState();
+    }
+
+    private void startCallWatch() {
+        stopCallWatch();
+        callWatchSince = SystemClock.elapsedRealtime();
+        callWatch = new Runnable() {
+            @Override
+            public void run() {
+                if (!resumeOnFocusGain) { callWatch = null; return; }
+                if (SystemClock.elapsedRealtime() - callWatchSince > CALL_WATCH_MAX_MS) {
+                    callWatch = null;
+                    resumeOnFocusGain = false;
+                    plog("held play dropped: still in a call after 2 hours");
+                    publishState();
+                    scheduleIdleStop();
+                    return;
+                }
+                if (!inCall() && !focusSuspended) {
+                    callWatch = null;
+                    resumeOnFocusGain = false;
+                    userPlay("call ended");
+                    return;
+                }
+                handler.postDelayed(this, CALL_WATCH_MS);
+            }
+        };
+        handler.postDelayed(callWatch, CALL_WATCH_MS);
+    }
+
+    private void stopCallWatch() {
+        if (callWatch != null) { handler.removeCallbacks(callWatch); callWatch = null; }
     }
 
     private boolean isPlaying() {
@@ -524,10 +753,14 @@ public class NativePlayerPlugin extends Plugin {
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build();
+                    // Delayed gain: a request made during a call is answered
+                    // "later" and granted (focus GAIN) when the call ends,
+                    // instead of being refused outright.
                     focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                         .setAudioAttributes(attrs)
                         .setOnAudioFocusChangeListener(focusListener, handler)
                         .setWillPauseWhenDucked(false)
+                        .setAcceptsDelayedFocusGain(true)
                         .build();
                 }
                 res = audioManager.requestAudioFocus(focusRequest);
@@ -603,6 +836,7 @@ public class NativePlayerPlugin extends Plugin {
         // during an async load isn't lost.
         playWhenReady = autoplay;
         emit("loadstart");
+        plog("  open " + srcKind(currentSource) + (pendingSeekMs > 0 ? " at " + fmt(pendingSeekMs) : ""));
         if (currentSource.length() == 0) { onSourceFailed(lastPositionMs); return; }
         try {
             player = new MediaPlayer();
@@ -627,6 +861,14 @@ public class NativePlayerPlugin extends Plugin {
                 durationMs = dur;
                 d.put("duration", dur > 0 ? dur / 1000.0 : 0);
                 emit("loadedmetadata", d);
+                // A file whose own length differs from the server's by more
+                // than the 5 s tolerance gets judged "cut short" when it ends.
+                if (queueIndex >= 0 && queueIndex < durationsSec.size() && currentId.equals(at(ids, queueIndex))) {
+                    int server = durationsSec.get(queueIndex) * 1000;
+                    if (server > 0 && dur > 0 && Math.abs(server - dur) > 5000) {
+                        plog("  note: " + srcKind(currentSource) + " is " + fmt(dur) + " long, server says " + fmt(server));
+                    }
+                }
                 // Resuming (a dropped stream, a switch to another source): pick
                 // up where it stopped.
                 if (pendingSeekMs > 0) {
@@ -669,6 +911,7 @@ public class NativePlayerPlugin extends Plugin {
         int pos = lastPositionMs;
         boolean fromNetwork = currentSource.startsWith("http");
         boolean undecodable = extra == MediaPlayer.MEDIA_ERROR_UNSUPPORTED || extra == MediaPlayer.MEDIA_ERROR_MALFORMED;
+        plog("error " + what + "/" + extra + " on " + srcKind(currentSource) + " at " + fmt(pos) + " " + trackLabel(queueIndex));
         releasePlayer();
         if (fromNetwork && !undecodable) onNetworkDrop(pos);
         else onSourceFailed(pos);
@@ -682,6 +925,7 @@ public class NativePlayerPlugin extends Plugin {
         if (isStreamCacheFile(currentSource)) deleteCacheFile(currentSource);
         if (!alternates.isEmpty()) {
             String next = alternates.remove(0);
+            plog("  can't play " + srcKind(currentSource) + ", trying " + srcKind(next));
             retryAttempt = 0;
             prepareSource(next, pos, playWhenReady);
             return;
@@ -696,6 +940,7 @@ public class NativePlayerPlugin extends Plugin {
         lastPositionMs = pos;
         if (!playWhenReady) {
             // Nobody is listening right now; rebuild on the next play().
+            plog("  stream dropped while paused at " + fmt(pos) + ", reloads on play");
             needsReload = true;
             publishState();
             return;
@@ -704,6 +949,7 @@ public class NativePlayerPlugin extends Plugin {
             long delay = RETRY_DELAYS_MS[retryAttempt++];
             retryCount++;
             emitDiag();
+            plog("  stream dropped at " + fmt(pos) + ", retry " + retryAttempt + "/" + RETRY_DELAYS_MS.length + " in " + (delay / 1000) + "s");
             final String src = currentSource;
             retryRunnable = () -> {
                 retryRunnable = null;
@@ -721,6 +967,7 @@ public class NativePlayerPlugin extends Plugin {
             publishState();
             return;
         }
+        plog("  stream still down after " + RETRY_DELAYS_MS.length + " retries");
         onSourceFailed(pos);
     }
 
@@ -728,6 +975,7 @@ public class NativePlayerPlugin extends Plugin {
     // (capped, so an unreachable server can't make it skip forever).
     private void giveUpOnTrack() {
         boolean skipping = playWhenReady && !ids.isEmpty() && errorStreak < MAX_ERROR_SKIPS;
+        plog("gave up on " + trackLabel(queueIndex) + (skipping ? ", skipping to the next" : ", stopped"));
         JSObject d = new JSObject();
         d.put("index", queueIndex);
         d.put("skipping", skipping);
@@ -747,16 +995,22 @@ public class NativePlayerPlugin extends Plugin {
 
     private void internalPlay() {
         if (player == null || !prepared) { playWhenReady = true; publishState(); return; }
+        int focus = requestFocus();
+        if (focus == AudioManager.AUDIOFOCUS_REQUEST_DELAYED
+                || (focus != AudioManager.AUDIOFOCUS_REQUEST_GRANTED && inCall())) {
+            // A call has the audio: start when Android hands it back.
+            holdForCall("audio busy");
+            return;
+        }
+        // Refused outside a call: some devices refuse spuriously, so play
+        // anyway rather than silently doing nothing.
         try {
-            if (requestFocus() != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                // Some devices return DELAYED/FAILED; try to play anyway rather
-                // than silently doing nothing.
-            }
             player.setVolume(volume, volume);
             player.start();
             acquireWifiLock();
             // Real playback started — the queue is healthy again.
             errorStreak = 0;
+            plog("  playing " + srcKind(currentSource) + " at " + fmt(currentPositionMs()));
             emit("play");
             emit("playing");
             startTicker();
@@ -780,8 +1034,11 @@ public class NativePlayerPlugin extends Plugin {
     }
 
     // Play, from the app, the car, or a notification button.
-    private void userPlay() {
+    private void userPlay(String from) {
         cancelIdleStop();
+        plog("play (" + from + ")" + (queueIndex >= 0 ? " " + trackLabel(queueIndex) + " at " + fmt(currentPositionMs()) : ""));
+        if (!gatePlay(from)) return;
+        stopCallWatch();
         playWhenReady = true;
         resumeOnFocusGain = false;
         activateSession();
@@ -806,10 +1063,13 @@ public class NativePlayerPlugin extends Plugin {
 
     // Pause, from the app, the car, a notification button, or the audio output
     // disconnecting.
-    private void userPause() {
+    private void userPause(String from) {
         boolean wasPlaying = isPlaying();
+        plog("pause (" + from + ")" + (queueIndex >= 0 ? " " + trackLabel(queueIndex) + " at " + fmt(currentPositionMs()) : "")
+            + (wasPlaying ? "" : ", wasn't playing") + (resumeOnFocusGain ? ", cancels resume after call" : ""));
         playWhenReady = false;
         resumeOnFocusGain = false;
+        stopCallWatch();
         if (retryRunnable != null) { cancelRetry(); needsReload = true; }
         internalPause();
         if (!wasPlaying) emit("pause");
@@ -817,8 +1077,9 @@ public class NativePlayerPlugin extends Plugin {
         scheduleIdleStop();
     }
 
-    private void seekToMs(int ms) {
+    private void seekToMs(int ms, String from) {
         int target = Math.max(0, ms);
+        plog("seek to " + fmt(target) + " (" + from + ")");
         try {
             if (player != null && prepared) player.seekTo(target);
             else pendingSeekMs = target;
@@ -887,7 +1148,8 @@ public class NativePlayerPlugin extends Plugin {
     // otherwise streaming while the download catches up — instead of waiting
     // for a whole file to download first. notifyJs is set when the change
     // didn't come from the web layer (auto-advance, car / notification buttons).
-    private void playIndex(int i, boolean notifyJs, boolean autoplay) {
+    private void playIndex(int i, boolean notifyJs, boolean autoplay, String from) {
+        plog("track " + trackLabel(i) + " (" + from + ")" + (autoplay ? "" : ", not playing yet"));
         cancelRetry();
         retryAttempt = 0;
         trackGen++;
@@ -916,6 +1178,7 @@ public class NativePlayerPlugin extends Plugin {
     }
 
     private void emitStopped() {
+        plog("stopped: end of the queue");
         playWhenReady = false;
         emit("pause");
         emit("ended");
@@ -955,6 +1218,8 @@ public class NativePlayerPlugin extends Plugin {
     private void handleCompletion() {
         int expected = expectedDurationMs();
         boolean short_ = expected > 0 && lastPositionMs > 0 && lastPositionMs < expected - 5000;
+        String ended = "end of " + trackLabel(queueIndex) + " at " + fmt(lastPositionMs) + " of " + fmt(expected)
+            + " (" + srcKind(currentSource) + ")";
         if (short_) {
             int resumeAt = lastPositionMs;
             if (!currentSource.startsWith("http")) {
@@ -967,20 +1232,27 @@ public class NativePlayerPlugin extends Plugin {
                 emit("badcache", bad);
                 emitDiag();
                 if (!alternates.isEmpty()) {
+                    plog(ended + ": file ended early, deleted it, finishing from the next source");
                     releasePlayer();
                     prepareSource(alternates.remove(0), resumeAt, true);
                     return;
                 }
+                plog(ended + ": file ended early and there's no other source, moving on");
             } else if (lastPositionMs > lastResumeAtMs + 1000) {
                 // The stream stopped early while still making progress: the
                 // connection dropped. Resume where it cut out. (No progress
                 // since the last resume means the source itself is short.)
                 truncatedCount++;
                 emitDiag();
+                plog(ended + ": stream ended early, reconnecting");
                 releasePlayer();
                 onNetworkDrop(resumeAt);
                 return;
+            } else {
+                plog(ended + ": ended early with no progress since the last resume, moving on");
             }
+        } else {
+            plog(ended + ": finished");
         }
         advanceOnCompletion(false);
     }
@@ -990,7 +1262,7 @@ public class NativePlayerPlugin extends Plugin {
     private void advanceOnCompletion(boolean skipRepeatOne) {
         int n = ids.size();
         if (n == 0) { emitStopped(); return; }
-        if (!skipRepeatOne && "one".equals(repeatMode) && playable(queueIndex)) { playIndex(queueIndex, true, true); return; }
+        if (!skipRepeatOne && "one".equals(repeatMode) && playable(queueIndex)) { playIndex(queueIndex, true, true, "repeat one"); return; }
         int idx = queueIndex;
         for (int step = 0; step < n; step++) {
             idx++;
@@ -998,34 +1270,36 @@ public class NativePlayerPlugin extends Plugin {
                 if ("all".equals(repeatMode)) idx = 0;
                 else { emitStopped(); return; }
             }
-            if (playable(idx)) { playIndex(idx, true, true); return; }
+            if (playable(idx)) { playIndex(idx, true, true, skipRepeatOne ? "skip after error" : "next in queue"); return; }
         }
         emitStopped();
     }
 
     // Next / Previous from the car or the notification (the in-app buttons go
     // through the web layer). Next wraps at the end, like the in-app button.
-    private void skipNext() {
+    // During a call the track still changes, but the music is held until the
+    // call ends.
+    private void skipNext(String from) {
         int n = ids.size();
         if (n == 0) return;
         errorStreak = 0;
         int idx = queueIndex;
         for (int step = 0; step < n; step++) {
             idx = (idx + 1 >= n) ? 0 : idx + 1;
-            if (playable(idx)) { playIndex(idx, true, true); return; }
+            if (playable(idx)) { playIndex(idx, true, gatePlay(from), "next from " + from); return; }
         }
     }
 
-    private void skipPrevious() {
+    private void skipPrevious(String from) {
         int n = ids.size();
         if (n == 0) return;
         errorStreak = 0;
         // More than 3 s in: restart the song, like the in-app button.
-        if (player != null && currentPositionMs() > 3000) { seekToMs(0); return; }
+        if (player != null && currentPositionMs() > 3000) { seekToMs(0, "previous from " + from); return; }
         int idx = queueIndex;
         for (int step = 0; step < n; step++) {
             idx = (idx - 1 < 0) ? n - 1 : idx - 1;
-            if (playable(idx)) { playIndex(idx, true, true); return; }
+            if (playable(idx)) { playIndex(idx, true, gatePlay(from), "previous from " + from); return; }
         }
     }
 
@@ -1066,6 +1340,7 @@ public class NativePlayerPlugin extends Plugin {
             // (transcodes). The stream is requested at up to 320 kbps, so ~24 kB/s
             // is comfortably below a real file yet rejects a half-finished one.
             final long minBytes = durationsSec.get(i) * 24000L;
+            final String label = trackLabel(i);
             inFlight.add(name);
             downloader.execute(() -> {
                 try {
@@ -1082,6 +1357,7 @@ public class NativePlayerPlugin extends Plugin {
                     handler.post(() -> {
                         if (result == null) downloadCount++;
                         else { dlFailCount++; lastDlError = result; }
+                        plog("  download " + label + (result == null ? " done" : " failed: " + result));
                         emitDiag();
                     });
                 } finally {
@@ -1227,6 +1503,8 @@ public class NativePlayerPlugin extends Plugin {
                 if (found >= 0) newIndex = found;
             }
             queueIndex = newIndex;
+            plog("queue from app: " + n + " tracks, at " + trackLabel(newIndex)
+                + (newIndex != index ? " (app said #" + index + ", kept the playing track)" : ""));
             if (newIndex != index && newIndex >= 0) {
                 JSObject d = new JSObject();
                 d.put("index", newIndex);
@@ -1261,7 +1539,7 @@ public class NativePlayerPlugin extends Plugin {
             if (index < 0 || index >= ids.size()) return;
             errorStreak = 0;
             if (autoplay) cancelIdleStop();
-            playIndex(index, false, autoplay);
+            playIndex(index, false, autoplay, FROM_APP);
         });
         call.resolve();
     }
@@ -1287,6 +1565,30 @@ public class NativePlayerPlugin extends Plugin {
     @PluginMethod
     public void getDiag(PluginCall call) {
         call.resolve(diagObject());
+    }
+
+    // The playback log, oldest line first, for Settings to show and copy.
+    @PluginMethod
+    public void getLog(PluginCall call) {
+        StringBuilder sb = new StringBuilder();
+        synchronized (logLines) {
+            for (String l : logLines) sb.append(l).append('\n');
+        }
+        JSObject ret = new JSObject();
+        ret.put("text", sb.toString());
+        call.resolve(ret);
+    }
+
+    // A line from the web layer (its own Next / Previous, sleep timer, the app
+    // coming to the front), so the log has both sides.
+    @PluginMethod
+    public void log(PluginCall call) {
+        final String msg = call.getString("message", "");
+        if (msg != null && msg.length() > 0) {
+            final String line = "app: " + (msg.length() > 200 ? msg.substring(0, 200) : msg);
+            getActivity().runOnUiThread(() -> plog(line));
+        }
+        call.resolve();
     }
 
     @PluginMethod
@@ -1343,6 +1645,7 @@ public class NativePlayerPlugin extends Plugin {
         final int index = call.getInt("index", -1);
         getActivity().runOnUiThread(() -> {
             startDirect(index);
+            plog("load from app: " + trackLabel(index) + (autoplay ? "" : ", not playing yet"));
             if (fallback.length() > 0) alternates.add(fallback);
             prepareSource(url, 0, autoplay);
         });
@@ -1364,6 +1667,7 @@ public class NativePlayerPlugin extends Plugin {
                 // file we're about to overwrite.
                 releasePlayer();
                 startDirect(index);
+                plog("load from app (bytes): " + trackLabel(index) + (autoplay ? "" : ", not playing yet"));
                 byte[] bytes = Base64.decode(data, Base64.DEFAULT);
                 File f = new File(getContext().getCacheDir(), "np_current." + ext);
                 FileOutputStream fos = new FileOutputStream(f);
@@ -1397,28 +1701,31 @@ public class NativePlayerPlugin extends Plugin {
 
     @PluginMethod
     public void play(PluginCall call) {
-        getActivity().runOnUiThread(this::userPlay);
+        getActivity().runOnUiThread(() -> userPlay(FROM_APP));
         call.resolve();
     }
 
     @PluginMethod
     public void pause(PluginCall call) {
-        getActivity().runOnUiThread(this::userPause);
+        getActivity().runOnUiThread(() -> userPause(FROM_APP));
         call.resolve();
     }
 
     @PluginMethod
     public void seek(PluginCall call) {
         final double seconds = call.getDouble("seconds", 0.0);
-        getActivity().runOnUiThread(() -> seekToMs((int) (seconds * 1000)));
+        getActivity().runOnUiThread(() -> seekToMs((int) (seconds * 1000), FROM_APP));
         call.resolve();
     }
 
     @PluginMethod
     public void stop(PluginCall call) {
         getActivity().runOnUiThread(() -> {
+            plog("stop (app)");
             cancelRetry();
+            stopCallWatch();
             playWhenReady = false;
+            resumeOnFocusGain = false;
             needsReload = false;
             releasePlayer();
             currentSource = "";
@@ -1460,8 +1767,10 @@ public class NativePlayerPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        plog("--- app closing ---");
         super.handleOnDestroy();
         cancelRetry();
+        stopCallWatch();
         cancelIdleStop();
         releasePlayer();
         releaseWifiLock();
@@ -1473,6 +1782,8 @@ public class NativePlayerPlugin extends Plugin {
             session = null;
         }
         downloader.shutdownNow();
+        // Let the last lines reach the file, then stop the writer.
+        logWriter.shutdown();
         if (instance == this) instance = null;
     }
 }
