@@ -132,6 +132,9 @@ public class NativePlayerPlugin extends Plugin {
     // Per-track duration from the server, for when the player can't report one
     // (a transcode arrives without a length) and to spot a truncated track.
     private final List<Integer> durationsSec = new ArrayList<>();
+    // Disc * 1000 + track number from the server (0 when unknown), so the fade
+    // can tell when the next song simply continues the same album.
+    private final List<Integer> trackNos = new ArrayList<>();
     // Jellyfin URL templates with an "{id}" placeholder for the item id.
     private String directTemplate = "", transcodeTemplate = "";
     private int queueIndex = -1;
@@ -176,6 +179,18 @@ public class NativePlayerPlugin extends Plugin {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable ticker;
+
+    // Fade-out over the last few seconds of each track. Many downloaded songs
+    // are cut at the source and stop dead at full volume; a short fade makes
+    // that sound deliberate, and a natural ending is already quiet there. Not
+    // applied when the next song continues the same album, so albums that run
+    // track into track stay seamless.
+    private static final int FADE_MS = 3000;
+    private static final long FADE_STEP_MS = 50;
+    // Tracks shorter than this (jingles, intros) are left alone.
+    private static final int FADE_MIN_TRACK_MS = 15000;
+    private Runnable fader;
+    private boolean fadeLogged = false;
 
     // Playback log: a timestamped line for everything that starts, stops or
     // changes playback, and what caused it (app, car, notification, unplug,
@@ -722,6 +737,7 @@ public class NativePlayerPlugin extends Plugin {
                         int dur = player.getDuration();
                         d.put("duration", dur > 0 ? dur / 1000.0 : 0);
                         emit("timeupdate", d);
+                        maybeStartFade();
                         // Ten seconds of steady playback since the last recovery:
                         // the connection is healthy again, so a later drop gets
                         // the full set of retries.
@@ -736,6 +752,85 @@ public class NativePlayerPlugin extends Plugin {
 
     private void stopTicker() {
         if (ticker != null) { handler.removeCallbacks(ticker); ticker = null; }
+    }
+
+    // ---- fade-out ----
+
+    // Volume factor with leftMs of the track remaining: 1 until the fade
+    // starts, then a squared ramp to 0 (a linear ramp sounds like it drops
+    // late and suddenly).
+    static float fadeGain(int leftMs, int fadeMs) {
+        if (leftMs >= fadeMs) return 1f;
+        if (leftMs <= 0) return 0f;
+        float g = leftMs / (float) fadeMs;
+        return g * g;
+    }
+
+    // Whether track `next` follows track `cur` on the same album: the next
+    // track number, or track 1 of the next disc. Numbers are disc * 1000 +
+    // track; 0 means unknown, which never counts as continuing.
+    static boolean continuesAlbum(String albumCur, String albumNext, int cur, int next) {
+        if (albumCur == null || albumCur.length() == 0 || !albumCur.equals(albumNext)) return false;
+        if (cur <= 0 || next <= 0) return false;
+        if (next == cur + 1) return true;
+        return next / 1000 == cur / 1000 + 1 && next % 1000 == 1;
+    }
+
+    private int trackNoAt(int i) {
+        return (i >= 0 && i < trackNos.size()) ? trackNos.get(i) : 0;
+    }
+
+    private boolean nextContinuesAlbum() {
+        int i = queueIndex;
+        if (i < 0 || i + 1 >= ids.size() || !currentId.equals(ids.get(i))) return false;
+        return continuesAlbum(at(albums, i), at(albums, i + 1), trackNoAt(i), trackNoAt(i + 1));
+    }
+
+    // Length the fade counts down to: the file's own length, else the server's.
+    private int fadeTrackMs() {
+        if (durationMs > 0) return durationMs;
+        if (queueIndex >= 0 && queueIndex < durationsSec.size() && currentId.equals(at(ids, queueIndex))) {
+            return durationsSec.get(queueIndex) * 1000;
+        }
+        return 0;
+    }
+
+    // Called from the ticker (every 500 ms). Hands over to a finer 50 ms loop
+    // for the last stretch of the track.
+    private void maybeStartFade() {
+        if (fader != null || player == null || !prepared || !isPlaying()) return;
+        final int total = fadeTrackMs();
+        if (total < FADE_MIN_TRACK_MS) return;
+        if (total - lastPositionMs > FADE_MS + 600) return;
+        if (nextContinuesAlbum()) {
+            if (!fadeLogged) { fadeLogged = true; plog("  no fade: the next song continues the album"); }
+            return;
+        }
+        if (!fadeLogged) { fadeLogged = true; plog("  fading out the last " + (FADE_MS / 1000) + "s"); }
+        fader = new Runnable() {
+            @Override
+            public void run() {
+                if (player == null || !prepared || !isPlaying()) { fader = null; return; }
+                try {
+                    int left = total - player.getCurrentPosition();
+                    if (left > FADE_MS + 1000) {
+                        // Sought back out of the fade: full volume, and let the
+                        // ticker start it again near the end.
+                        player.setVolume(volume, volume);
+                        fader = null;
+                        return;
+                    }
+                    float g = volume * fadeGain(left, FADE_MS);
+                    player.setVolume(g, g);
+                } catch (Exception e) { fader = null; return; }
+                handler.postDelayed(this, FADE_STEP_MS);
+            }
+        };
+        handler.post(fader);
+    }
+
+    private void stopFade() {
+        if (fader != null) { handler.removeCallbacks(fader); fader = null; }
     }
 
     // Request audio focus ONCE and hold it for the whole listening session.
@@ -811,6 +906,7 @@ public class NativePlayerPlugin extends Plugin {
     // Release the current player without emitting playback events.
     private void releasePlayer() {
         stopTicker();
+        stopFade();
         prepared = false;
         if (player != null) {
             try { player.reset(); } catch (Exception e) { /* ignore */ }
@@ -827,6 +923,7 @@ public class NativePlayerPlugin extends Plugin {
     private void prepareSource(String path, int seekMs, boolean autoplay) {
         releasePlayer();
         needsReload = false;
+        fadeLogged = false;
         currentSource = (path == null) ? "" : path;
         pendingSeekMs = Math.max(0, seekMs);
         lastResumeAtMs = pendingSeekMs;
@@ -1014,6 +1111,8 @@ public class NativePlayerPlugin extends Plugin {
             emit("play");
             emit("playing");
             startTicker();
+            // Resumed inside the last seconds: fade from here, no blip.
+            maybeStartFade();
         } catch (Exception e) { /* ignore */ }
         activateSession();
         ensureForeground();
@@ -1027,6 +1126,7 @@ public class NativePlayerPlugin extends Plugin {
                 player.pause();
                 lastPositionMs = player.getCurrentPosition();
                 stopTicker();
+                stopFade();
                 releaseWifiLock();
                 emit("pause");
             }
@@ -1081,10 +1181,18 @@ public class NativePlayerPlugin extends Plugin {
         int target = Math.max(0, ms);
         plog("seek to " + fmt(target) + " (" + from + ")");
         try {
-            if (player != null && prepared) player.seekTo(target);
-            else pendingSeekMs = target;
+            if (player != null && prepared) {
+                player.seekTo(target);
+                // Back to full volume; the ticker restarts the fade if the
+                // seek landed inside it.
+                stopFade();
+                player.setVolume(volume, volume);
+            } else {
+                pendingSeekMs = target;
+            }
         } catch (Exception e) { /* ignore */ }
         lastPositionMs = target;
+        maybeStartFade();
         publishState();
     }
 
@@ -1470,6 +1578,7 @@ public class NativePlayerPlugin extends Plugin {
         final List<String> nArtists = toList(call.getArray("artists"));
         final List<String> nAlbums = toList(call.getArray("albums"));
         final List<String> nDurations = toList(call.getArray("durations"));
+        final List<String> nTrackNos = toList(call.getArray("trackNos"));
         final int index = call.getInt("index", -1);
         final String repeat = call.getString("repeat", "off");
         final String direct = call.getString("directTemplate", "");
@@ -1491,6 +1600,13 @@ public class NativePlayerPlugin extends Plugin {
                 durationsSec.add(v);
             }
             while (durationsSec.size() < n) durationsSec.add(0);
+            trackNos.clear();
+            for (String s : nTrackNos) {
+                int v;
+                try { v = Integer.parseInt(s.trim()); } catch (Exception e) { v = 0; }
+                trackNos.add(v);
+            }
+            while (trackNos.size() < n) trackNos.add(0);
             directTemplate = direct == null ? "" : direct;
             transcodeTemplate = transcode == null ? "" : transcode;
             repeatMode = repeat;

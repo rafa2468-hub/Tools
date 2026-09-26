@@ -850,7 +850,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.31';
+const APP_VERSION = '1.7.32';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -2171,7 +2171,7 @@ async function syncNativeQueue(opts) {
   const p = nativePlayerPlugin();
   if (!p) return;
   const seq = ++_nativeQueueSeq;
-  const ids = [], sources = [], itemIds = [], containers = [], titles = [], artists = [], albums = [], durations = [];
+  const ids = [], sources = [], itemIds = [], containers = [], titles = [], artists = [], albums = [], durations = [], trackNos = [];
   for (const id of state.queue) {
     const t = trackById(id);
     const jf = !!t && (t.source || 'local') === 'jellyfin';
@@ -2183,11 +2183,14 @@ async function syncNativeQueue(opts) {
     artists.push(t ? (artistOf(t) || '') : '');
     albums.push(t && albumOf(t) !== UNSORTED ? (albumOf(t) || '') : '');
     durations.push(String((t && t.durationSec) || 0));
+    // Disc * 1000 + track number, 0 when unknown: lets native skip the end
+    // fade when the next song simply continues the same album.
+    trackNos.push(String(jf && t.indexNumber > 0 ? (t.parentIndexNumber || 1) * 1000 + t.indexNumber : 0));
   }
   const urls = jellyfinUrlTemplates();
   try {
     await p.setQueue({
-      ids, sources, itemIds, containers, titles, artists, albums, durations,
+      ids, sources, itemIds, containers, titles, artists, albums, durations, trackNos,
       index: state.queuePos, repeat: state.repeat || 'off',
       directTemplate: urls.direct, transcodeTemplate: urls.transcode,
     });
