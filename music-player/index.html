@@ -1200,6 +1200,74 @@ if (IS_NATIVE) {
     nativeLog(document.visibilityState === 'visible' ? 'opened (in front)' : 'put in the background');
   });
 }
+
+/* ---------- End-of-track fade ---------- */
+// Many library songs are cut at the source and stop dead at full volume. The
+// last few seconds of every track fade out so the stop sounds deliberate
+// (a natural ending is already quiet there). Skipped when the next song
+// continues the same album, so albums that run track into track stay
+// seamless. The Android app does this natively (NativePlayerPlugin
+// maybeStartFade); this is the browser version, driving audio.volume.
+// webFade.base is the listener's volume: the fade scales it and never
+// replaces it, so a prefs save mid-fade can't store a faded level.
+const FADE_SEC = 3;
+const FADE_MIN_TRACK_SEC = 15; // jingles and intros are left alone
+const webFade = { base: 1, timer: 0 };
+// 1 until the fade starts, then a squared ramp to 0 (a linear ramp sounds
+// like it drops late and suddenly).
+function fadeGain(leftSec) {
+  if (leftSec >= FADE_SEC) return 1;
+  if (leftSec <= 0) return 0;
+  const g = leftSec / FADE_SEC;
+  return g * g;
+}
+// Disc * 1000 + track number; 0 when the server doesn't know it.
+function trackNoOf(t) {
+  return t && t.indexNumber > 0 ? (t.parentIndexNumber || 1) * 1000 + t.indexNumber : 0;
+}
+// Whether `next` is the next track of the same album as `cur` (or track 1 of
+// the next disc). Unknown numbers never count.
+function continuesAlbum(cur, next) {
+  if (!cur || !next) return false;
+  const album = albumOf(cur);
+  if (!album || album === UNSORTED || album !== albumOf(next)) return false;
+  const c = trackNoOf(cur), n = trackNoOf(next);
+  if (c <= 0 || n <= 0) return false;
+  return n === c + 1 || (Math.floor(n / 1000) === Math.floor(c / 1000) + 1 && n % 1000 === 1);
+}
+function stopWebFade(restore) {
+  if (webFade.timer) { clearInterval(webFade.timer); webFade.timer = 0; }
+  if (restore) audio.volume = webFade.base;
+}
+function webFadeTick() {
+  const total = effectiveDuration();
+  const left = total - (audio.currentTime || 0);
+  // Paused, or sought back out of the fade: full volume, and let the next
+  // timeupdate start it again near the end.
+  if (audio.paused || total < FADE_MIN_TRACK_SEC || left > FADE_SEC + 1) { stopWebFade(true); return; }
+  audio.volume = webFade.base * fadeGain(left);
+}
+function maybeStartWebFade() {
+  if (IS_NATIVE || webFade.timer || audio.paused) return;
+  const total = effectiveDuration();
+  if (total < FADE_MIN_TRACK_SEC || total - (audio.currentTime || 0) > FADE_SEC + 0.6) return;
+  const nextPos = state.queuePos + 1;
+  const next = nextPos < state.queue.length ? trackById(state.queue[nextPos]) : null;
+  if (continuesAlbum(state.playingTrack, next)) return;
+  // 50 ms steps. A page that is playing audio is exempt from the browser's
+  // background-tab timer throttling, so this keeps working in a hidden tab.
+  webFade.timer = setInterval(webFadeTick, 50);
+  webFadeTick();
+}
+if (!IS_NATIVE) {
+  audio.addEventListener('timeupdate', maybeStartWebFade);
+  // Resumed or sought into the last seconds: fade from there, no full-volume blip.
+  audio.addEventListener('play', maybeStartWebFade);
+  audio.addEventListener('seeked', () => { stopWebFade(true); maybeStartWebFade(); });
+  // A new track (or the end of this one) starts at the listener's volume.
+  audio.addEventListener('loadstart', () => stopWebFade(true));
+  audio.addEventListener('ended', () => stopWebFade(true));
+}
 const fileInput = document.getElementById('file-input');
 const folderInput = document.getElementById('folder-input');
 const folderPickLabel = document.getElementById('folder-pick');
@@ -1331,6 +1399,7 @@ function loadPrefs() {
     const p = JSON.parse(raw);
     if (typeof p.volume === 'number') {
       audio.volume = p.volume;
+      webFade.base = audio.volume;
     }
     if (typeof p.shuffle === 'boolean') {
       state.shuffle = p.shuffle;
@@ -1347,7 +1416,9 @@ function loadPrefs() {
 function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
-      volume: audio.volume,
+      // The listener's volume, not the element's: that one dips during the
+      // end-of-track fade.
+      volume: webFade.base,
       shuffle: state.shuffle,
       repeat: state.repeat,
     }));
