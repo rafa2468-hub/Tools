@@ -658,6 +658,21 @@
   .conn-status.ok { color: var(--accent-2); background: rgba(74,214,255,0.08); }
   .conn-status.err { color: var(--danger); background: rgba(255,93,108,0.08); }
   .conn-hint { font-size: 11px; color: var(--muted); padding: 0 18px 12px; line-height: 1.5; }
+  .playback-log {
+    display: block;
+    width: calc(100% - 36px);
+    margin: 4px 18px 0;
+    height: 50vh;
+    resize: none;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font: 11px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre;
+    overflow: auto;
+  }
 
   .lib-footer {
     padding: 18px 18px 24px;
@@ -835,7 +850,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.7.29';
+const APP_VERSION = '1.7.32';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1057,6 +1072,12 @@ class NativeAudioAdapter {
     // Whether the app wants playback (set by play()/pause()). Passed through to
     // native load so a play() during an async local-file load isn't lost.
     this._playIntent = false;
+    // Set when the web layer itself failed to hand a track to native (a local
+    // file it couldn't read). Native never saw that track, so the web layer
+    // has to skip it.
+    this._jsError = false;
+    // Whether native's last error came with a skip to the next track.
+    this._nativeSkipping = false;
     this._bind();
   }
   _plugin() {
@@ -1074,9 +1095,12 @@ class NativeAudioAdapter {
     p.addListener('pause', () => { this._paused = true; this._emit('pause'); });
     p.addListener('timeupdate', (d) => { if (d) { this._currentTime = d.position || 0; if (d.duration > 0) this._duration = d.duration; } this._emit('timeupdate'); });
     p.addListener('ended', () => { this._paused = true; this._emit('ended'); });
-    p.addListener('error', () => { this._emit('error'); });
-    // Native auto-advanced to the next queue track on its own (screen off).
-    p.addListener('advanced', (d) => { try { handleNativeAdvanced(d && d.index); } catch (e) { /* ignore */ } });
+    // Native reports an error only once it has already recovered or moved on by
+    // itself, so the web layer just shows it (see the audio 'error' handler).
+    p.addListener('error', (d) => { this._jsError = false; this._nativeSkipping = !!(d && d.skipping); this._emit('error'); });
+    // Native changed track on its own: auto-advance with the screen off, or the
+    // car / notification Next and Previous buttons.
+    p.addListener('advanced', (d) => { try { handleNativeAdvanced(d); } catch (e) { /* ignore */ } });
     // A cached file turned out to be incomplete and has been deleted. Forget
     // the path so the track is fetched again next time it comes round.
     p.addListener('badcache', (d) => { try { forgetCachedTrack(d && d.index); } catch (e) { /* ignore */ } });
@@ -1084,7 +1108,7 @@ class NativeAudioAdapter {
     p.addListener('diag', (d) => {
       try {
         if (!d) return;
-        state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, shortFiles: d.shortFiles | 0, mode: d.mode || '' };
+        state.diag = diagFrom(d);
       } catch (e) { /* ignore */ }
     });
   }
@@ -1103,56 +1127,47 @@ class NativeAudioAdapter {
     const seq = ++this._loadSeq;
     const p = this._plugin();
     if (!val) { if (p) p.stop(); return; }
+    const track = (_nativeSrcTrack && _nativeSrcTrack.url === val) ? _nativeSrcTrack : null;
+    // The native queue entry this track is, so native knows where it is in the
+    // queue (car display, auto-advance). loadQueueCurrent sends the queue to
+    // native just before this, so the positions match.
+    const index = (track && state.queuePos >= 0 && state.queue[state.queuePos] === track.id) ? state.queuePos : -1;
     if (val.indexOf('blob:') === 0) {
       // Local file. Prefer writing it to disk once and playing it by path: the
       // same file then backs the native auto-advance queue, and replays cost no
       // bridge traffic at all. Falls back to shipping the bytes directly.
-      const track = _nativeSrcTrack;
       const viaBytes = () => fetch(val)
         .then((r) => r.blob())
         .then((b) => _blobToBase64(b).then((data) => ({ data, type: b.type })))
         .then(({ data, type }) => {
           if (seq !== this._loadSeq) return;
           const pl = this._plugin();
-          if (pl) pl.loadData({ data, ext: _extForMime(type), autoplay: this._playIntent });
+          if (pl) pl.loadData({ data, ext: _extForMime(type), autoplay: this._playIntent, index });
         });
-      const started = (track && track.url === val)
+      const started = track
         ? nativeSourceForTrack(track).then((path) => {
             if (seq !== this._loadSeq) return;
             const pl = this._plugin();
             if (!pl) return;
-            if (path) { pl.load({ url: path, autoplay: this._playIntent }); return; }
+            if (path) { pl.load({ url: path, autoplay: this._playIntent, index }); return; }
             return viaBytes();
           })
         : viaBytes();
-      started.catch(() => { if (seq === this._loadSeq) this._emit('error'); });
-    } else {
-      const track = (_nativeSrcTrack && _nativeSrcTrack.url === val) ? _nativeSrcTrack : null;
-      const alt = (track && track.fallbackUrl) ? track.fallbackUrl : '';
-      // Jellyfin: fetch the file to disk first and play that. Streaming it
-      // straight into the player is what ran dry mid-song. If the download
-      // fails we still stream, so playback never depends on it succeeding.
-      if (track && (track.source || 'local') === 'jellyfin' && p && p.download) {
-        const slow = setTimeout(() => { try { showToast('Buffering…'); } catch (e) { /* ignore */ } }, 1200);
-        nativeSourceForTrack(track).then((path) => {
-          clearTimeout(slow);
-          if (seq !== this._loadSeq) return;
-          const pl = this._plugin();
-          if (!pl) return;
-          if (path) pl.load({ url: path, fallback: alt, autoplay: this._playIntent });
-          else pl.load({ url: val, fallback: '', autoplay: this._playIntent });
-        }).catch(() => {
-          clearTimeout(slow);
-          if (seq !== this._loadSeq) return;
-          const pl = this._plugin();
-          if (pl) pl.load({ url: val, fallback: '', autoplay: this._playIntent });
-        });
-        return;
-      }
-      // Local file path, or a transcoded stream we can't cache. Pass the
-      // track's alternate source so native can retry without waking the web layer.
-      if (p) p.load({ url: val, fallback: alt, autoplay: this._playIntent });
+      started.catch(() => { if (seq === this._loadSeq) { this._jsError = true; this._emit('error'); } });
+      return;
     }
+    // Jellyfin: native plays the queue entry straight away, from disk if it's
+    // already downloaded, otherwise streaming while it downloads. (Waiting for
+    // the whole file first is what left the old song playing under the new
+    // title after pressing Next.)
+    if (track && (track.source || 'local') === 'jellyfin' && index >= 0 && p) {
+      p.playEntry({ index, autoplay: this._playIntent });
+      return;
+    }
+    // A track that isn't in the queue: play the URL, with its transcode as the
+    // alternate native falls back to on its own.
+    const alt = (track && track.fallbackUrl) ? track.fallbackUrl : '';
+    if (p) p.load({ url: val, fallback: alt, autoplay: this._playIntent, index });
   }
   get currentSrc() { return this._currentSrc; }
   get currentTime() { return this._currentTime || 0; }
@@ -1177,6 +1192,82 @@ class NativeAudioAdapter {
 }
 
 const audio = IS_NATIVE ? new NativeAudioAdapter() : document.getElementById('audio');
+if (IS_NATIVE) {
+  nativeLog(`web app v${APP_VERSION} loaded`);
+  // When the app is opened or put away: events the player sent while the
+  // screen was off arrive in a burst at the "opened" line.
+  document.addEventListener('visibilitychange', () => {
+    nativeLog(document.visibilityState === 'visible' ? 'opened (in front)' : 'put in the background');
+  });
+}
+
+/* ---------- End-of-track fade ---------- */
+// Many library songs are cut at the source and stop dead at full volume. The
+// last few seconds of every track fade out so the stop sounds deliberate
+// (a natural ending is already quiet there). Skipped when the next song
+// continues the same album, so albums that run track into track stay
+// seamless. The Android app does this natively (NativePlayerPlugin
+// maybeStartFade); this is the browser version, driving audio.volume.
+// webFade.base is the listener's volume: the fade scales it and never
+// replaces it, so a prefs save mid-fade can't store a faded level.
+const FADE_SEC = 3;
+const FADE_MIN_TRACK_SEC = 15; // jingles and intros are left alone
+const webFade = { base: 1, timer: 0 };
+// 1 until the fade starts, then a squared ramp to 0 (a linear ramp sounds
+// like it drops late and suddenly).
+function fadeGain(leftSec) {
+  if (leftSec >= FADE_SEC) return 1;
+  if (leftSec <= 0) return 0;
+  const g = leftSec / FADE_SEC;
+  return g * g;
+}
+// Disc * 1000 + track number; 0 when the server doesn't know it.
+function trackNoOf(t) {
+  return t && t.indexNumber > 0 ? (t.parentIndexNumber || 1) * 1000 + t.indexNumber : 0;
+}
+// Whether `next` is the next track of the same album as `cur` (or track 1 of
+// the next disc). Unknown numbers never count.
+function continuesAlbum(cur, next) {
+  if (!cur || !next) return false;
+  const album = albumOf(cur);
+  if (!album || album === UNSORTED || album !== albumOf(next)) return false;
+  const c = trackNoOf(cur), n = trackNoOf(next);
+  if (c <= 0 || n <= 0) return false;
+  return n === c + 1 || (Math.floor(n / 1000) === Math.floor(c / 1000) + 1 && n % 1000 === 1);
+}
+function stopWebFade(restore) {
+  if (webFade.timer) { clearInterval(webFade.timer); webFade.timer = 0; }
+  if (restore) audio.volume = webFade.base;
+}
+function webFadeTick() {
+  const total = effectiveDuration();
+  const left = total - (audio.currentTime || 0);
+  // Paused, or sought back out of the fade: full volume, and let the next
+  // timeupdate start it again near the end.
+  if (audio.paused || total < FADE_MIN_TRACK_SEC || left > FADE_SEC + 1) { stopWebFade(true); return; }
+  audio.volume = webFade.base * fadeGain(left);
+}
+function maybeStartWebFade() {
+  if (IS_NATIVE || webFade.timer || audio.paused) return;
+  const total = effectiveDuration();
+  if (total < FADE_MIN_TRACK_SEC || total - (audio.currentTime || 0) > FADE_SEC + 0.6) return;
+  const nextPos = state.queuePos + 1;
+  const next = nextPos < state.queue.length ? trackById(state.queue[nextPos]) : null;
+  if (continuesAlbum(state.playingTrack, next)) return;
+  // 50 ms steps. A page that is playing audio is exempt from the browser's
+  // background-tab timer throttling, so this keeps working in a hidden tab.
+  webFade.timer = setInterval(webFadeTick, 50);
+  webFadeTick();
+}
+if (!IS_NATIVE) {
+  audio.addEventListener('timeupdate', maybeStartWebFade);
+  // Resumed or sought into the last seconds: fade from there, no full-volume blip.
+  audio.addEventListener('play', maybeStartWebFade);
+  audio.addEventListener('seeked', () => { stopWebFade(true); maybeStartWebFade(); });
+  // A new track (or the end of this one) starts at the listener's volume.
+  audio.addEventListener('loadstart', () => stopWebFade(true));
+  audio.addEventListener('ended', () => stopWebFade(true));
+}
 const fileInput = document.getElementById('file-input');
 const folderInput = document.getElementById('folder-input');
 const folderPickLabel = document.getElementById('folder-pick');
@@ -1308,6 +1399,7 @@ function loadPrefs() {
     const p = JSON.parse(raw);
     if (typeof p.volume === 'number') {
       audio.volume = p.volume;
+      webFade.base = audio.volume;
     }
     if (typeof p.shuffle === 'boolean') {
       state.shuffle = p.shuffle;
@@ -1324,7 +1416,9 @@ function loadPrefs() {
 function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
-      volume: audio.volume,
+      // The listener's volume, not the element's: that one dips during the
+      // end-of-track fade.
+      volume: webFade.base,
       shuffle: state.shuffle,
       repeat: state.repeat,
     }));
@@ -1782,14 +1876,13 @@ function jfItemToTrack(item, config) {
     artist,
     album: albumName,
     container: jfContainer,
+    // Used by the web/PWA build. The Android app builds its own URLs from the
+    // item id (see jellyfinUrlTemplates): the original file first — always,
+    // even when the container is unknown, since Jellyfin only exposes Path to
+    // admin accounts — then this transcode.
     url: jfDirect ? JF.directStreamUrl(config, item.Id) : JF.streamUrl(config, item.Id),
-    // The original file. Always worth caching, even when the container is
-    // unknown: Jellyfin only exposes Path to admin accounts, so jfDirect is
-    // false for plenty of perfectly playable files. Gating the download on it
-    // meant nothing was ever cached.
-    cacheUrl: JF.directStreamUrl(config, item.Id),
     // A transcoded stream the server will always produce. Last resort for
-    // playback, and the queue fallback — so an entry is never left unplayable.
+    // playback.
     fallbackUrl: JF.streamUrl(config, item.Id),
     pictureUrl,
     indexNumber: item.IndexNumber || 0,
@@ -1870,6 +1963,11 @@ async function syncJellyfin(opts) {
       const have = new Set(state.tracks.map(t => t.id));
       state.queue = queueIds.filter(id => have.has(id));
       state.queuePos = playingId != null ? state.queue.indexOf(playingId) : -1;
+      // The queue may have shrunk, which moves every position after the gap:
+      // native must get the same list, or its "now on track N" would name a
+      // different song (the wrong title on the car display). Unchanged (the
+      // usual case on every app open) → native already has it.
+      if (IS_NATIVE && state.queue.length > 0 && state.queue.length !== queueIds.length) syncNativeQueue();
       // Re-resolve current playlist reference
       if (playlistDetailId != null) {
         const matched = state.playlists.find(p => p.id === playlistDetailId);
@@ -2041,15 +2139,21 @@ function trackById(id) {
 // Load whatever track the queue currently points at.
 function loadQueueCurrent(autoplay) {
   if (state.queuePos < 0 || state.queuePos >= state.queue.length) return;
+  // On the native app, hand native the queue FIRST: the track is then started
+  // as a native queue entry (and native auto-advances through the rest while
+  // the screen is off). Bridge calls run in order, so native has the queue
+  // before the load arrives. Local files are only written to disk ahead for
+  // real playback, not a boot/resume preload.
+  if (IS_NATIVE) syncNativeQueue({ fillAhead: !!autoplay });
   loadTrack(trackById(state.queue[state.queuePos]), autoplay);
-  // On the native app, also hand the queue to the native player so it can
-  // auto-advance while the screen is off (when this web layer is suspended).
-  // Only for real playback — a boot/resume preload would needlessly persist the
-  // whole library. Fire-and-forget; persists local files in the background.
-  if (autoplay) syncNativeQueue();
 }
 
-// ---------- Native auto-advance queue ----------
+// ---------- Native queue ----------
+// Native owns the queue while playing: it auto-advances with the screen off,
+// answers the car's Next / Previous, and downloads Jellyfin tracks ahead. The
+// web layer keeps its own copy for the UI and re-sends it to native after EVERY
+// change (new queue, shuffle, library refresh, removals), identified by track
+// id, so the two can never disagree about which song is which.
 // The native MediaPlayer plays http(s) URLs (Jellyfin) and local file paths,
 // but not JavaScript blob: URLs, so local tracks are written to disk once and
 // then referenced by path.
@@ -2057,61 +2161,43 @@ function nativePlayerPlugin() {
   const C = window.Capacitor;
   return (C && C.Plugins && C.Plugins.NativePlayer) ? C.Plugins.NativePlayer : null;
 }
-// The source native can play for a track, WITHOUT any async work: a Jellyfin
-// URL, an already-known local path, or '' when the local file isn't on disk yet
-// (native skips empty entries rather than stopping).
+// Add a line to the native playback log (Settings → Playback log) for things
+// only the web layer knows about: its own Next / Previous, the sleep timer,
+// the app coming to the front. Native logs everything that reaches the player.
+function nativeLog(message) {
+  const p = nativePlayerPlugin();
+  if (!p || !p.log) return;
+  try {
+    const r = p.log({ message: String(message) });
+    if (r && r.catch) r.catch(() => {});
+  } catch (e) { /* ignore */ }
+}
+// A local track's file on disk, if it's been written yet ('' until then —
+// native skips empty entries rather than stopping).
 function nativeSourceSync(t) {
   if (!t) return '';
-  // Jellyfin tracks play from a downloaded file once we have one; until then
-  // the entry is empty and native falls back to the live stream URL.
   return t._nativePath || '';
 }
-// Cache file name for a Jellyfin track. Container comes from the server item;
-// transcoded tracks aren't cached at all (no Content-Length to verify).
-function jellyfinCacheName(t) {
-  return 'jf_' + String(t.itemId || t.id).replace(/[^A-Za-z0-9_-]/g, '') + '.' + (t.container || 'mp3');
+// Jellyfin stream URLs with an "{id}" placeholder, sent once per queue instead
+// of three full URLs per track. Native fills in each track's item id.
+function jellyfinUrlTemplates() {
+  const cfg = state.jellyfin.config;
+  if (!cfg.serverUrl || !cfg.accessToken) return { direct: '', transcode: '' };
+  return { direct: JF.directStreamUrl(cfg, '{id}'), transcode: JF.streamUrl(cfg, '{id}') };
 }
 function nativeFileName(t, mime) {
   return t.id + '.' + _extForMime(mime || (t.blob && t.blob.type) || '');
 }
 // Write one local track to disk so native can play it by path. Deduped per
 // track, and cheap on repeat sessions: we ask native whether the file already
-// exists before shipping the (large) bytes across the bridge.
+// exists before shipping the (large) bytes across the bridge. (Jellyfin tracks
+// are downloaded by native itself.)
 const _persistInFlight = new Map();
 function nativeSourceForTrack(t) {
   if (!t) return Promise.resolve('');
+  if ((t.source || 'local') === 'jellyfin') return Promise.resolve('');
   if (t._nativePath) return Promise.resolve(t._nativePath);
   if (_persistInFlight.has(t.id)) return _persistInFlight.get(t.id);
-  if ((t.source || 'local') === 'jellyfin') {
-    const job = (async () => {
-      const p = nativePlayerPlugin();
-      if (!p || !p.download) return '';
-      const name = jellyfinCacheName(t);
-      // Completeness floor for downloads the server sends without a length
-      // (transcodes). The stream is requested at up to 320 kbps, so ~24 kB/s
-      // is comfortably below a real file yet still rejects the half-finished
-      // downloads that were being cached and then played short.
-      const minBytes = Math.floor((t.durationSec || 0) * 24000);
-      try {
-        const hit = await p.cachedPath({ name });
-        if (hit && hit.path) { t._nativePath = hit.path; return hit.path; }
-      } catch (e) { /* fall through to download */ }
-      // Prefer the original file; if the server won't serve it (permissions,
-      // odd container), cache a transcoded copy instead. Either way playback
-      // ends up reading from disk rather than the network.
-      for (const url of [t.cacheUrl, t.fallbackUrl]) {
-        if (!url) continue;
-        try {
-          const res = await p.download({ url, name, minBytes });
-          if (res && res.path) { t._nativePath = res.path; return res.path; }
-        } catch (e) { /* try the next source */ }
-      }
-      return '';
-    })();
-    _persistInFlight.set(t.id, job);
-    job.then(() => _persistInFlight.delete(t.id), () => _persistInFlight.delete(t.id));
-    return job;
-  }
   const job = (async () => {
     const p = nativePlayerPlugin();
     if (!p) return '';
@@ -2135,49 +2221,53 @@ function nativeSourceForTrack(t) {
 }
 let _nativeQueueSeq = 0;
 // Whether native has been told about the CURRENT queue. Cleared whenever the
-// queue is rebuilt. The boot/resume preload deliberately doesn't sync (it would
-// start downloads at launch), so pressing play on the preloaded track has to
-// sync before playback — otherwise native has an empty queue and simply stops
-// at the end of that first song.
+// queue is rebuilt, and checked again right before playback starts.
 let _nativeQueueSynced = false;
 // How many local tracks ahead of the current one to keep written to disk. Small
 // and rolling: enough to auto-advance through a locked screen, without dumping
-// the whole library to disk (or hogging the bridge) up front.
-// Local files are only copied (cheap, and they have no streaming fallback, so
-// keep a deep window). Jellyfin tracks are downloaded over the network, so
-// prefetch fewer — an un-downloaded one still streams rather than being lost.
+// the whole library to disk (or hogging the bridge) up front. (Jellyfin tracks
+// are downloaded ahead by native itself.)
 const NATIVE_AHEAD_LOCAL = 8;
-// Counts the current track too, so 5 keeps roughly four songs cached ahead —
-// enough to keep playing from disk through a locked screen in the car, where
-// the web layer is frozen and can't fetch any more.
-const NATIVE_AHEAD_STREAM = 5;
 // Hand the queue to native IMMEDIATELY using only what we know synchronously,
 // then fill in local file paths in the background. Doing the file writes first
 // (as this used to) meant the native queue stayed empty until every write
 // finished — so a local track that ended in the meantime had nothing to advance
 // to, and the bridge traffic starved playback.
-async function syncNativeQueue() {
+// The setQueue bridge call is issued synchronously (before the first await),
+// so a load issued right after this call reaches native after the queue does.
+// Native keeps pointing at the track it has loaded, by id, even if the web
+// layer's index is behind; it answers with 'advanced' if it had to correct it.
+async function syncNativeQueue(opts) {
   if (!IS_NATIVE) return;
   const p = nativePlayerPlugin();
   if (!p) return;
   const seq = ++_nativeQueueSeq;
-  const sources = [], fallbacks = [], titles = [], artists = [], albums = [], durations = [];
+  const ids = [], sources = [], itemIds = [], containers = [], titles = [], artists = [], albums = [], durations = [], trackNos = [];
   for (const id of state.queue) {
     const t = trackById(id);
-    sources.push(nativeSourceSync(t));
-    // Always a playable stream URL for Jellyfin, so an entry whose download
-    // hasn't finished still plays instead of being treated as unplayable.
-    fallbacks.push((t && (t.fallbackUrl || t.url)) ? (t.fallbackUrl || t.url) : '');
+    const jf = !!t && (t.source || 'local') === 'jellyfin';
+    ids.push(String(id));
+    sources.push(jf ? '' : nativeSourceSync(t));
+    itemIds.push(jf ? String(t.itemId || '') : '');
+    containers.push(jf ? (t.container || '') : '');
     titles.push(t ? (t.title || '') : '');
     artists.push(t ? (artistOf(t) || '') : '');
     albums.push(t && albumOf(t) !== UNSORTED ? (albumOf(t) || '') : '');
     durations.push(String((t && t.durationSec) || 0));
+    // Disc * 1000 + track number, 0 when unknown: lets native skip the end
+    // fade when the next song simply continues the same album.
+    trackNos.push(String(jf && t.indexNumber > 0 ? (t.parentIndexNumber || 1) * 1000 + t.indexNumber : 0));
   }
+  const urls = jellyfinUrlTemplates();
   try {
-    await p.setQueue({ sources, fallbacks, titles, artists, albums, durations, index: state.queuePos, repeat: state.repeat || 'off' });
-    _nativeQueueSynced = true;
+    await p.setQueue({
+      ids, sources, itemIds, containers, titles, artists, albums, durations, trackNos,
+      index: state.queuePos, repeat: state.repeat || 'off',
+      directTemplate: urls.direct, transcodeTemplate: urls.transcode,
+    });
+    if (seq === _nativeQueueSeq) _nativeQueueSynced = true;
   } catch (e) { return; }
-  fillNativeQueueAhead(seq);
+  if (opts && opts.fillAhead) fillNativeQueueAhead(seq);
 }
 // Background: write the next few local files to disk, one at a time, patching
 // each into the native queue as it lands. Yields between tracks so encoding
@@ -2192,18 +2282,17 @@ async function fillNativeQueueAhead(seq) {
   if (_fillingAhead) { _fillAgain = true; return; }
   _fillingAhead = true;
   try {
-    let local = 0, stream = 0;
-    for (let i = state.queuePos; i < state.queue.length; i++) {
+    let local = 0;
+    for (let i = Math.max(0, state.queuePos); i < state.queue.length; i++) {
       if (seq !== _nativeQueueSeq) return; // queue changed under us
-      if (local >= NATIVE_AHEAD_LOCAL && stream >= NATIVE_AHEAD_STREAM) break;
+      if (local >= NATIVE_AHEAD_LOCAL) break;
       const t = trackById(state.queue[i]);
-      if (!t || t._nativePath) continue;
-      const isStream = (t.source || 'local') === 'jellyfin';
-      if (isStream ? stream >= NATIVE_AHEAD_STREAM : local >= NATIVE_AHEAD_LOCAL) continue;
+      if (!t || (t.source || 'local') === 'jellyfin') continue;
+      if (t._nativePath) continue;
       const src = await nativeSourceForTrack(t);
       if (seq !== _nativeQueueSeq) return;
       if (src) { try { await p.setSource({ index: i, source: src }); } catch (e) { /* ignore */ } }
-      if (isStream) stream++; else local++;
+      local++;
       await new Promise(r => setTimeout(r, 60));
     }
   } finally {
@@ -2211,27 +2300,35 @@ async function fillNativeQueueAhead(seq) {
     if (_fillAgain) { _fillAgain = false; fillNativeQueueAhead(_nativeQueueSeq); }
   }
 }
-// Native found a cached file to be incomplete and deleted it. Drop our record
-// of it so the next play re-downloads rather than reusing a bad file, and clear
-// the queue entry so native streams it in the meantime.
+// Native found a local file on disk to be incomplete and deleted it. Drop our
+// record of it so it's written again next time. (Native re-downloads Jellyfin
+// files itself.)
 function forgetCachedTrack(index) {
   if (typeof index !== 'number' || index < 0 || index >= state.queue.length) return;
   const t = trackById(state.queue[index]);
-  if (t) delete t._nativePath;
+  if (!t || (t.source || 'local') === 'jellyfin') return;
+  delete t._nativePath;
   const p = nativePlayerPlugin();
   if (p) { try { p.setSource({ index, source: '' }); } catch (e) { /* ignore */ } }
 }
-// Native told us it auto-advanced (screen was likely off). Catch the UI up to
-// the track native is now playing, without touching the audio (native owns it).
-function handleNativeAdvanced(index) {
-  if (typeof index !== 'number' || index < 0 || index >= state.queue.length) return;
-  state.queuePos = index;
+// Native changed track on its own (auto-advance with the screen off, or the
+// car's Next / Previous). Catch the UI up to the track native is now playing,
+// without touching the audio (native owns it). Matched by track id: a queue
+// position alone could name a different song if the queues ever drifted.
+function handleNativeAdvanced(d) {
+  if (!d) return;
+  const id = d.id != null ? String(d.id) : '';
+  let pos = id ? state.queue.findIndex(q => String(q) === id) : -1;
+  if (pos < 0 && typeof d.index === 'number' && d.index >= 0 && d.index < state.queue.length
+      && (!id || String(state.queue[d.index]) === id)) pos = d.index;
+  if (pos < 0) return;
+  state.queuePos = pos;
   resetPlaybackErrors();
-  loadTrack(trackById(state.queue[index]), true, true);
+  loadTrack(trackById(state.queue[pos]), true, true);
   saveResume(true);
-  // Keep the rolling window of on-disk files ahead of playback. Deliberately
-  // does NOT re-send the queue/index — native owns the position now, and a
-  // stale index from a late-delivered event would rewind it.
+  // Keep the rolling window of on-disk local files ahead of playback.
+  // Deliberately does NOT re-send the queue/index — native owns the position
+  // now, and a stale index from a late-delivered event would rewind it.
   fillNativeQueueAhead(_nativeQueueSeq);
 }
 
@@ -2774,6 +2871,9 @@ function openSettingsSheet() {
         : 'The server must allow CORS from <code>' + escapeHtml(location.origin) + '</code>. On Jellyfin: Dashboard → Networking → CORS Hosts.'}
     </div>
     <div class="conn-hint" id="diag-line" style="text-align:center;opacity:0.6">Music Player v${APP_VERSION}${diagLine()}</div>
+    ${IS_NATIVE ? `<div class="settings-row" style="padding-top:0">
+      <button class="secondary" data-settings-act="showlog" type="button">Playback log</button>
+    </div>` : ''}
   `;
   sheetBackdrop.classList.add('visible');
   sheetBackdrop.dataset.settings = 'jellyfin';
@@ -2787,6 +2887,11 @@ function openSettingsSheet() {
 // a stall can be identified on the phone without attaching a debugger:
 // "buffering" counts stream underruns (network/server can't keep up),
 // "focus" counts audio-focus losses (something else grabbed the audio).
+// "retry" counts reconnect attempts on a dropped stream; "unplug" counts pauses
+// because the audio output disconnected (car off, Bluetooth dropped).
+function diagFrom(d) {
+  return { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, shortFiles: d.shortFiles | 0, noisy: d.noisy | 0, retries: d.retries | 0, mode: d.mode || '' };
+}
 function diagLine() {
   const d = state.diag;
   if (!d) return '';
@@ -2797,7 +2902,9 @@ function diagLine() {
   const fail = d.dlFails ? ` · dlfail ${d.dlFails}${d.lastDlError ? ` (${d.lastDlError})` : ''}` : '';
   const cut = d.truncated ? ` · cut ${d.truncated}` : '';
   const bad = d.shortFiles ? ` · badfile ${d.shortFiles}` : '';
-  return `${src}${dl}${fail}${cut}${bad} · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
+  const retry = d.retries ? ` · retry ${d.retries}` : '';
+  const unplug = d.noisy ? ` · unplug ${d.noisy}` : '';
+  return `${src}${dl}${fail}${cut}${bad}${retry}${unplug} · buffering ${d.buffering} · focus ${d.focusLoss} · errors ${d.errors}`;
 }
 async function refreshDiag() {
   const p = nativePlayerPlugin();
@@ -2805,14 +2912,56 @@ async function refreshDiag() {
   try {
     const d = await p.getDiag();
     if (!d) return;
-    state.diag = { buffering: d.buffering | 0, focusLoss: d.focusLoss | 0, errors: d.errors | 0, downloads: d.downloads | 0, dlFails: d.dlFails | 0, lastDlError: d.lastDlError || '', truncated: d.truncated | 0, shortFiles: d.shortFiles | 0, mode: d.mode || '' };
+    state.diag = diagFrom(d);
     const el = document.getElementById('diag-line');
     if (el) el.textContent = `Music Player v${APP_VERSION}${diagLine()}`;
   } catch (e) { /* ignore */ }
 }
 
+// The native playback log: every start, stop, skip and pause with its cause.
+// Shown in a box with a Copy button, so it can be pasted into a message.
+async function showPlaybackLog() {
+  const p = nativePlayerPlugin();
+  let text = '';
+  try {
+    const r = (p && p.getLog) ? await p.getLog() : null;
+    text = (r && r.text) || '';
+  } catch (e) { /* ignore */ }
+  await refreshDiag();
+  const full = `Music Player v${APP_VERSION}${diagLine()}\n` + (text || '(the log is empty)\n');
+  sheetBody.innerHTML = `
+    <div class="sheet-title">Playback log</div>
+    <textarea id="playback-log" class="playback-log" readonly spellcheck="false">${escapeHtml(full)}</textarea>
+    <div class="settings-row">
+      <button class="primary" data-settings-act="copylog" type="button">Copy</button>
+      <button class="secondary" data-settings-act="cancel" type="button">Close</button>
+    </div>
+  `;
+  const box = document.getElementById('playback-log');
+  if (box) box.scrollTop = box.scrollHeight; // newest lines at the bottom
+}
+
+function copyPlaybackLog() {
+  const box = document.getElementById('playback-log');
+  if (!box) return;
+  let copied = false;
+  // execCommand runs inside the tap itself, which the Android WebView needs;
+  // the async clipboard API is the fallback.
+  try { box.select(); copied = document.execCommand('copy'); } catch (e) { copied = false; }
+  if (copied) { showToast('Playback log copied'); return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(box.value).then(
+      () => showToast('Playback log copied'),
+      () => showToast('Copy failed: select the text and copy it'));
+    return;
+  }
+  showToast('Copy failed: select the text and copy it');
+}
+
 async function handleSettingsAction(act) {
   if (act === 'cancel') { closeSheet(); return; }
+  if (act === 'showlog') { await showPlaybackLog(); return; }
+  if (act === 'copylog') { copyPlaybackLog(); return; }
   if (act === 'disconnect') {
     closeSheet();
     if (!confirm('Disconnect from Jellyfin? The cached library will be cleared from this device.')) return;
@@ -2833,6 +2982,9 @@ async function handleSettingsAction(act) {
       state.queuePos = -1;
       titleEl.textContent = 'No track loaded';
       setNowPlayingArt(null);
+      // Clear native's queue too, so the car's Next can't restart a track
+      // whose stream token was just revoked.
+      if (IS_NATIVE) syncNativeQueue();
     }
     if (state.source === 'jellyfin') {
       await setActiveSource('local');
@@ -2939,6 +3091,12 @@ async function removeAlbum(albumName) {
       state.queue = [];
       state.queuePos = -1;
     }
+  } else if (currentId !== null && state.playingSource !== 'local') {
+    // A Jellyfin track is playing: keep its queue, just drop the removed
+    // local tracks from it (rebuilding it from the local library here used
+    // to replace what was playing).
+    state.queue = state.queue.filter(id => !removedIds.has(id));
+    state.queuePos = state.queue.indexOf(currentId);
   } else if (currentId !== null) {
     const startIdx = state.tracks.findIndex(t => t.id === currentId);
     if (startIdx !== -1) {
@@ -2948,6 +3106,7 @@ async function removeAlbum(albumName) {
       state.queuePos = state.tracks.length > 0 ? 0 : -1;
     }
   }
+  if (IS_NATIVE) syncNativeQueue();
 
   if (state.currentAlbum === albumName) {
     state.view = 'albums';
@@ -2972,6 +3131,8 @@ async function handleSheetAction(act, trackIndex) {
         t.title = trimmed;
         await persistTrack(t);
         if (state.playingTrack && t.id === state.playingTrack.id) titleEl.textContent = trimmed;
+        // Native shows the queue's titles on the car / lock screen.
+        if (IS_NATIVE && state.queue.includes(t.id)) syncNativeQueue();
         render();
       }
     }
@@ -3184,13 +3345,12 @@ function resetPlaybackErrors() { playbackErrorStreak = 0; }
 
 async function playWithFallback(reason) {
   playbackIntended = true;
-  // First real play arms the native media session (foreground-only). Boot/resume
-  // preloads don't reach here with intent, so the service never starts at boot.
-  armNativeMediaSession();
-  // Make sure native knows the queue before playback starts, so it can
-  // auto-advance (covers pressing play on the boot/resume-preloaded track,
-  // which never went through loadQueueCurrent's sync).
-  if (IS_NATIVE && !_nativeQueueSynced) syncNativeQueue();
+  // Make sure native knows the current queue before playback starts, so it can
+  // auto-advance, and start writing the next local files to disk.
+  if (IS_NATIVE) {
+    if (!_nativeQueueSynced) syncNativeQueue({ fillAhead: true });
+    else fillNativeQueueAhead(_nativeQueueSeq);
+  }
   const startedSrc = audio.src;
   try {
     await audio.play();
@@ -3206,7 +3366,6 @@ async function playWithFallback(reason) {
       return true;
     } catch (err2) {
       console.warn('audio.play() retry rejected:', err2 && err2.name, err2 && err2.message);
-      nativeSetPlaybackState('paused');
       if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
       playIcon.innerHTML = PLAY_ICON;
       showToast('Playback paused — tap play to resume');
@@ -3352,6 +3511,7 @@ function setSleepTimer(minutes) {
         clearInterval(state.sleep.intervalId);
         state.sleep.intervalId = 0;
         state.sleep.expiresAt = 0;
+        nativeLog('sleep timer ran out, pausing');
         audio.pause();
         showToast('Sleep timer expired');
         refreshNowPlayingSubtitle();
@@ -3412,7 +3572,7 @@ function playPause() {
 
 function nextTrack(auto) {
   if (state.queue.length === 0) return;
-  if (!auto) resetPlaybackErrors(); // user pressed Next — fresh intent
+  if (!auto) { resetPlaybackErrors(); nativeLog('Next pressed'); } // user pressed Next — fresh intent
   if (state.repeat === 'one' && auto) {
     audio.currentTime = 0;
     playWithFallback('repeatOne');
@@ -3435,6 +3595,7 @@ function nextTrack(auto) {
 function prevTrack() {
   if (state.queue.length === 0) return;
   resetPlaybackErrors();
+  nativeLog('Previous pressed');
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
   let pos = state.queuePos - 1;
   if (pos < 0) pos = state.queue.length - 1;
@@ -3569,6 +3730,8 @@ async function removeTrack(index) {
     const pos = state.queue.indexOf(playingId);
     if (pos >= 0) state.queuePos = pos;
   }
+  // Positions after the removed track moved up by one; native must match.
+  if (IS_NATIVE) syncNativeQueue();
   render();
 }
 
@@ -3588,6 +3751,7 @@ async function clearPlaylist() {
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
+  if (IS_NATIVE) syncNativeQueue();
   titleEl.textContent = 'No track loaded';
   subtitleEl.textContent = 'Tap "Add files" to load music';
   setNowPlayingArt(null);
@@ -3596,62 +3760,15 @@ async function clearPlaylist() {
   render();
 }
 
-// Native media session (Android app only). Establishes a real Android media
-// session so playback keeps advancing while the screen is locked and song info
-// shows on the lock screen / car. Deliberately MINIMAL — only metadata and
-// playback state, no rapid position updates or control-button callbacks (those
-// crashed in the fuller v1.7.0 attempt). The PWA keeps using navigator.mediaSession.
-function nativeMS() {
-  const C = window.Capacitor;
-  if (C && C.isNativePlatform && C.isNativePlatform() && C.Plugins && C.Plugins.MediaSession) {
-    return C.Plugins.MediaSession;
-  }
-  return null;
-}
-// The native media session starts an Android foreground service. On Android 14
-// starting that service while the app is at boot / in the background throws and
-// crash-loops the app (this is exactly what happened in v1.7.7–1.7.9). So we
-// keep the session DORMANT until the first foreground, user-initiated play —
-// armNativeMediaSession() flips this true and registers the control handlers.
-// Until then, every native call below is a no-op, so boot/resume never touches
-// the service and can't crash.
-let mediaSessionArmed = false;
+// On the Android app the media session (lock screen, notification, car and
+// Bluetooth buttons) belongs to the NativePlayer plugin, which publishes the
+// title and play state straight from the player — this web layer is frozen
+// with the screen off and can't be relied on for it. (The @jofr media-session
+// plugin that used to do this from JS was removed in v1.7.30.) The PWA keeps
+// using navigator.mediaSession.
 function isNativeApp() {
   const C = window.Capacitor;
   return !!(C && C.isNativePlatform && C.isNativePlatform());
-}
-// Force any value to a safe, bounded plain string for the native bridge.
-function safeMetaStr(v) {
-  let s = (v == null) ? '' : String(v);
-  // Strip control chars that can trip the native serializer, then cap length.
-  s = s.replace(/[\u0000-\u001F\u007F]/g, ' ');
-  return s.length > 200 ? s.slice(0, 200) : s;
-}
-function nativeSetMetadata(track) {
-  const n = nativeMS();
-  if (!n || !mediaSessionArmed) return;
-  breadcrumb('nativeSetMetadata:enter');
-  // IMPORTANT: pass NO artwork to the native plugin. Its native artwork handling
-  // is what crashed the app on specific Jellyfin tracks (v1.7.7–1.7.11). An empty
-  // array is the safe value the plugin already handles. Lock screen still shows
-  // title/artist/album — just no album art. Strings are sanitized too.
-  breadcrumb('nativeSetMetadata:call');
-  try {
-    n.setMetadata({
-      title: safeMetaStr(track ? track.title : ''),
-      artist: safeMetaStr(track ? artistOf(track) : ''),
-      album: safeMetaStr(track && albumOf(track) !== UNSORTED ? albumOf(track) : ''),
-      artwork: [],
-    }).catch(() => {});
-  } catch (e) { /* ignore */ }
-  breadcrumb('nativeSetMetadata:done');
-}
-function nativeSetPlaybackState(s) {
-  const n = nativeMS();
-  if (!n || !mediaSessionArmed) return;
-  breadcrumb('nativeSetPlaybackState:' + s);
-  try { n.setPlaybackState({ playbackState: s }).catch(() => {}); } catch (e) { /* ignore */ }
-  breadcrumb('nativeSetPlaybackState:done');
 }
 
 // NOTE: An earlier build (v1.7.15) added a native AudioFocus plugin here that
@@ -3665,11 +3782,7 @@ function nativeSetPlaybackState(s) {
 
 function updateMediaSession() {
   const track = state.playingTrack;
-  nativeSetMetadata(track);
-  // On the native app the @jofr plugin POLYFILLS navigator.mediaSession, so
-  // touching it here would call into native UNGATED (bypassing mediaSessionArmed)
-  // and with artwork — exactly the path that crashed on specific tracks. Native
-  // media session is handled solely via the gated nativeSetMetadata above.
+  // Native publishes its own metadata (see isNativeApp above).
   if (isNativeApp()) return;
   if (!('mediaSession' in navigator)) return;
   if (!track) { navigator.mediaSession.metadata = null; return; }
@@ -3771,6 +3884,8 @@ async function backfillTags() {
     await new Promise(r => setTimeout(r, 0));
   }
   if (updated > 0) {
+    // Native shows the queue's titles on the car / lock screen.
+    if (IS_NATIVE && state.queue.length > 0) syncNativeQueue();
     render();
     if (state.playingTrack) {
       const t = state.playingTrack;
@@ -3826,10 +3941,15 @@ shuffleBtn.addEventListener('click', () => {
     const scopedPos = playingId != null ? scopedIds.indexOf(playingId) : -1;
     const startIdx = scopedPos >= 0 ? scopedIndices[scopedPos] : scopedIndices[0];
     setQueue(scopedIndices, startIdx);
+    // Hand native the new order right away. Without this, native kept playing
+    // the old order while the app labelled each song from the new one — the
+    // wrong title on the car display.
+    if (IS_NATIVE) syncNativeQueue();
     savePrefs();
     return;
   }
   reshuffleQueueKeepingCurrent();
+  if (IS_NATIVE) syncNativeQueue();
   savePrefs();
 });
 
@@ -3905,14 +4025,12 @@ audio.addEventListener('loadedmetadata', () => {
 });
 audio.addEventListener('play', () => {
   playIcon.innerHTML = PAUSE_ICON;
-  nativeSetPlaybackState('playing');
   if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
 });
 // Real, progressing playback clears the failure streak — we've recovered.
 audio.addEventListener('playing', () => { playbackErrorStreak = 0; });
 audio.addEventListener('pause', () => {
   playIcon.innerHTML = PLAY_ICON;
-  nativeSetPlaybackState('paused');
   if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
   // A user-driven pause means they no longer intend playback, so a late error
   // on the (now abandoned) stream won't trigger an auto-skip.
@@ -3939,6 +4057,7 @@ audio.addEventListener('ended', () => {
   if (IS_NATIVE) {
     const hasMore = state.queuePos >= 0 && state.queuePos < state.queue.length - 1;
     if (!hasMore && state.repeat !== 'all') return; // genuinely the end
+    nativeLog('player ran out of queue but the app has more, moving on');
   }
   nextTrack(true);
 });
@@ -3947,9 +4066,22 @@ audio.addEventListener('error', () => {
   // + load() during teardown), and when the user isn't actually trying to play
   // (a boot/resume preload that failed should just sit there, not skip).
   if (!audio.currentSrc && !audio.src) return;
+  // On the native app the player has already dealt with the error itself —
+  // retried, switched source, or moved to the next track (capped). Skipping
+  // here as well used to cut the song native was rescuing, or skip two songs.
+  // The one exception is a local file the web layer never managed to hand
+  // over (_jsError): native doesn't know about that failure.
+  if (IS_NATIVE && !audio._jsError) {
+    if (audio._nativeSkipping) showToast('Playback error — skipping');
+    else if (playbackIntended) {
+      playIcon.innerHTML = PLAY_ICON;
+      showToast('Can’t play — check your Jellyfin connection');
+    }
+    return;
+  }
+  if (IS_NATIVE) { audio._jsError = false; nativeLog('a local file could not be handed to the player'); }
   if (!playbackIntended) {
     showToast('Could not load track');
-    nativeSetPlaybackState('paused');
     if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     playIcon.innerHTML = PLAY_ICON;
     return;
@@ -3959,7 +4091,6 @@ audio.addEventListener('error', () => {
     // Whole queue (or server) looks unreachable — stop instead of looping.
     playbackIntended = false;
     audio.pause();
-    nativeSetPlaybackState('paused');
     if (!isNativeApp() && 'mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     playIcon.innerHTML = PLAY_ICON;
     showToast('Can’t play — check your Jellyfin connection');
@@ -4322,9 +4453,7 @@ clearBtn.addEventListener('click', () => {
 });
 
 // Lock-screen / Bluetooth / headphone key controls (WEB/PWA only — on the
-// native app @jofr polyfills navigator.mediaSession, and registering these at
-// boot would engage the native session ungated. Native controls are registered
-// lazily in armNativeMediaSession() via the gated nativeMS() API instead.)
+// Android app the NativePlayer plugin's own media session handles them.)
 if (!isNativeApp() && 'mediaSession' in navigator) {
   navigator.mediaSession.setActionHandler('play', () => playWithFallback('mediaSession'));
   navigator.mediaSession.setActionHandler('pause', () => audio.pause());
@@ -4347,36 +4476,9 @@ if (!isNativeApp() && 'mediaSession' in navigator) {
   } catch (e) { /* optional */ }
 }
 
-// Native media controls (Android app): route lock-screen / Android Auto /
-// Bluetooth / hardware media buttons to the player. The native plugin owns the
-// system session in the app, so these are what the car talks to.
-//
-// CRITICAL: this must NOT run at boot. Registering handlers / touching the
-// native session starts the Android foreground service, and doing that at
-// app-startup on Android 14 crash-loops the app. armNativeMediaSession() is
-// therefore called only from a foreground, user-initiated play (see
-// playWithFallback), by which point the app is visibly in the foreground and
-// Android permits the mediaPlayback service to start.
-function armNativeMediaSession() {
-  if (mediaSessionArmed) return;
-  const n = nativeMS();
-  if (!n) { mediaSessionArmed = true; return; } // web/PWA: nothing native to arm
-  // Only arm when actually in the foreground — the whole point is to avoid a
-  // background service start.
-  if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return;
-  breadcrumb('armNativeMediaSession');
-  const set = (action, handler) => {
-    try { n.setActionHandler({ action }, handler).catch(() => {}); } catch (e) { /* ignore */ }
-  };
-  set('play', () => { playWithFallback('mediaSession'); });
-  set('pause', () => { audio.pause(); });
-  set('previoustrack', () => { prevTrack(); });
-  set('nexttrack', () => { nextTrack(false); });
-  mediaSessionArmed = true;
-  // Now that the session is live, push the current track's metadata + state.
-  try { updateMediaSession(); } catch (e) { /* ignore */ }
-  nativeSetPlaybackState(audio.paused ? 'paused' : 'playing');
-}
+// On the Android app, lock-screen / car / Bluetooth / hardware media buttons
+// are handled natively by the NativePlayer plugin's own media session, so they
+// work with the screen off; nothing is registered from here.
 
 /* ---------- Service worker + install prompt ---------- */
 if ('serviceWorker' in navigator) {
