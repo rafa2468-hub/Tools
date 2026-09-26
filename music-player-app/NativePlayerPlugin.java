@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.AudioAttributes;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
@@ -18,6 +20,7 @@ import android.media.session.PlaybackState;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PersistableBundle;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Base64;
@@ -192,6 +195,26 @@ public class NativePlayerPlugin extends Plugin {
     private Runnable fader;
     private boolean fadeLogged = false;
 
+    // End-of-track diagnostics (v1.7.33, log only). Some tracks finish 2-4 s
+    // before their real end on the phone although the files are intact; these
+    // record what the player itself reports when a track ends, so the log can
+    // show where the missing seconds go.
+    // Fade level reached (0-1, before the listener's volume), 1 = no fade yet.
+    private float lastFadeGain = 1f;
+    // Real time and position when playback last (re)started or jumped, to
+    // compare how far the song moved with how much time passed.
+    private long segStartWall = 0;
+    private int segStartPos = 0;
+    // The last few ticker readings: real time (ms) and position (ms).
+    private static final int TRAIL = 8;
+    private final long[] trailWall = new long[TRAIL];
+    private final int[] trailPos = new int[TRAIL];
+    private int trailCount = 0, trailNext = 0;
+    // A track counts as ending early when it stops this far short of its length.
+    private static final int EARLY_END_MS = 1500;
+    private AudioDeviceCallback deviceCallback;
+    private boolean devicesListed = false;
+
     // Playback log: a timestamped line for everything that starts, stops or
     // changes playback, and what caused it (app, car, notification, unplug,
     // call, error, app restart). The counters say how often; this says what
@@ -271,6 +294,7 @@ public class NativePlayerPlugin extends Plugin {
         loadLog();
         plog("--- app process started ---");
         audioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+        watchOutputs();
         try {
             session = new MediaSession(getContext(), "MusicPlayer");
             session.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
@@ -732,6 +756,7 @@ public class NativePlayerPlugin extends Plugin {
                 if (player != null && prepared) {
                     try {
                         lastPositionMs = player.getCurrentPosition();
+                        addTrail(lastPositionMs);
                         JSObject d = new JSObject();
                         d.put("position", lastPositionMs / 1000.0);
                         int dur = player.getDuration();
@@ -820,7 +845,8 @@ public class NativePlayerPlugin extends Plugin {
                         fader = null;
                         return;
                     }
-                    float g = volume * fadeGain(left, FADE_MS);
+                    lastFadeGain = fadeGain(left, FADE_MS);
+                    float g = volume * lastFadeGain;
                     player.setVolume(g, g);
                 } catch (Exception e) { fader = null; return; }
                 handler.postDelayed(this, FADE_STEP_MS);
@@ -831,6 +857,161 @@ public class NativePlayerPlugin extends Plugin {
 
     private void stopFade() {
         if (fader != null) { handler.removeCallbacks(fader); fader = null; }
+    }
+
+    // ---- end-of-track diagnostics (log only) ----
+
+    // m:ss.t — tenths, for the end-of-track detail.
+    static String fmtTenths(int ms) {
+        int t = Math.max(0, ms) / 100;
+        int s = t / 10;
+        return (s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60) + "." + (t % 10);
+    }
+
+    static String deviceTypeName(int type) {
+        switch (type) {
+            case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER: return "speaker";
+            case AudioDeviceInfo.TYPE_BUILTIN_EARPIECE: return "earpiece";
+            case AudioDeviceInfo.TYPE_WIRED_HEADSET: return "wired headset";
+            case AudioDeviceInfo.TYPE_WIRED_HEADPHONES: return "wired headphones";
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP: return "bluetooth";
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO: return "bluetooth call";
+            case AudioDeviceInfo.TYPE_USB_DEVICE: return "usb";
+            case AudioDeviceInfo.TYPE_USB_HEADSET: return "usb headset";
+            case AudioDeviceInfo.TYPE_USB_ACCESSORY: return "usb accessory";
+            case AudioDeviceInfo.TYPE_BUS: return "car bus";
+            case AudioDeviceInfo.TYPE_BLE_HEADSET: return "bluetooth LE headset";
+            case AudioDeviceInfo.TYPE_BLE_SPEAKER: return "bluetooth LE speaker";
+            case AudioDeviceInfo.TYPE_HDMI: return "hdmi";
+            case AudioDeviceInfo.TYPE_TELEPHONY: return "telephony";
+            default: return "type " + type;
+        }
+    }
+
+    // A device as the log names it: its kind, plus its own name for external
+    // ones (the car's Bluetooth name, a USB DAC).
+    private static String deviceLabel(AudioDeviceInfo d) {
+        if (d == null) return "unknown";
+        String kind = deviceTypeName(d.getType());
+        int t = d.getType();
+        boolean builtin = t == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER || t == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            || t == AudioDeviceInfo.TYPE_TELEPHONY;
+        CharSequence name = d.getProductName();
+        return (builtin || name == null || name.length() == 0) ? kind : kind + " '" + name + "'";
+    }
+
+    // Where the player's sound is actually going (Android 9+).
+    private String routedOutput() {
+        try {
+            if (Build.VERSION.SDK_INT >= 28 && player != null) {
+                AudioDeviceInfo d = player.getRoutedDevice();
+                if (d != null) return deviceLabel(d);
+            }
+        } catch (Exception e) { /* ignore */ }
+        return "unknown output";
+    }
+
+    private void markSegment() {
+        segStartWall = SystemClock.elapsedRealtime();
+        segStartPos = currentPositionMs();
+    }
+
+    private void addTrail(int posMs) {
+        trailWall[trailNext] = SystemClock.elapsedRealtime();
+        trailPos[trailNext] = posMs;
+        trailNext = (trailNext + 1) % TRAIL;
+        if (trailCount < TRAIL) trailCount++;
+    }
+
+    // One line per track end: where the player says it stopped against the
+    // file's length, how far the song moved against the time that passed,
+    // how far the fade got and where the sound was going. For a track that
+    // ended early, also the player's own statistics and the last readings.
+    private void logEndDetail(MediaPlayer mp) {
+        try {
+            long now = SystemClock.elapsedRealtime();
+            int pos = -1, dur = -1;
+            try { pos = mp.getCurrentPosition(); } catch (Exception e) { /* ignore */ }
+            try { dur = mp.getDuration(); } catch (Exception e) { /* ignore */ }
+            int server = (queueIndex >= 0 && queueIndex < durationsSec.size() && currentId.equals(at(ids, queueIndex)))
+                ? durationsSec.get(queueIndex) * 1000 : 0;
+            StringBuilder sb = new StringBuilder("  end detail: player at ");
+            sb.append(pos >= 0 ? fmtTenths(pos) : "?").append(" of ").append(dur > 0 ? fmtTenths(dur) : "?");
+            if (server > 0) sb.append(" (server ").append(fmt(server)).append(")");
+            sb.append(", last tick ").append(fmtTenths(lastPositionMs));
+            if (segStartWall > 0) {
+                int moved = (pos >= 0 ? pos : lastPositionMs) - segStartPos;
+                sb.append(", moved ").append(String.format(Locale.US, "%.1f", moved / 1000.0))
+                  .append("s in ").append(String.format(Locale.US, "%.1f", (now - segStartWall) / 1000.0))
+                  .append("s since ").append(fmtTenths(segStartPos));
+            }
+            sb.append(", fade at ").append(Math.round(lastFadeGain * 100)).append("%");
+            sb.append(", on ").append(routedOutput());
+            plog(sb.toString());
+            int length = dur > 0 ? dur : server;
+            int at = pos >= 0 ? pos : lastPositionMs;
+            if (length > 0 && at < length - EARLY_END_MS) {
+                plog("  ENDED EARLY by " + String.format(Locale.US, "%.1f", (length - at) / 1000.0) + "s");
+                if (trailCount > 0) {
+                    StringBuilder tr = new StringBuilder("  last readings:");
+                    for (int k = 0; k < trailCount; k++) {
+                        int i = (trailNext - trailCount + k + TRAIL) % TRAIL;
+                        tr.append(' ').append(String.format(Locale.US, "%.1f", (trailWall[i] - now) / 1000.0))
+                          .append("s@").append(fmtTenths(trailPos[i]));
+                    }
+                    plog(tr.toString());
+                }
+                if (Build.VERSION.SDK_INT >= 26) {
+                    try {
+                        PersistableBundle m = mp.getMetrics();
+                        if (m != null) {
+                            List<String> keys = new ArrayList<>(m.keySet());
+                            Collections.sort(keys);
+                            StringBuilder ms = new StringBuilder("  player stats:");
+                            for (String k : keys) {
+                                ms.append(' ').append(k.replace("android.media.mediaplayer.", "")).append('=').append(m.get(k));
+                            }
+                            plog(ms.length() > 600 ? ms.substring(0, 600) : ms.toString());
+                        }
+                    } catch (Exception e) { plog("  player stats unavailable: " + e.getClass().getSimpleName()); }
+                }
+            }
+        } catch (Exception e) { /* diagnostics must never break playback */ }
+    }
+
+    // Log audio outputs coming and going (the car's Bluetooth connecting,
+    // dropping for a moment, headphones). The first report lists what's there.
+    private void watchOutputs() {
+        if (Build.VERSION.SDK_INT < 23 || audioManager == null) return;
+        try {
+            deviceCallback = new AudioDeviceCallback() {
+                @Override
+                public void onAudioDevicesAdded(AudioDeviceInfo[] added) {
+                    StringBuilder sb = new StringBuilder();
+                    for (AudioDeviceInfo d : added) {
+                        if (!d.isSink() || d.getType() == AudioDeviceInfo.TYPE_TELEPHONY
+                            || d.getType() == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) continue;
+                        if (sb.length() > 0) sb.append(", ");
+                        sb.append(deviceLabel(d));
+                    }
+                    if (sb.length() == 0) return;
+                    if (!devicesListed) { devicesListed = true; plog("outputs available: " + sb); }
+                    else plog("output connected: " + sb);
+                }
+                @Override
+                public void onAudioDevicesRemoved(AudioDeviceInfo[] removed) {
+                    StringBuilder sb = new StringBuilder();
+                    for (AudioDeviceInfo d : removed) {
+                        if (!d.isSink() || d.getType() == AudioDeviceInfo.TYPE_TELEPHONY
+                            || d.getType() == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) continue;
+                        if (sb.length() > 0) sb.append(", ");
+                        sb.append(deviceLabel(d));
+                    }
+                    if (sb.length() > 0) plog("output disconnected: " + sb);
+                }
+            };
+            audioManager.registerAudioDeviceCallback(deviceCallback, handler);
+        } catch (Exception e) { deviceCallback = null; }
     }
 
     // Request audio focus ONCE and hold it for the whole listening session.
@@ -924,6 +1105,8 @@ public class NativePlayerPlugin extends Plugin {
         releasePlayer();
         needsReload = false;
         fadeLogged = false;
+        lastFadeGain = 1f;
+        trailCount = 0; trailNext = 0;
         currentSource = (path == null) ? "" : path;
         pendingSeekMs = Math.max(0, seekMs);
         lastResumeAtMs = pendingSeekMs;
@@ -978,6 +1161,7 @@ public class NativePlayerPlugin extends Plugin {
             });
             player.setOnCompletionListener(mp -> {
                 stopTicker();
+                logEndDetail(mp);
                 handleCompletion();
             });
             // A stalled network read surfaces here, not as an error. Counting it
@@ -1107,7 +1291,8 @@ public class NativePlayerPlugin extends Plugin {
             acquireWifiLock();
             // Real playback started — the queue is healthy again.
             errorStreak = 0;
-            plog("  playing " + srcKind(currentSource) + " at " + fmt(currentPositionMs()));
+            plog("  playing " + srcKind(currentSource) + " at " + fmt(currentPositionMs()) + " on " + routedOutput());
+            markSegment();
             emit("play");
             emit("playing");
             startTicker();
@@ -1186,6 +1371,10 @@ public class NativePlayerPlugin extends Plugin {
                 // Back to full volume; the ticker restarts the fade if the
                 // seek landed inside it.
                 stopFade();
+                lastFadeGain = 1f;
+                segStartWall = SystemClock.elapsedRealtime();
+                segStartPos = target;
+                trailCount = 0; trailNext = 0;
                 player.setVolume(volume, volume);
             } else {
                 pendingSeekMs = target;
@@ -1892,6 +2081,9 @@ public class NativePlayerPlugin extends Plugin {
         releaseWifiLock();
         abandonFocus();
         unregisterNoisy();
+        try {
+            if (deviceCallback != null && audioManager != null) audioManager.unregisterAudioDeviceCallback(deviceCallback);
+        } catch (Exception e) { /* ignore */ }
         stopService();
         if (session != null) {
             try { session.setActive(false); session.release(); } catch (Exception e) { /* ignore */ }
