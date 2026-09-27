@@ -908,7 +908,21 @@ public class NativePlayerPlugin extends Plugin {
                 if (d != null) return deviceLabel(d);
             }
         } catch (Exception e) { /* ignore */ }
-        return "unknown output";
+        return UNKNOWN_OUTPUT;
+    }
+
+    private static final String UNKNOWN_OUTPUT = "unknown output";
+
+    // Right after start() Android often hasn't routed the sound yet. Check
+    // again shortly (0.5, 1.5, 3 s) and log the output once it's known.
+    private void logOutputSoon(final int gen, final int attempt) {
+        handler.postDelayed(() -> {
+            if (gen != trackGen || player == null) return;
+            String out = routedOutput();
+            if (!UNKNOWN_OUTPUT.equals(out)) plog("  on " + out);
+            else if (attempt < 2) logOutputSoon(gen, attempt + 1);
+            else plog("  on " + UNKNOWN_OUTPUT);
+        }, 500L * (attempt + 1));
     }
 
     private void markSegment() {
@@ -1291,7 +1305,10 @@ public class NativePlayerPlugin extends Plugin {
             acquireWifiLock();
             // Real playback started — the queue is healthy again.
             errorStreak = 0;
-            plog("  playing " + srcKind(currentSource) + " at " + fmt(currentPositionMs()) + " on " + routedOutput());
+            String out = routedOutput();
+            boolean outKnown = !UNKNOWN_OUTPUT.equals(out);
+            plog("  playing " + srcKind(currentSource) + " at " + fmt(currentPositionMs()) + (outKnown ? " on " + out : ""));
+            if (!outKnown) logOutputSoon(trackGen, 0);
             markSegment();
             emit("play");
             emit("playing");
@@ -1519,7 +1536,20 @@ public class NativePlayerPlugin extends Plugin {
             + " (" + srcKind(currentSource) + ")";
         if (short_) {
             int resumeAt = lastPositionMs;
-            if (!currentSource.startsWith("http")) {
+            // The file's own length matches the server's, so it isn't a
+            // half-written copy: the player stopped short on its own. Keep the
+            // file and pick up from it where it stopped. No progress since the
+            // last resume means picking up again won't help, so move on.
+            boolean fileComplete = durationMs > 0 && expected - durationMs <= 5000;
+            if (!currentSource.startsWith("http") && fileComplete) {
+                if (lastPositionMs > lastResumeAtMs + 1000) {
+                    plog(ended + ": stopped early, the file is complete, picking up from the same file");
+                    releasePlayer();
+                    prepareSource(currentSource, resumeAt, true);
+                    return;
+                }
+                plog(ended + ": stopped early with no progress since the last resume, the file is complete, moving on");
+            } else if (!currentSource.startsWith("http")) {
                 // The file on disk is incomplete. Bin it so it gets fetched
                 // again, and finish this track from the next source.
                 shortFileCount++;
