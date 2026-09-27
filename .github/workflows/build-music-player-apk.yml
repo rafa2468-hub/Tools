@@ -87,7 +87,7 @@ jobs:
           # NativePlayerPlugin runs PlaybackService as a foregroundServiceType=
           # mediaPlayback service; Android 14 (targetSdk 34) requires these
           # permissions and the service's type declared.
-          sed -i '/android.permission.INTERNET/a\    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.WAKE_LOCK"/>' "$M"
+          sed -i '/android.permission.INTERNET/a\    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.WAKE_LOCK"/><uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>' "$M"
           sed -i 's#</application>#    <service android:name="com.brokis.musicplayer.PlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback"/>\n    </application>#' "$M"
           echo "--- manifest permissions ---"; grep -i "uses-permission" "$M"
           echo "--- manifest service ---"; grep -q 'com.brokis.musicplayer.PlaybackService' "$M" && grep -i "PlaybackService" "$M"

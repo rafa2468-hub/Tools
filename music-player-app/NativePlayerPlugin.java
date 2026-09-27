@@ -17,6 +17,10 @@ import android.media.MediaMetadata;
 import android.media.MediaPlayer;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -211,6 +215,7 @@ public class NativePlayerPlugin extends Plugin {
     private final int[] trailPos = new int[TRAIL];
     private int trailCount = 0, trailNext = 0;
     // A track counts as ending early when it stops this far short of its length.
+    // A complete file that stops this far short is picked up where it stopped.
     private static final int EARLY_END_MS = 1500;
     private AudioDeviceCallback deviceCallback;
     private boolean devicesListed = false;
@@ -962,6 +967,7 @@ public class NativePlayerPlugin extends Plugin {
             sb.append(", fade at ").append(Math.round(lastFadeGain * 100)).append("%");
             sb.append(", on ").append(routedOutput());
             plog(sb.toString());
+            plog(phoneState());
             int length = dur > 0 ? dur : server;
             int at = pos >= 0 ? pos : lastPositionMs;
             if (length > 0 && at < length - EARLY_END_MS) {
@@ -991,6 +997,78 @@ public class NativePlayerPlugin extends Plugin {
                 }
             }
         } catch (Exception e) { /* diagnostics must never break playback */ }
+    }
+
+    // The phone's state at a track end, so early ends can be compared with
+    // normal ones: screen, battery saver, doze, heat, charging, network.
+    private String phoneState() {
+        StringBuilder sb = new StringBuilder("  phone:");
+        try {
+            PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                sb.append(pm.isInteractive() ? " screen on" : " screen off");
+                sb.append(pm.isPowerSaveMode() ? ", battery saver on" : ", battery saver off");
+                if (Build.VERSION.SDK_INT >= 23 && pm.isDeviceIdleMode()) sb.append(", dozing");
+                if (Build.VERSION.SDK_INT >= 29) sb.append(", heat ").append(thermalName(pm.getCurrentThermalStatus()));
+            }
+        } catch (Exception e) { /* ignore */ }
+        try {
+            IntentFilter f = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+            Intent b = Build.VERSION.SDK_INT >= 33
+                ? getContext().registerReceiver(null, f, Context.RECEIVER_NOT_EXPORTED)
+                : getContext().registerReceiver(null, f);
+            if (b != null) {
+                int level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = b.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+                if (level >= 0 && scale > 0) sb.append(", battery ").append(Math.round(level * 100f / scale)).append('%');
+                sb.append(", ").append(plugName(b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)));
+                int temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);
+                if (temp != Integer.MIN_VALUE) sb.append(", ").append(String.format(Locale.US, "%.1f", temp / 10.0)).append("°C");
+            }
+        } catch (Exception e) { /* ignore */ }
+        sb.append(", ").append(networkName());
+        return sb.toString();
+    }
+
+    static String thermalName(int status) {
+        switch (status) {
+            case 0: return "normal";
+            case 1: return "light";
+            case 2: return "moderate";
+            case 3: return "severe";
+            case 4: return "critical";
+            case 5: return "emergency";
+            case 6: return "shutdown";
+            default: return "unknown (" + status + ")";
+        }
+    }
+
+    static String plugName(int plugged) {
+        switch (plugged) {
+            case 0: return "on battery";
+            case 1: return "charging (ac)";
+            case 2: return "charging (usb)";
+            case 4: return "charging (wireless)";
+            case 8: return "charging (dock)";
+            default: return "charging (" + plugged + ")";
+        }
+    }
+
+    private String networkName() {
+        try {
+            if (Build.VERSION.SDK_INT < 23) return "network ?";
+            ConnectivityManager cm = (ConnectivityManager) getContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return "network ?";
+            Network n = cm.getActiveNetwork();
+            if (n == null) return "no network";
+            NetworkCapabilities c = cm.getNetworkCapabilities(n);
+            if (c == null) return "network ?";
+            if (c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "wifi";
+            if (c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return "mobile data";
+            if (c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "ethernet";
+            if (c.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) return "bluetooth tethering";
+            return "other network";
+        } catch (Exception e) { return "network ?"; }
     }
 
     // Log audio outputs coming and going (the car's Bluetooth connecting,
@@ -1176,7 +1254,9 @@ public class NativePlayerPlugin extends Plugin {
             player.setOnCompletionListener(mp -> {
                 stopTicker();
                 logEndDetail(mp);
-                handleCompletion();
+                int endPos = -1;
+                try { endPos = mp.getCurrentPosition(); } catch (Exception e) { /* ignore */ }
+                handleCompletion(endPos);
             });
             // A stalled network read surfaces here, not as an error. Counting it
             // distinguishes "the stream ran dry" from a real pause.
@@ -1529,11 +1609,40 @@ public class NativePlayerPlugin extends Plugin {
     // MediaPlayer reports a stream that died mid-track exactly the same way as a
     // track that finished. Telling them apart by position is what stops a
     // dropped connection from being heard as "song cut short, next song".
-    private void handleCompletion() {
+    static final int EARLY_NONE = 0, EARLY_PICK_UP = 1, EARLY_MOVE_ON = 2;
+
+    // A downloaded or local file whose own length is within 5 s of the
+    // server's is complete. If it stops more than 1.5 s short of that length,
+    // the player stopped on its own (in the car: 2-5 s early, at random).
+    // Pick up from the same file where it stopped, unless it made no progress
+    // (under 1 s) since the last pick-up, then move on.
+    static int earlyStopAction(boolean localFile, int fileMs, int expectedMs, int stopAtMs, int lastResumeMs) {
+        if (!localFile || fileMs <= 0 || expectedMs - fileMs > 5000) return EARLY_NONE;
+        if (stopAtMs <= 0 || stopAtMs >= fileMs - EARLY_END_MS) return EARLY_NONE;
+        return stopAtMs > lastResumeMs + 1000 ? EARLY_PICK_UP : EARLY_MOVE_ON;
+    }
+
+    // endPos is the player's own position at completion (-1 if unknown); the
+    // last ticker reading can be up to half a second behind it.
+    private void handleCompletion(int endPos) {
         int expected = expectedDurationMs();
         boolean short_ = expected > 0 && lastPositionMs > 0 && lastPositionMs < expected - 5000;
         String ended = "end of " + trackLabel(queueIndex) + " at " + fmt(lastPositionMs) + " of " + fmt(expected)
             + " (" + srcKind(currentSource) + ")";
+        int stopAt = Math.max(lastPositionMs, endPos);
+        int early = earlyStopAction(!currentSource.startsWith("http"), durationMs, expected, stopAt, lastResumeAtMs);
+        if (early == EARLY_PICK_UP) {
+            plog(ended + ": stopped " + String.format(Locale.US, "%.1f", (durationMs - stopAt) / 1000.0)
+                + "s early, the file is complete, picking up from the same file at " + fmtTenths(stopAt));
+            releasePlayer();
+            prepareSource(currentSource, stopAt, true);
+            return;
+        }
+        if (early == EARLY_MOVE_ON) {
+            plog(ended + ": stopped early with no progress since the last resume, the file is complete, moving on");
+            advanceOnCompletion(false);
+            return;
+        }
         if (short_) {
             int resumeAt = lastPositionMs;
             // The file's own length matches the server's, so it isn't a
