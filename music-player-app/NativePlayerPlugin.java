@@ -12,6 +12,7 @@ import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
+import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.MediaPlayer;
@@ -217,6 +218,17 @@ public class NativePlayerPlugin extends Plugin {
     // A track counts as ending early when it stops this far short of its length.
     // A complete file that stops this far short is picked up where it stopped.
     private static final int EARLY_END_MS = 1500;
+    // Hold after an early stop (v1.7.36). In the car the player reports a
+    // complete file as finished seconds before its end; if that audio is still
+    // on its way to the car, releasing the player at once throws it away. So
+    // the player is left alone for a moment and watched: if the position or
+    // the music output keeps going, the rest is let play out; if nothing moves
+    // within a second, it picks up from the same file as before.
+    private Runnable drainWatch;
+    private static final long DRAIN_STEP_MS = 250;
+    private static final long DRAIN_QUIET_MS = 1000;
+    private static final long DRAIN_MAX_MS = 8000;
+    static final int DRAIN_WAIT = 0, DRAIN_PLAYED_OUT = 1, DRAIN_PICK_UP = 2;
     private AudioDeviceCallback deviceCallback;
     private boolean devicesListed = false;
 
@@ -381,7 +393,7 @@ public class NativePlayerPlugin extends Plugin {
     private void publishState() {
         if (session != null) {
             int st;
-            if (retryRunnable != null) st = PlaybackState.STATE_BUFFERING;
+            if (retryRunnable != null || drainWatch != null) st = PlaybackState.STATE_BUFFERING;
             else if (isPlaying()) st = PlaybackState.STATE_PLAYING;
             else if (playWhenReady && player != null && !prepared) st = PlaybackState.STATE_BUFFERING;
             else if (queueIndex >= 0 || player != null) st = PlaybackState.STATE_PAUSED;
@@ -889,6 +901,8 @@ public class NativePlayerPlugin extends Plugin {
             case AudioDeviceInfo.TYPE_BLE_SPEAKER: return "bluetooth LE speaker";
             case AudioDeviceInfo.TYPE_HDMI: return "hdmi";
             case AudioDeviceInfo.TYPE_TELEPHONY: return "telephony";
+            // What Android Auto (and screen casting) plays through.
+            case AudioDeviceInfo.TYPE_REMOTE_SUBMIX: return "Android Auto / cast";
             default: return "type " + type;
         }
     }
@@ -900,7 +914,7 @@ public class NativePlayerPlugin extends Plugin {
         String kind = deviceTypeName(d.getType());
         int t = d.getType();
         boolean builtin = t == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER || t == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-            || t == AudioDeviceInfo.TYPE_TELEPHONY;
+            || t == AudioDeviceInfo.TYPE_TELEPHONY || t == AudioDeviceInfo.TYPE_REMOTE_SUBMIX;
         CharSequence name = d.getProductName();
         return (builtin || name == null || name.length() == 0) ? kind : kind + " '" + name + "'";
     }
@@ -918,13 +932,54 @@ public class NativePlayerPlugin extends Plugin {
 
     private static final String UNKNOWN_OUTPUT = "unknown output";
 
+    // Whether Android could hand this track's audio to the phone's audio chip
+    // ("offload") on the output the sound is going to now (Android 10+).
+    // Offload is the leading suspect for the car's early stops; this says
+    // whether it's possible there, not that it's in use.
+    private String offloadNote() {
+        try {
+            if (Build.VERSION.SDK_INT < 29) return "";
+            String ext = currentSource.startsWith("http") ? at(containers, queueIndex) : extOf(currentSource);
+            int enc = encodingForExt(ext);
+            if (enc == AudioFormat.ENCODING_INVALID) return "";
+            AudioFormat f = new AudioFormat.Builder().setEncoding(enc).setSampleRate(44100)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build();
+            AudioAttributes a = new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build();
+            if (Build.VERSION.SDK_INT >= 33) {
+                int s = AudioManager.getDirectPlaybackSupport(f, a);
+                boolean gapless = (s & AudioManager.DIRECT_PLAYBACK_OFFLOAD_GAPLESS_SUPPORTED)
+                    == AudioManager.DIRECT_PLAYBACK_OFFLOAD_GAPLESS_SUPPORTED;
+                return ", offload " + (gapless ? "possible (gapless)"
+                    : (s & AudioManager.DIRECT_PLAYBACK_OFFLOAD_SUPPORTED) != 0 ? "possible" : "not possible");
+            }
+            return ", offload " + (AudioManager.isOffloadedPlaybackSupported(f, a) ? "possible" : "not possible");
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static String extOf(String path) {
+        int dot = path == null ? -1 : path.lastIndexOf('.');
+        return dot < 0 ? "" : path.substring(dot + 1);
+    }
+
+    // The compressed format a file extension stands for (only the ones the
+    // library holds); ENCODING_INVALID when unknown.
+    static int encodingForExt(String ext) {
+        String e = ext == null ? "" : ext.toLowerCase(Locale.US);
+        if (e.equals("m4a") || e.equals("mp4") || e.equals("aac")) return AudioFormat.ENCODING_AAC_LC;
+        if (e.equals("mp3")) return AudioFormat.ENCODING_MP3;
+        return AudioFormat.ENCODING_INVALID;
+    }
+
     // Right after start() Android often hasn't routed the sound yet. Check
     // again shortly (0.5, 1.5, 3 s) and log the output once it's known.
     private void logOutputSoon(final int gen, final int attempt) {
         handler.postDelayed(() -> {
             if (gen != trackGen || player == null) return;
             String out = routedOutput();
-            if (!UNKNOWN_OUTPUT.equals(out)) plog("  on " + out);
+            if (!UNKNOWN_OUTPUT.equals(out)) plog("  on " + out + offloadNote());
             else if (attempt < 2) logOutputSoon(gen, attempt + 1);
             else plog("  on " + UNKNOWN_OUTPUT);
         }, 500L * (attempt + 1));
@@ -965,7 +1020,7 @@ public class NativePlayerPlugin extends Plugin {
                   .append("s since ").append(fmtTenths(segStartPos));
             }
             sb.append(", fade at ").append(Math.round(lastFadeGain * 100)).append("%");
-            sb.append(", on ").append(routedOutput());
+            sb.append(", on ").append(routedOutput()).append(offloadNote());
             plog(sb.toString());
             plog(phoneState());
             int length = dur > 0 ? dur : server;
@@ -1178,6 +1233,7 @@ public class NativePlayerPlugin extends Plugin {
 
     // Release the current player without emitting playback events.
     private void releasePlayer() {
+        cancelDrain();
         stopTicker();
         stopFade();
         prepared = false;
@@ -1387,7 +1443,7 @@ public class NativePlayerPlugin extends Plugin {
             errorStreak = 0;
             String out = routedOutput();
             boolean outKnown = !UNKNOWN_OUTPUT.equals(out);
-            plog("  playing " + srcKind(currentSource) + " at " + fmt(currentPositionMs()) + (outKnown ? " on " + out : ""));
+            plog("  playing " + srcKind(currentSource) + " at " + fmt(currentPositionMs()) + (outKnown ? " on " + out + offloadNote() : ""));
             if (!outKnown) logOutputSoon(trackGen, 0);
             markSegment();
             emit("play");
@@ -1424,6 +1480,9 @@ public class NativePlayerPlugin extends Plugin {
         playWhenReady = true;
         resumeOnFocusGain = false;
         activateSession();
+        // Holding after an early stop: the hold carries on and decides what
+        // plays next. start() now would restart the finished song from 0:00.
+        if (drainWatch != null) { publishState(); return; }
         if (player == null || needsReload) {
             if (retryRunnable != null) { publishState(); return; } // a retry is already on its way
             // The player was torn down (a dropped stream while paused, or the
@@ -1462,6 +1521,10 @@ public class NativePlayerPlugin extends Plugin {
     private void seekToMs(int ms, String from) {
         int target = Math.max(0, ms);
         plog("seek to " + fmt(target) + " (" + from + ")");
+        // A seek during the hold after an early stop ends the hold and plays
+        // from the new spot (a finished player restarts from a seek).
+        boolean wasHolding = drainWatch != null;
+        cancelDrain();
         try {
             if (player != null && prepared) {
                 player.seekTo(target);
@@ -1480,6 +1543,7 @@ public class NativePlayerPlugin extends Plugin {
         lastPositionMs = target;
         maybeStartFade();
         publishState();
+        if (wasHolding && playWhenReady) internalPlay();
     }
 
     // ---- queue ----
@@ -1633,9 +1697,8 @@ public class NativePlayerPlugin extends Plugin {
         int early = earlyStopAction(!currentSource.startsWith("http"), durationMs, expected, stopAt, lastResumeAtMs);
         if (early == EARLY_PICK_UP) {
             plog(ended + ": stopped " + String.format(Locale.US, "%.1f", (durationMs - stopAt) / 1000.0)
-                + "s early, the file is complete, picking up from the same file at " + fmtTenths(stopAt));
-            releasePlayer();
-            prepareSource(currentSource, stopAt, true);
+                + "s early, the file is complete, holding the player to let the rest play out");
+            startDrainHold(stopAt);
             return;
         }
         if (early == EARLY_MOVE_ON) {
@@ -1691,6 +1754,93 @@ public class NativePlayerPlugin extends Plugin {
             plog(ended + ": finished");
         }
         advanceOnCompletion(false);
+    }
+
+    // What to do while holding the player after an early stop, given how long
+    // it has been (ms), when the position last moved or the music output was
+    // last active (-1 = never), how long the output has been active in all,
+    // where it stopped, the furthest position seen and the file's length.
+    // The rest played out when the position reached the end, or when the
+    // output was active for about as long as the missing stretch and then
+    // went quiet. Nothing moving for DRAIN_QUIET_MS means pick up instead. An
+    // output still active at the time limit proves nothing (a paused player
+    // can look active), so that picks up too.
+    static int drainAction(long elapsedMs, long lastActivityMs, long activeMs, int stopAtMs, int bestPosMs, int fileMs, long limitMs) {
+        if (fileMs > 0 && bestPosMs >= fileMs - EARLY_END_MS) return DRAIN_PLAYED_OUT;
+        long quiet = elapsedMs - Math.max(0, lastActivityMs);
+        if (quiet < DRAIN_QUIET_MS) return elapsedMs < limitMs ? DRAIN_WAIT : DRAIN_PICK_UP;
+        long missing = fileMs - stopAtMs;
+        return activeMs >= missing - 500 ? DRAIN_PLAYED_OUT : DRAIN_PICK_UP;
+    }
+
+    // A position read while holding counts as the song moving on only if it
+    // moved forward, no faster than real time (a player that jumps straight
+    // to the end after finishing hasn't played anything).
+    static boolean drainProgress(int posMs, int bestMs, int stopAtMs, long elapsedMs) {
+        return posMs > bestMs + 100 && posMs <= stopAtMs + elapsedMs + 500;
+    }
+
+    // v1.7.36: a complete file stopped early. Leave the player alone and
+    // watch it every 250 ms (see drainWatch), then either move on (the rest
+    // played out) or pick up from the same file where it got to.
+    private void startDrainHold(final int stopAt) {
+        cancelDrain();
+        lastPositionMs = stopAt;
+        final MediaPlayer mp = player;
+        final int gen = trackGen;
+        final int fileMs = durationMs;
+        final long t0 = SystemClock.elapsedRealtime();
+        // The missing stretch, plus time for the output to go quiet after it.
+        final long limit = Math.min(DRAIN_MAX_MS, (fileMs - stopAt) + 2000L);
+        drainWatch = new Runnable() {
+            final StringBuilder readings = new StringBuilder();
+            long prevEl = 0, lastActivity = -1, activeMs = 0;
+            int best = stopAt;
+            @Override
+            public void run() {
+                if (gen != trackGen || player != mp || mp == null) { drainWatch = null; return; }
+                long el = SystemClock.elapsedRealtime() - t0;
+                int pos = -1;
+                try { pos = mp.getCurrentPosition(); } catch (Exception e) { /* ignore */ }
+                boolean active = false;
+                try { active = audioManager != null && audioManager.isMusicActive(); } catch (Exception e) { /* ignore */ }
+                if (pos >= 0 && drainProgress(pos, best, stopAt, el)) { best = pos; lastActivity = el; }
+                if (active) { activeMs += el - prevEl; lastActivity = el; }
+                prevEl = el;
+                if (readings.length() < 500) {
+                    readings.append(' ').append(String.format(Locale.US, "%.2f", el / 1000.0)).append("s ")
+                        .append(pos >= 0 ? fmtTenths(pos) : "?").append(active ? " out-active" : " out-quiet");
+                }
+                if (!playWhenReady) {
+                    // Paused (by the listener, a call, the car turning off)
+                    // during the hold: rebuild where it got to on the next play.
+                    drainWatch = null;
+                    plog("  hold ended by a pause, readings:" + readings + "; resumes at " + fmtTenths(best));
+                    lastPositionMs = best;
+                    needsReload = true;
+                    publishState();
+                    return;
+                }
+                int action = drainAction(el, lastActivity, activeMs, stopAt, best, fileMs, limit);
+                if (action == DRAIN_WAIT) { handler.postDelayed(this, DRAIN_STEP_MS); return; }
+                drainWatch = null;
+                plog("  hold readings:" + readings);
+                if (action == DRAIN_PLAYED_OUT) {
+                    plog("  the rest played out after the early finish report (position reached "
+                        + fmtTenths(best) + ", output active " + String.format(Locale.US, "%.1f", activeMs / 1000.0) + "s)");
+                    advanceOnCompletion(false);
+                } else {
+                    plog("  nothing played on, picking up from the same file at " + fmtTenths(best));
+                    prepareSource(currentSource, best, true);
+                }
+            }
+        };
+        publishState();
+        handler.postDelayed(drainWatch, DRAIN_STEP_MS);
+    }
+
+    private void cancelDrain() {
+        if (drainWatch != null) { handler.removeCallbacks(drainWatch); drainWatch = null; }
     }
 
     // Moves to the next playable entry when a track ends. skipRepeatOne is set
