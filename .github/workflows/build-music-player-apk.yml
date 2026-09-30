@@ -69,6 +69,16 @@ jobs:
         working-directory: music-player-app
         run: npx cap add android
 
+      # NativePlayerPlugin plays through Media3 ExoPlayer (since v1.8.0). 1.4.1
+      # is the newest Media3 that compiles against Capacitor 6's SDK 34 (1.5+
+      # needs 35). Fails the build if the line didn't land.
+      - name: Add Media3 ExoPlayer dependency
+        working-directory: music-player-app
+        run: |
+          G="android/app/build.gradle"
+          sed -i '0,/^dependencies {/s//dependencies {\n    implementation "androidx.media3:media3-exoplayer:1.4.1"/' "$G"
+          echo "--- app dependencies ---"; grep -n "media3" "$G"
+
       - name: Apply custom MainActivity + native player plugins
         working-directory: music-player-app
         run: |
