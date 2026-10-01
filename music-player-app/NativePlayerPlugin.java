@@ -2129,6 +2129,19 @@ public class NativePlayerPlugin extends Plugin {
     // reshuffle) — the web layer can lag behind native while the screen is off,
     // so its index alone can't be trusted. If the index had to be corrected,
     // "advanced" tells the web layer which track is really current.
+    // Which entry native is on after the app sends the queue. A re-send
+    // (shuffle, library refresh) can carry an index that's behind, because
+    // native auto-advanced with the screen off, so native keeps the song it
+    // has loaded and tells the app. A fresh pick names the song the app is
+    // about to load, so it's taken as given; "keeping" a song that was only
+    // restored at start-up put its title on screen over the one playing.
+    static int queueIndexAfterSend(boolean pick, boolean loaded, String currentId, List<String> ids, int index) {
+        if (pick || !loaded || currentId == null || currentId.length() == 0) return index;
+        if (index >= 0 && index < ids.size() && currentId.equals(ids.get(index))) return index;
+        int found = ids.indexOf(currentId);
+        return found >= 0 ? found : index;
+    }
+
     @PluginMethod
     public void setQueue(PluginCall call) {
         final List<String> nIds = toList(call.getArray("ids"));
@@ -2141,6 +2154,10 @@ public class NativePlayerPlugin extends Plugin {
         final List<String> nDurations = toList(call.getArray("durations"));
         final List<String> nTrackNos = toList(call.getArray("trackNos"));
         final int index = call.getInt("index", -1);
+        // Set when the app sends the queue because the listener picked a song
+        // (or pressed Next / Previous in the app): the load for that index
+        // follows straight away, so the index is the truth.
+        final boolean pick = Boolean.TRUE.equals(call.getBoolean("pick", false));
         final String repeat = call.getString("repeat", "off");
         final String direct = call.getString("directTemplate", "");
         final String transcode = call.getString("transcodeTemplate", "");
@@ -2172,15 +2189,10 @@ public class NativePlayerPlugin extends Plugin {
             transcodeTemplate = transcode == null ? "" : transcode;
             repeatMode = repeat;
             errorStreak = 0;
-            int newIndex = index;
             boolean loaded = player != null || retryRunnable != null || needsReload;
-            if (loaded && currentId.length() > 0
-                && !(index >= 0 && index < n && currentId.equals(ids.get(index)))) {
-                int found = ids.indexOf(currentId);
-                if (found >= 0) newIndex = found;
-            }
+            int newIndex = queueIndexAfterSend(pick, loaded, currentId, ids, index);
             queueIndex = newIndex;
-            plog("queue from app: " + n + " tracks, at " + trackLabel(newIndex)
+            plog("queue from app" + (pick ? " (new pick)" : "") + ": " + n + " tracks, at " + trackLabel(newIndex)
                 + (newIndex != index ? " (app said #" + index + ", kept the playing track)" : ""));
             if (newIndex != index && newIndex >= 0) {
                 JSObject d = new JSObject();

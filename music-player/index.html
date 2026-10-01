@@ -850,7 +850,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.8.2';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -2143,8 +2143,11 @@ function loadQueueCurrent(autoplay) {
   // as a native queue entry (and native auto-advances through the rest while
   // the screen is off). Bridge calls run in order, so native has the queue
   // before the load arrives. Local files are only written to disk ahead for
-  // real playback, not a boot/resume preload.
-  if (IS_NATIVE) syncNativeQueue({ fillAhead: !!autoplay });
+  // real playback, not a boot/resume preload. pick: this index is about to be
+  // loaded, so native must not "keep" a song it only has loaded (the one
+  // restored at start-up); that answered with the old song and left its title
+  // on screen over the one playing.
+  if (IS_NATIVE) syncNativeQueue({ fillAhead: !!autoplay, pick: true });
   loadTrack(trackById(state.queue[state.queuePos]), autoplay);
 }
 
@@ -2223,6 +2226,11 @@ let _nativeQueueSeq = 0;
 // Whether native has been told about the CURRENT queue. Cleared whenever the
 // queue is rebuilt, and checked again right before playback starts.
 let _nativeQueueSynced = false;
+// The queue array and position last sent to native. Every queue change makes a
+// new array, so a match means this exact queue is already on its way.
+let _sentQueue = null;
+let _sentPos = -1;
+function nativeQueueSending() { return _sentQueue === state.queue && _sentPos === state.queuePos; }
 // How many local tracks ahead of the current one to keep written to disk. Small
 // and rolling: enough to auto-advance through a locked screen, without dumping
 // the whole library to disk (or hogging the bridge) up front. (Jellyfin tracks
@@ -2242,6 +2250,8 @@ async function syncNativeQueue(opts) {
   const p = nativePlayerPlugin();
   if (!p) return;
   const seq = ++_nativeQueueSeq;
+  _sentQueue = state.queue;
+  _sentPos = state.queuePos;
   const ids = [], sources = [], itemIds = [], containers = [], titles = [], artists = [], albums = [], durations = [], trackNos = [];
   for (const id of state.queue) {
     const t = trackById(id);
@@ -2262,11 +2272,11 @@ async function syncNativeQueue(opts) {
   try {
     await p.setQueue({
       ids, sources, itemIds, containers, titles, artists, albums, durations, trackNos,
-      index: state.queuePos, repeat: state.repeat || 'off',
+      index: state.queuePos, pick: !!(opts && opts.pick), repeat: state.repeat || 'off',
       directTemplate: urls.direct, transcodeTemplate: urls.transcode,
     });
     if (seq === _nativeQueueSeq) _nativeQueueSynced = true;
-  } catch (e) { return; }
+  } catch (e) { if (seq === _nativeQueueSeq) _sentQueue = null; return; }
   if (opts && opts.fillAhead) fillNativeQueueAhead(seq);
 }
 // Background: write the next few local files to disk, one at a time, patching
@@ -3348,7 +3358,10 @@ async function playWithFallback(reason) {
   // Make sure native knows the current queue before playback starts, so it can
   // auto-advance, and start writing the next local files to disk.
   if (IS_NATIVE) {
-    if (!_nativeQueueSynced) syncNativeQueue({ fillAhead: true });
+    // Not again if loadQueueCurrent's send of this same queue is still on its
+    // way: the duplicate went without the pick flag, so for a local file (whose
+    // load is still being written) native "kept" the old song again.
+    if (!_nativeQueueSynced && !nativeQueueSending()) syncNativeQueue({ fillAhead: true });
     else fillNativeQueueAhead(_nativeQueueSeq);
   }
   const startedSrc = audio.src;
