@@ -21,6 +21,9 @@ cd music-player-app
 npm install
 rm -rf www && mkdir www && cp -r ../music-player/. www/
 npx cap add android
+# The native player needs Media3 ExoPlayer: add this line inside the
+# `dependencies {` block of android/app/build.gradle (the workflow does it too):
+#     implementation "androidx.media3:media3-exoplayer:1.4.1"
 npx cap sync android
 cd android && ./gradlew assembleDebug
 # APK at android/app/build/outputs/apk/debug/app-debug.apk
