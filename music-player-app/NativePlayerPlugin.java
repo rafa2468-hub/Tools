@@ -1,13 +1,16 @@
 package com.brokis.musicplayer;
 
+import android.app.Activity;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ComponentCallbacks;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.Configuration;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
@@ -97,6 +100,17 @@ public class NativePlayerPlugin extends Plugin {
     // The live plugin, so PlaybackService (notification buttons, swipe-away)
     // can reach it.
     static NativePlayerPlugin instance;
+
+    // Kept across the screen being torn down and rebuilt inside the same
+    // process (the app has closed when the car connects): whether this process
+    // already ran the plugin, the phone settings seen last, the settings
+    // changes MainActivity's manifest copes with itself (-1 = not read yet), and
+    // lines from moments when no plugin was alive to log them.
+    private static boolean processSeen = false;
+    private static boolean configWatchOn = false;
+    private static Configuration lastConfig;
+    private static int handledConfig = -1;
+    private static final List<String> pendingLines = new ArrayList<>();
 
     // One player per source, like the MediaPlayer it replaced: a new track,
     // a retry or a switch to another source builds a fresh one.
@@ -317,10 +331,19 @@ public class NativePlayerPlugin extends Plugin {
     public void load() {
         instance = this;
         loadLog();
-        plog("--- app process started ---");
+        // A rebuilt screen loads the plugin again in a process that's still
+        // alive; a fresh process means Android killed the old one (or it's a
+        // first start / reinstall).
+        plog(processSeen ? "--- app screen restarted (same process) ---" : "--- app process started ---");
+        processSeen = true;
+        synchronized (pendingLines) {
+            for (String l : pendingLines) plog(l);
+            pendingLines.clear();
+        }
         plog("player: ExoPlayer (Media3 " + MediaLibraryInfo.VERSION + "), offload off");
         audioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
         watchOutputs();
+        watchConfig();
         try {
             session = new MediaSession(getContext(), "MusicPlayer");
             session.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
@@ -1142,6 +1165,115 @@ public class NativePlayerPlugin extends Plugin {
             };
             audioManager.registerAudioDeviceCallback(deviceCallback, handler);
         } catch (Exception e) { deviceCallback = null; }
+    }
+
+    // ---- phone settings changes (log only) ----
+
+    // Log every change of the phone's settings: what changed, from → to. The
+    // app has closed itself when the car connects (the screen destroyed, not
+    // the process killed), and a settings change the manifest doesn't cover
+    // makes Android tear the screen down and rebuild it. The watch sits on the
+    // application, once per process, so it hears those changes too.
+    private void watchConfig() {
+        try {
+            Activity a = getActivity();
+            if (handledConfig < 0 && a != null) {
+                handledConfig = a.getPackageManager().getActivityInfo(a.getComponentName(), 0).configChanges;
+            }
+        } catch (Exception e) { /* left unknown */ }
+        if (configWatchOn) return;
+        try {
+            Context app = getContext().getApplicationContext();
+            lastConfig = new Configuration(app.getResources().getConfiguration());
+            app.registerComponentCallbacks(new ConfigWatch());
+            configWatchOn = true;
+        } catch (Exception e) { /* no settings log */ }
+    }
+
+    // Static, so the application doesn't hold on to the first plugin.
+    private static final class ConfigWatch implements ComponentCallbacks {
+        @Override
+        public void onConfigurationChanged(Configuration now) {
+            if (now == null) return;
+            Configuration before = lastConfig;
+            lastConfig = new Configuration(now);
+            if (before == null) return;
+            int diff = before.diff(now);
+            if (diff == 0) return;
+            String line = "phone settings changed: " + configChangeNames(diff, handledConfig)
+                + configDetail(before, now, diff);
+            NativePlayerPlugin p = instance;
+            if (p != null) { p.plog(line); return; }
+            String at = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+            synchronized (pendingLines) { pendingLines.add(line + " (at " + at + ", while the screen was closed)"); }
+        }
+        @Override
+        public void onLowMemory() { }
+    }
+
+    private static final int[] CONFIG_BITS = {
+        0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040, 0x0080, 0x0100, 0x0200,
+        0x0400, 0x0800, 0x1000, 0x2000, 0x4000, 0x8000, 0x10000000, 0x40000000 };
+    private static final String[] CONFIG_NAMES = {
+        "mcc", "mnc", "locale", "touchscreen", "keyboard", "keyboardHidden", "navigation",
+        "orientation", "screenLayout", "uiMode", "screenSize", "smallestScreenSize", "density",
+        "layoutDirection", "colorMode", "grammaticalGender", "fontWeightAdjustment", "fontScale" };
+
+    // The changed settings by their manifest names (ActivityInfo.CONFIG_*),
+    // each one the manifest doesn't list marked "not in manifest". Bits with no
+    // public name are shown as hex. handled = -1: the manifest wasn't read.
+    static String configChangeNames(int diff, int handled) {
+        StringBuilder sb = new StringBuilder();
+        int rest = diff;
+        for (int i = 0; i < CONFIG_BITS.length; i++) {
+            if ((diff & CONFIG_BITS[i]) == 0) continue;
+            rest &= ~CONFIG_BITS[i];
+            appendConfigName(sb, CONFIG_NAMES[i], CONFIG_BITS[i], handled);
+        }
+        for (int b = 0; b < 32; b++) {
+            int bit = 1 << b;
+            if ((rest & bit) != 0) appendConfigName(sb, "0x" + Integer.toHexString(bit), bit, handled);
+        }
+        return sb.length() == 0 ? "nothing" : sb.toString();
+    }
+
+    private static void appendConfigName(StringBuilder sb, String name, int bit, int handled) {
+        if (sb.length() > 0) sb.append(", ");
+        sb.append(name);
+        if (handled >= 0 && (handled & bit) == 0) sb.append(" (not in manifest)");
+    }
+
+    // The before → after values of the settings that changed, for the ones
+    // with a readable value.
+    private static String configDetail(Configuration a, Configuration b, int diff) {
+        StringBuilder sb = new StringBuilder();
+        if ((diff & 0x0004) != 0 && Build.VERSION.SDK_INT >= 24) addDetail(sb, "locale", a.getLocales().toLanguageTags(), b.getLocales().toLanguageTags());
+        if ((diff & 0x0008) != 0) addDetail(sb, "touchscreen", "" + a.touchscreen, "" + b.touchscreen);
+        if ((diff & 0x0010) != 0) addDetail(sb, "keyboard", "" + a.keyboard, "" + b.keyboard);
+        if ((diff & 0x0020) != 0) addDetail(sb, "keyboardHidden", a.keyboardHidden + "/" + a.hardKeyboardHidden, b.keyboardHidden + "/" + b.hardKeyboardHidden);
+        if ((diff & 0x0040) != 0) addDetail(sb, "navigation", a.navigation + "/" + a.navigationHidden, b.navigation + "/" + b.navigationHidden);
+        if ((diff & 0x0080) != 0) addDetail(sb, "orientation", "" + a.orientation, "" + b.orientation);
+        if ((diff & 0x0100) != 0) addDetail(sb, "screenLayout", "0x" + Integer.toHexString(a.screenLayout), "0x" + Integer.toHexString(b.screenLayout));
+        if ((diff & 0x0200) != 0) addDetail(sb, "uiMode", "0x" + Integer.toHexString(a.uiMode), "0x" + Integer.toHexString(b.uiMode));
+        if ((diff & 0x0400) != 0) addDetail(sb, "screen", a.screenWidthDp + "x" + a.screenHeightDp, b.screenWidthDp + "x" + b.screenHeightDp);
+        if ((diff & 0x0800) != 0) addDetail(sb, "smallestWidth", "" + a.smallestScreenWidthDp, "" + b.smallestScreenWidthDp);
+        if ((diff & 0x1000) != 0) addDetail(sb, "density", "" + a.densityDpi, "" + b.densityDpi);
+        if ((diff & 0x4000) != 0 && Build.VERSION.SDK_INT >= 26) addDetail(sb, "colorMode", "0x" + Integer.toHexString(a.colorMode), "0x" + Integer.toHexString(b.colorMode));
+        if ((diff & 0x10000000) != 0 && Build.VERSION.SDK_INT >= 31) addDetail(sb, "fontWeightAdjustment", "" + a.fontWeightAdjustment, "" + b.fontWeightAdjustment);
+        if ((diff & 0x40000000) != 0) addDetail(sb, "fontScale", "" + a.fontScale, "" + b.fontScale);
+        return sb.length() == 0 ? "" : " [" + sb + "]";
+    }
+
+    private static void addDetail(StringBuilder sb, String name, String from, String to) {
+        if (sb.length() > 0) sb.append(", ");
+        sb.append(name).append(' ').append(from).append(" → ").append(to);
+    }
+
+    // Why the screen is being destroyed, for the "app closing" line.
+    static String closeReason(boolean changingConfig, boolean finishing) {
+        if (changingConfig) return "Android is rebuilding the screen for a settings change";
+        if (finishing) return "the screen was finished (back button, or the app ended it)";
+        return "Android closed the screen";
     }
 
     // Request audio focus ONCE and hold it for the whole listening session.
@@ -2308,7 +2440,14 @@ public class NativePlayerPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
-        plog("--- app closing ---");
+        Activity a = getActivity();
+        boolean changing = false, finishing = false;
+        try {
+            changing = a != null && a.isChangingConfigurations();
+            finishing = a != null && a.isFinishing();
+        } catch (Exception e) { /* reason unknown */ }
+        plog("--- app closing: " + closeReason(changing, finishing)
+            + (playWhenReady || isPlaying() ? ", the music was playing" : "") + " ---");
         super.handleOnDestroy();
         cancelRetry();
         stopCallWatch();
