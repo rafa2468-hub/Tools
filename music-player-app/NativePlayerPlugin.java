@@ -45,14 +45,20 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.extractor.DefaultExtractorsFactory;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStream;
@@ -111,6 +117,145 @@ public class NativePlayerPlugin extends Plugin {
     private static Configuration lastConfig;
     private static int handledConfig = -1;
     private static final List<String> pendingLines = new ArrayList<>();
+
+    // Native's own record of the queue and where it is in it (v1.8.3). Android
+    // ends the app's screen now and then (often when the car connects), and the
+    // rebuilt screen used to start over from the web layer's resume note, which
+    // can be songs behind: the web layer is frozen while native plays on with
+    // the screen off. Kept in memory for a restart inside the same process and
+    // in two files for a new one: the queue (rewritten when it changes) and
+    // the place in it (small, rewritten on every track change, pause and seek,
+    // and every 10 s while playing). The last copy written is the one in memory.
+    private static SavedQueue lastQueue;
+    private static SavedPlace lastPlace;
+    // One writer for the process, so a closing screen's last save can't land
+    // after the next screen's first one.
+    private static final ExecutorService stateWriter = Executors.newSingleThreadExecutor();
+    private static final long QUEUE_SAVE_DELAY_MS = 2000;
+    private static final long PLACE_SAVE_EVERY_MS = 10000;
+
+    static final class SavedQueue {
+        final List<String> ids = new ArrayList<>();
+        final List<String> sources = new ArrayList<>();
+        final List<String> itemIds = new ArrayList<>();
+        final List<String> containers = new ArrayList<>();
+        final List<String> titles = new ArrayList<>();
+        final List<String> artists = new ArrayList<>();
+        final List<String> albums = new ArrayList<>();
+        final List<Integer> durationsSec = new ArrayList<>();
+        final List<Integer> trackNos = new ArrayList<>();
+        String directTemplate = "", transcodeTemplate = "", repeat = "off";
+
+        String toJson() throws Exception {
+            JSONObject o = new JSONObject();
+            o.put("v", 1);
+            o.put("ids", strings(ids));
+            o.put("sources", strings(sources));
+            o.put("itemIds", strings(itemIds));
+            o.put("containers", strings(containers));
+            o.put("titles", strings(titles));
+            o.put("artists", strings(artists));
+            o.put("albums", strings(albums));
+            JSONArray d = new JSONArray(), t = new JSONArray();
+            for (Integer v : durationsSec) d.put(v == null ? 0 : v);
+            for (Integer v : trackNos) t.put(v == null ? 0 : v);
+            o.put("durations", d);
+            o.put("trackNos", t);
+            o.put("direct", directTemplate);
+            o.put("transcode", transcodeTemplate);
+            o.put("repeat", repeat);
+            return o.toString();
+        }
+
+        // Null when the text isn't a whole, readable queue.
+        static SavedQueue fromJson(String text) {
+            if (text == null || text.length() == 0) return null;
+            try {
+                JSONObject o = new JSONObject(text);
+                if (o.optInt("v", 0) != 1) return null;
+                SavedQueue q = new SavedQueue();
+                readStrings(o.getJSONArray("ids"), q.ids);
+                int n = q.ids.size();
+                readStrings(o.optJSONArray("sources"), q.sources);
+                readStrings(o.optJSONArray("itemIds"), q.itemIds);
+                readStrings(o.optJSONArray("containers"), q.containers);
+                readStrings(o.optJSONArray("titles"), q.titles);
+                readStrings(o.optJSONArray("artists"), q.artists);
+                readStrings(o.optJSONArray("albums"), q.albums);
+                readInts(o.optJSONArray("durations"), q.durationsSec);
+                readInts(o.optJSONArray("trackNos"), q.trackNos);
+                if (q.sources.size() != n || q.itemIds.size() != n || q.containers.size() != n
+                    || q.titles.size() != n || q.artists.size() != n || q.albums.size() != n
+                    || q.durationsSec.size() != n || q.trackNos.size() != n) return null;
+                q.directTemplate = o.optString("direct", "");
+                q.transcodeTemplate = o.optString("transcode", "");
+                q.repeat = o.optString("repeat", "off");
+                return q;
+            } catch (Exception e) {
+                return null;
+            }
+        }
+
+        private static JSONArray strings(List<String> list) {
+            JSONArray a = new JSONArray();
+            for (String s : list) a.put(s == null ? "" : s);
+            return a;
+        }
+
+        private static void readStrings(JSONArray a, List<String> out) throws Exception {
+            if (a == null) return;
+            for (int i = 0; i < a.length(); i++) out.add(a.optString(i, ""));
+        }
+
+        private static void readInts(JSONArray a, List<Integer> out) throws Exception {
+            if (a == null) return;
+            for (int i = 0; i < a.length(); i++) out.add(a.optInt(i, 0));
+        }
+    }
+
+    static final class SavedPlace {
+        String id = "";
+        int index = -1;
+        int positionMs = 0;
+        // The file the track was playing from, when it was a file: the way
+        // back to a local song whose path the queue doesn't carry.
+        String source = "";
+        long savedAt = 0;
+
+        String toJson() throws Exception {
+            JSONObject o = new JSONObject();
+            o.put("id", id);
+            o.put("index", index);
+            o.put("position", positionMs);
+            o.put("source", source);
+            o.put("at", savedAt);
+            return o.toString();
+        }
+
+        static SavedPlace fromJson(String text) {
+            if (text == null || text.length() == 0) return null;
+            try {
+                JSONObject o = new JSONObject(text);
+                SavedPlace p = new SavedPlace();
+                p.id = o.optString("id", "");
+                p.index = o.optInt("index", -1);
+                p.positionMs = Math.max(0, o.optInt("position", 0));
+                p.source = o.optString("source", "");
+                p.savedAt = o.optLong("at", 0);
+                return p;
+            } catch (Exception e) {
+                return null;
+            }
+        }
+    }
+
+    // Which queue entry a saved place points at: its index while that entry
+    // is still the same song, else the song's first entry, else none (-1).
+    static int restoreIndex(List<String> ids, String id, int index) {
+        if (id == null || id.length() == 0) return -1;
+        if (index >= 0 && index < ids.size() && id.equals(ids.get(index))) return index;
+        return ids.indexOf(id);
+    }
 
     // One player per source, like the MediaPlayer it replaced: a new track,
     // a retry or a switch to another source builds a fresh one.
@@ -220,6 +365,10 @@ public class NativePlayerPlugin extends Plugin {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable ticker;
+    // A queue save waiting out a burst of changes (a send, then each local file
+    // patched in), and when the place was last saved while playing.
+    private Runnable queueSave;
+    private long placeSavedWall = 0;
 
     // Fade-out over the last few seconds of each track. Many downloaded songs
     // are cut at the source and stop dead at full volume; a short fade makes
@@ -288,6 +437,7 @@ public class NativePlayerPlugin extends Plugin {
                     playWhenReady = false;
                     if (retryRunnable != null) { cancelRetry(); needsReload = true; }
                     internalPause();
+                    savePlace(currentPositionMs());
                     publishState();
                 }
                 break;
@@ -353,6 +503,7 @@ public class NativePlayerPlugin extends Plugin {
         } catch (Throwable t) {
             session = null;
         }
+        restoreSaved();
     }
 
     // ---- media session ----
@@ -722,6 +873,139 @@ public class NativePlayerPlugin extends Plugin {
         return " [phone mode " + m + "]";
     }
 
+    // ---- saved queue and place (v1.8.3) ----
+
+    // Not in the phone's backup: a queue restored onto another phone means nothing.
+    private File queueFile() {
+        return new File(getContext().getNoBackupFilesDir(), "saved-queue.json");
+    }
+
+    private File placeFile() {
+        return new File(getContext().getNoBackupFilesDir(), "saved-place.json");
+    }
+
+    private static String readText(File f) {
+        try (FileInputStream in = new FileInputStream(f)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // Written whole to a temp file and renamed over the old one, so a kill
+    // mid-write leaves the previous copy, never half of one.
+    private static void writeText(final File f, final String text) {
+        try {
+            stateWriter.execute(() -> {
+                File tmp = new File(f.getPath() + ".tmp");
+                try (FileOutputStream out = new FileOutputStream(tmp, false)) {
+                    out.write(text.getBytes(StandardCharsets.UTF_8));
+                } catch (Exception e) {
+                    tmp.delete();
+                    return;
+                }
+                if (!tmp.renameTo(f)) tmp.delete();
+            });
+        } catch (Exception e) { /* ignore */ }
+    }
+
+    // The queue changed: save it once the burst of changes has settled.
+    private void saveQueueSoon() {
+        if (queueSave != null) handler.removeCallbacks(queueSave);
+        queueSave = this::saveQueueNow;
+        handler.postDelayed(queueSave, QUEUE_SAVE_DELAY_MS);
+    }
+
+    private void saveQueueNow() {
+        if (queueSave != null) { handler.removeCallbacks(queueSave); queueSave = null; }
+        SavedQueue q = new SavedQueue();
+        q.ids.addAll(ids);
+        q.sources.addAll(sources);
+        q.itemIds.addAll(itemIds);
+        q.containers.addAll(containers);
+        q.titles.addAll(titles);
+        q.artists.addAll(artists);
+        q.albums.addAll(albums);
+        q.durationsSec.addAll(durationsSec);
+        q.trackNos.addAll(trackNos);
+        q.directTemplate = directTemplate;
+        q.transcodeTemplate = transcodeTemplate;
+        q.repeat = repeatMode;
+        lastQueue = q;
+        try { writeText(queueFile(), q.toJson()); } catch (Exception e) { /* ignore */ }
+    }
+
+    // One of the listener's own files written to disk for the queue (not a
+    // download, and not the scratch file a one-off load reuses).
+    private String tracksPrefix;
+
+    private boolean isPersistedTrack(String path) {
+        if (path == null || path.length() == 0 || path.startsWith("http")) return false;
+        if (tracksPrefix == null) tracksPrefix = new File(getContext().getFilesDir(), "tracks").getAbsolutePath() + File.separator;
+        return path.startsWith(tracksPrefix);
+    }
+
+    // Save the current entry and position. No entry (nothing loaded, or a
+    // track that isn't in the queue) saves "no place", so a restart doesn't
+    // bring back a song that was stopped.
+    private void savePlace(int posMs) {
+        SavedPlace p = new SavedPlace();
+        if (queueIndex >= 0 && queueIndex < ids.size() && currentId.equals(ids.get(queueIndex))) {
+            p.id = currentId;
+            p.index = queueIndex;
+            p.positionMs = Math.max(0, posMs);
+            if (isPersistedTrack(currentSource)) p.source = currentSource;
+        }
+        p.savedAt = System.currentTimeMillis();
+        placeSavedWall = SystemClock.elapsedRealtime();
+        lastPlace = p;
+        try { writeText(placeFile(), p.toJson()); } catch (Exception e) { /* ignore */ }
+    }
+
+    // A rebuilt screen or a new process: pick up the queue and the place in it
+    // where the last screen left them, so the car's play button and the app
+    // carry on from there. Nothing is loaded until something presses play;
+    // play() then builds the player at the saved position.
+    private void restoreSaved() {
+        SavedQueue q = lastQueue != null ? lastQueue : SavedQueue.fromJson(readText(queueFile()));
+        if (q == null || q.ids.isEmpty()) return;
+        SavedPlace p = lastPlace != null ? lastPlace : SavedPlace.fromJson(readText(placeFile()));
+        lastQueue = q;
+        ids.clear();
+        ids.addAll(q.ids);
+        int n = ids.size();
+        replace(sources, q.sources, n);
+        replace(itemIds, q.itemIds, n);
+        replace(containers, q.containers, n);
+        replace(titles, q.titles, n);
+        replace(artists, q.artists, n);
+        replace(albums, q.albums, n);
+        durationsSec.clear();
+        durationsSec.addAll(q.durationsSec);
+        trackNos.clear();
+        trackNos.addAll(q.trackNos);
+        directTemplate = q.directTemplate;
+        transcodeTemplate = q.transcodeTemplate;
+        repeatMode = q.repeat;
+        int i = (p == null) ? -1 : restoreIndex(ids, p.id, p.index);
+        if (i < 0) {
+            plog("restored the queue: " + n + " tracks, no place in it saved");
+            return;
+        }
+        queueIndex = i;
+        currentId = ids.get(i);
+        lastPositionMs = p.positionMs;
+        if (isPersistedTrack(p.source) && new File(p.source).exists()) currentSource = p.source;
+        plog("restored where the music was: " + trackLabel(i) + " at " + fmt(lastPositionMs) + ", "
+            + n + " tracks (saved " + logTime.format(new Date(p.savedAt)) + ")");
+        publishMetadata();
+        publishState();
+    }
+
     // ---- calls ----
 
     // A phone or voice/video call is ringing or in progress (WhatsApp-style
@@ -824,6 +1108,7 @@ public class NativePlayerPlugin extends Plugin {
                         d.put("duration", dur > 0 ? dur / 1000.0 : 0);
                         emit("timeupdate", d);
                         maybeStartFade();
+                        if (isPlaying() && SystemClock.elapsedRealtime() - placeSavedWall >= PLACE_SAVE_EVERY_MS) savePlace(lastPositionMs);
                         // Ten seconds of steady playback since the last recovery:
                         // the connection is healthy again, so a later drop gets
                         // the full set of retries.
@@ -1406,6 +1691,8 @@ public class NativePlayerPlugin extends Plugin {
         lastResumeAtMs = pendingSeekMs;
         lastPositionMs = pendingSeekMs;
         durationMs = 0;
+        // Every track opened (a new one, a resume, a retry) is the new place.
+        savePlace(pendingSeekMs);
         // The play intent is decided by the caller so that a play() arriving
         // during an async load isn't lost.
         playWhenReady = autoplay;
@@ -1683,6 +1970,7 @@ public class NativePlayerPlugin extends Plugin {
         if (retryRunnable != null) { cancelRetry(); needsReload = true; }
         internalPause();
         if (!wasPlaying) emit("pause");
+        savePlace(currentPositionMs());
         publishState();
         scheduleIdleStop();
     }
@@ -1710,6 +1998,7 @@ public class NativePlayerPlugin extends Plugin {
         } catch (Exception e) { /* ignore */ }
         lastPositionMs = target;
         maybeStartFade();
+        savePlace(target);
         publishState();
     }
 
@@ -2162,10 +2451,21 @@ public class NativePlayerPlugin extends Plugin {
         final String direct = call.getString("directTemplate", "");
         final String transcode = call.getString("transcodeTemplate", "");
         getActivity().runOnUiThread(() -> {
+            // The listener's own files native already has on disk, by track id.
+            // After a restart the app sends its queue before it has found those
+            // files again, and a queue that forgot them skips every local song.
+            java.util.Map<String, String> known = new java.util.HashMap<>();
+            for (int i = 0; i < ids.size() && i < sources.size(); i++) {
+                if (isPersistedTrack(sources.get(i))) known.put(ids.get(i), sources.get(i));
+            }
             ids.clear();
             ids.addAll(nIds);
             int n = ids.size();
             replace(sources, nSources, n);
+            for (int i = 0; i < n; i++) {
+                String path = known.get(ids.get(i));
+                if (sources.get(i).length() == 0 && path != null && new File(path).exists()) sources.set(i, path);
+            }
             replace(itemIds, nItemIds, n);
             replace(containers, nContainers, n);
             replace(titles, nTitles, n);
@@ -2202,6 +2502,9 @@ public class NativePlayerPlugin extends Plugin {
             }
             publishMetadata();
             if (playWhenReady) schedulePrefetch();
+            saveQueueSoon();
+            // A pick's load follows at once and saves the new place itself.
+            if (!pick) savePlace(currentPositionMs());
         });
         call.resolve();
     }
@@ -2213,7 +2516,10 @@ public class NativePlayerPlugin extends Plugin {
         final int index = call.getInt("index", -1);
         final String source = call.getString("source", "");
         getActivity().runOnUiThread(() -> {
-            if (index >= 0 && index < sources.size()) sources.set(index, source);
+            if (index >= 0 && index < sources.size()) {
+                sources.set(index, source);
+                saveQueueSoon();
+            }
         });
         call.resolve();
     }
@@ -2421,12 +2727,32 @@ public class NativePlayerPlugin extends Plugin {
             alternates.clear();
             queueIndex = -1;
             currentId = "";
+            savePlace(0);
             releaseWifiLock();
             abandonFocus();
             publishState();
             stopService();
         });
         call.resolve();
+    }
+
+    // Where native is: the queue's track ids, the entry and position, and
+    // whether it's playing. The app takes this at start-up instead of its own
+    // resume note, which can be songs behind (see lastQueue).
+    @PluginMethod
+    public void getState(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            JSObject ret = new JSObject();
+            JSArray a = new JSArray();
+            for (String s : ids) a.put(s);
+            boolean known = queueIndex >= 0 && queueIndex < ids.size() && currentId.equals(ids.get(queueIndex));
+            ret.put("ids", a);
+            ret.put("index", known ? queueIndex : -1);
+            ret.put("id", known ? currentId : "");
+            ret.put("position", currentPositionMs() / 1000.0);
+            ret.put("playing", playWhenReady || isPlaying());
+            call.resolve(ret);
+        });
     }
 
     @PluginMethod
@@ -2460,6 +2786,9 @@ public class NativePlayerPlugin extends Plugin {
         } catch (Exception e) { /* reason unknown */ }
         plog("--- app closing: " + closeReason(changing, finishing)
             + (playWhenReady || isPlaying() ? ", the music was playing" : "") + " ---");
+        // The next screen (or process) starts from here.
+        saveQueueNow();
+        savePlace(currentPositionMs());
         super.handleOnDestroy();
         cancelRetry();
         stopCallWatch();

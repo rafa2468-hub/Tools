@@ -850,7 +850,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.8.2';
+const APP_VERSION = '1.8.3';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1100,7 +1100,9 @@ class NativeAudioAdapter {
     p.addListener('error', (d) => { this._jsError = false; this._nativeSkipping = !!(d && d.skipping); this._emit('error'); });
     // Native changed track on its own: auto-advance with the screen off, or the
     // car / notification Next and Previous buttons.
-    p.addListener('advanced', (d) => { try { handleNativeAdvanced(d); } catch (e) { /* ignore */ } });
+    p.addListener('advanced', (d) => {
+      try { handleNativeAdvanced(d); } catch (e) { nativeLog('track change from the player not shown: ' + String((e && e.message) || e).slice(0, 120)); }
+    });
     // A cached file turned out to be incomplete and has been deleted. Forget
     // the path so the track is fetched again next time it comes round.
     p.addListener('badcache', (d) => { try { forgetCachedTrack(d && d.index); } catch (e) { /* ignore */ } });
@@ -1187,6 +1189,18 @@ class NativeAudioAdapter {
   play() { this._playIntent = true; const p = this._plugin(); if (p) p.play(); return Promise.resolve(); }
   pause() { this._playIntent = false; const p = this._plugin(); if (p) p.pause(); }
   load() { /* native prepares on src assignment; nothing to do */ }
+  // Start-up after native restored its own place: show its position (and
+  // whether it's already playing) without loading anything. Native builds the
+  // player at that position on the next play.
+  adopt(position, duration, playing) {
+    this._currentTime = Math.max(0, Number(position) || 0);
+    if (duration > 0) this._duration = duration;
+    this._ready = true;
+    this._paused = !playing;
+    this._playIntent = !!playing;
+    this._emit('timeupdate');
+    if (playing) this._emit('play');
+  }
   removeAttribute(name) { if (name === 'src') { this.src = ''; } }
   setAttribute() { /* no-op */ }
 }
@@ -1197,7 +1211,12 @@ if (IS_NATIVE) {
   // When the app is opened or put away: events the player sent while the
   // screen was off arrive in a burst at the "opened" line.
   document.addEventListener('visibilitychange', () => {
-    nativeLog(document.visibilityState === 'visible' ? 'opened (in front)' : 'put in the background');
+    // The title the app shows, so the log can tell when the app has fallen
+    // behind the track native is really on.
+    const t = state.playingTrack;
+    nativeLog(document.visibilityState === 'visible'
+      ? 'opened (in front)' + (t ? `, app shows "${String(t.title || '').slice(0, 40)}"` : '')
+      : 'put in the background');
   });
 }
 
@@ -1990,6 +2009,8 @@ async function syncJellyfin(opts) {
     return true;
   } catch (err) {
     console.error('Jellyfin sync failed', err);
+    // At start-up this leaves the app with no library to load a song from.
+    nativeLog('Jellyfin library not loaded: ' + String((err && err.message) || err || 'sync failed').slice(0, 120));
     if (!silent) showToast(`Jellyfin: ${err.message || 'sync failed'}`);
     return false;
   } finally {
@@ -2077,7 +2098,7 @@ async function setActiveSource(nextSource, opts) {
   // Only the initial app boot wires the first/resume track into the now-playing
   // area. A user-initiated source switch never starts playback on its own.
   if (initial && !state.playingTrack && state.tracks.length > 0) {
-    bootPlaybackTrack(false);
+    await bootPlaybackTrack(false);
   }
 
   render();
@@ -2331,7 +2352,10 @@ function handleNativeAdvanced(d) {
   let pos = id ? state.queue.findIndex(q => String(q) === id) : -1;
   if (pos < 0 && typeof d.index === 'number' && d.index >= 0 && d.index < state.queue.length
       && (!id || String(state.queue[d.index]) === id)) pos = d.index;
-  if (pos < 0) return;
+  if (pos < 0) {
+    nativeLog(`track change from the player not in the app's queue (#${d.index}, ${state.queue.length} tracks)`);
+    return;
+  }
   state.queuePos = pos;
   resetPlaybackErrors();
   loadTrack(trackById(state.queue[pos]), true, true);
@@ -3392,9 +3416,15 @@ async function playWithFallback(reason) {
 // current source and references a track that still exists in the library,
 // use it (and seek to the saved playback position once metadata is ready);
 // otherwise fall back to the first track in the queue.
-function bootPlaybackTrack(autoplay) {
+// On the Android app native's own saved place comes first (see adoptNativePlace).
+async function bootPlaybackTrack(autoplay) {
   breadcrumb('bootPlaybackTrack');
   if (state.tracks.length === 0) return;
+  if (IS_NATIVE && !autoplay) {
+    const saved = await nativeSavedPlace();
+    if (state.playingTrack) return; // the listener picked a song meanwhile
+    if (adoptNativePlace(saved)) return;
+  }
   const resume = loadResume();
   const indices = state.tracks.map((_, i) => i);
   let startIdx = indices[0];
@@ -3419,6 +3449,48 @@ function bootPlaybackTrack(autoplay) {
     };
     audio.addEventListener('loadedmetadata', handler);
   }
+}
+
+// Native's queue and place, as it saved them itself (v1.8.3). They survive
+// Android ending the app's screen and the app being killed, and they're never
+// behind: the web layer's resume note is, after native played on with the
+// screen off while the web layer was frozen. Null when there's none.
+async function nativeSavedPlace() {
+  const p = nativePlayerPlugin();
+  if (!p || !p.getState) return null;
+  try { return await p.getState(); } catch (e) { return null; }
+}
+// Take native's queue and place as the app's own, without loading anything:
+// native already holds the track, and builds the player at the saved position
+// on the next play (from the app or the car). Tracks the library no longer has
+// are left out. False when there's no place, or its song isn't in the library.
+function adoptNativePlace(saved) {
+  if (!saved || !Array.isArray(saved.ids) || typeof saved.index !== 'number'
+      || saved.index < 0 || saved.index >= saved.ids.length) return false;
+  const byKey = new Map();
+  for (const t of state.local.tracks) byKey.set(String(t.id), t.id);
+  for (const t of state.jellyfin.tracks) byKey.set(String(t.id), t.id);
+  if (!byKey.has(String(saved.ids[saved.index]))) return false;
+  const queue = [];
+  let pos = -1;
+  saved.ids.forEach((key, i) => {
+    if (!byKey.has(String(key))) return;
+    if (i === saved.index) pos = queue.length;
+    queue.push(byKey.get(String(key)));
+  });
+  const track = trackById(queue[pos]);
+  if (!track) return false;
+  resetPlaybackErrors();
+  state.queue = queue;
+  state.queuePos = pos;
+  _nativeQueueSynced = false;
+  const playing = !!saved.playing;
+  loadTrack(track, playing, true);
+  audio.adopt(saved.position, track.durationSec || 0, playing);
+  nativeLog(`start-up: took the player's place, "${String(track.title || '').slice(0, 40)}" at ${formatTime(Number(saved.position) || 0)}`);
+  // The same queue back to native, as a re-send: it keeps the song it has.
+  syncNativeQueue({ fillAhead: playing });
+  return true;
 }
 
 // nativeAlreadyPlaying: set when the NATIVE queue auto-advanced to this track
