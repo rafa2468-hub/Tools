@@ -955,7 +955,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1972,18 +1972,6 @@ const JF = {
       headers: { 'Authorization': this.authHeader(config.accessToken, config.deviceId) },
     });
     if (!res.ok) throw new Error(`Favorite update failed (HTTP ${res.status})`);
-  },
-  // Songs Jellyfin picks to go with an item (a song, artist or playlist),
-  // for "Start radio".
-  async fetchInstantMix(config, itemId, limit) {
-    const params = new URLSearchParams({ userId: config.userId, limit: String(limit || 100) });
-    const url = `${this.trimUrl(config.serverUrl)}/Items/${itemId}/InstantMix?${params}`;
-    const res = await fetch(url, {
-      headers: { 'Authorization': this.authHeader(config.accessToken, config.deviceId) },
-    });
-    if (!res.ok) throw new Error(`Instant mix failed (HTTP ${res.status})`);
-    const json = await res.json();
-    return Array.isArray(json.Items) ? json.Items : [];
   },
   async renamePlaylistOnServer(config, playlistId, newName) {
     // Jellyfin's item-update endpoint expects the full BaseItemDto. Fetch first.
@@ -3308,8 +3296,7 @@ function renderJfArtist() {
   });
   state.listCtx.artist = list;
   const albums = jfAlbums().filter(al => al.indices.some(i => mine.has(i)));
-  const radioId = a.itemId || state.tracks[list[0]].itemId;
-  let html = detailHeader(a.name, plural(list.length, 'song'), 'artist', { id: radioId, label: a.name });
+  let html = detailHeader(a.name, plural(list.length, 'song'), 'artist', { id: a.key, label: a.name });
   if (albums.length) html += section('Albums', `<div class="tile-row">${albums.map(al => albumTile(al, false)).join('')}</div>`);
   html += section('Songs', list.map(i => jfSongRow(i, 'artist')).join(''));
   view.innerHTML = html;
@@ -3340,29 +3327,61 @@ async function warmPlaylists() {
   if (loaded && (state.view === 'home' || (state.view === 'library' && state.libTab === 'playlists'))) render();
 }
 
-// "Start radio": Jellyfin's instant mix for a song, artist or playlist, as the
-// new queue (the song it started from first).
-async function startRadio(itemId, label, seedId) {
-  if (state.source !== 'jellyfin' || !itemId) return;
-  showToast(`Starting radio: ${label}`);
-  let items;
-  try {
-    items = await JF.fetchInstantMix(state.jellyfin.config, itemId, 100);
-  } catch (e) {
-    console.warn('Instant mix failed', e);
-    showToast('Could not start radio');
-    return;
+// "Start radio", built here: Jellyfin's instant mix goes by genre alone, and
+// most of the library has none (the pipeline clears YouTube's "Music"), so it
+// was a shuffle of everything. Three pools, each shuffled: the artists' other
+// songs, the rest of the seed song's folder, and the songs in other folders
+// those artists appear in. Slots take the pools in turn (artist, folder,
+// related; artist, related from an artist page), falling back to whichever
+// still has songs. A song's radio starts with that song.
+const RADIO_MAX = 100;
+// The song's folder: Jellyfin makes each music folder one album item.
+function radioFolderKey(t) {
+  return t.albumItemId || (t.folder ? 'f:' + t.folder : '');
+}
+function shuffled(list) {
+  const a = list.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
   }
+  return a;
+}
+// seedIndex: the song it starts from, or null from an artist page.
+// keys: artistKey()s of the artists it's built around.
+function radioIndices(seedIndex, keys) {
+  const keySet = new Set(keys.filter(Boolean));
+  const byArtist = (t) => songArtists(t).some(n => keySet.has(artistKey(n)));
+  const seedFolder = seedIndex === null ? '' : radioFolderKey(state.tracks[seedIndex]);
+  const artistFolders = new Set();
+  for (const t of state.tracks) if (byArtist(t) && radioFolderKey(t)) artistFolders.add(radioFolderKey(t));
+  const artist = [], folder = [], related = [];
+  state.tracks.forEach((t, i) => {
+    if (i === seedIndex) return;
+    const f = radioFolderKey(t);
+    if (byArtist(t)) artist.push(i);
+    else if (seedFolder && f === seedFolder) folder.push(i);
+    else if (f && artistFolders.has(f)) related.push(i);
+  });
+  const pools = seedIndex === null
+    ? [shuffled(artist), shuffled(related)]
+    : [shuffled(artist), shuffled(folder), shuffled(related)];
+  const out = [];
+  if (seedIndex !== null) out.push(seedIndex);
+  else if (pools[0].length) out.push(pools[0].shift());
+  for (let slot = 0; out.length < RADIO_MAX && pools.some(p => p.length); slot++) {
+    for (let k = 0; k < pools.length; k++) {
+      const p = pools[(slot + k) % pools.length];
+      if (p.length) { out.push(p.shift()); break; }
+    }
+  }
+  return out;
+}
+function startRadio(seedIndex, keys, label) {
   if (state.source !== 'jellyfin') return;
-  const seen = new Set();
-  const indices = [];
-  const add = (id) => {
-    const i = trackIndexById(id);
-    if (i >= 0 && !seen.has(i)) { seen.add(i); indices.push(i); }
-  };
-  if (seedId) add(seedId);
-  for (const it of items) add('jf:' + it.Id);
+  const indices = radioIndices(seedIndex, keys);
   if (indices.length < 2) { showToast('No radio for this one yet'); return; }
+  showToast(`Starting radio: ${label}`);
   nativeLog(`radio from "${String(label).slice(0, 40)}", ${indices.length} songs`);
   setQueue(indices, indices[0]);
   loadQueueCurrent(true);
@@ -3417,7 +3436,7 @@ function handleJfClick(e) {
   }
   const radio = e.target.closest('[data-radio]');
   if (radio) {
-    startRadio(radio.dataset.radio, radio.dataset.radioLabel || 'radio', null);
+    startRadio(null, [radio.dataset.radio], radio.dataset.radioLabel || 'radio');
     return true;
   }
   return false;
@@ -3907,7 +3926,7 @@ async function handleSheetAction(act, trackIndex) {
     toggleFavorite(state.tracks[trackIndex]);
   } else if (act === 'radio') {
     closeSheet();
-    startRadio(t.itemId, t.title, t.id);
+    startRadio(trackIndex, songArtists(t).map(artistKey), t.title);
   } else if (act === 'goartist') {
     closeSheet();
     goToArtist(t);
