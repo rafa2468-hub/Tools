@@ -955,7 +955,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.9.2';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1174,6 +1174,9 @@ class NativeAudioAdapter {
     this._currentTime = 0; this._duration = 0;
     this._paused = true; this._volume = 1; this._playbackRate = 1;
     this._ready = false; this._listeners = {}; this._loadSeq = 0; this._bound = false;
+    // Set from asking native for a new song until native says it's opening it.
+    // Time updates in that gap are the previous song's.
+    this._awaitOpen = false;
     // Whether the app wants playback (set by play()/pause()). Passed through to
     // native load so a play() during an async local-file load isn't lost.
     this._playIntent = false;
@@ -1193,12 +1196,19 @@ class NativeAudioAdapter {
     const p = this._plugin();
     if (!p || this._bound) return;
     this._bound = true;
-    p.addListener('loadstart', () => { this._ready = false; this._currentTime = 0; this._emit('loadstart'); });
+    p.addListener('loadstart', () => { this._awaitOpen = false; this._ready = false; this._currentTime = 0; this._emit('loadstart'); });
     p.addListener('loadedmetadata', (d) => { this._ready = true; if (d && d.duration > 0) this._duration = d.duration; this._emit('loadedmetadata'); });
     p.addListener('play', () => { this._paused = false; this._emit('play'); });
     p.addListener('playing', () => { this._emit('playing'); });
     p.addListener('pause', () => { this._paused = true; this._emit('pause'); });
-    p.addListener('timeupdate', (d) => { if (d) { this._currentTime = d.position || 0; if (d.duration > 0) this._duration = d.duration; } this._emit('timeupdate'); });
+    // Native only sends the time once the song is loaded, so a time update is
+    // proof of that even if its loadedmetadata never got through (v1.9.2: the
+    // clock sat at 0:00 after Start radio while the song played).
+    p.addListener('timeupdate', (d) => {
+      if (d) { this._currentTime = d.position || 0; if (d.duration > 0) this._duration = d.duration; }
+      if (!this._ready && !this._awaitOpen) this._ready = true;
+      this._emit('timeupdate');
+    });
     p.addListener('ended', () => { this._paused = true; this._emit('ended'); });
     // Native reports an error only once it has already recovered or moved on by
     // itself, so the web layer just shows it (see the audio 'error' handler).
@@ -1231,6 +1241,7 @@ class NativeAudioAdapter {
   set src(v) {
     const val = v || '';
     this._src = val; this._currentSrc = val; this._ready = false;
+    this._awaitOpen = !!val;
     const seq = ++this._loadSeq;
     const p = this._plugin();
     if (!val) { if (p) p.stop(); return; }
@@ -1301,6 +1312,7 @@ class NativeAudioAdapter {
     this._currentTime = Math.max(0, Number(position) || 0);
     if (duration > 0) this._duration = duration;
     this._ready = true;
+    this._awaitOpen = false;
     this._paused = !playing;
     this._playIntent = !!playing;
     this._emit('timeupdate');
@@ -4259,6 +4271,7 @@ function loadTrack(track, autoplay, nativeAlreadyPlaying) {
   // Reset the seek/time display; loadedmetadata will refresh once the audio
   // header is parsed, but for Jellyfin transcodes the metadata duration is
   // already known up-front so prefer it.
+  state.seeking = false; // a drag on the old song means nothing for this one
   seek.value = '0';
   currentEl.textContent = '0:00';
   durationEl.textContent = track.durationSec > 0 ? formatTime(track.durationSec) : '0:00';
@@ -4808,12 +4821,34 @@ function effectiveDuration() {
   return 0;
 }
 
-seek.addEventListener('input', () => { state.seeking = true; });
+let _seekInputAt = 0;
+seek.addEventListener('input', () => { state.seeking = true; _seekInputAt = Date.now(); });
 seek.addEventListener('change', () => {
   const dur = effectiveDuration();
   if (dur > 0) audio.currentTime = (Number(seek.value) / 1000) * dur;
   state.seeking = false;
 });
+// A drag that ends with no 'change' (Android cancelled the touch) left the
+// clock frozen until the next drag. Let go of it shortly after the finger
+// does, without moving the song; a real release has had its 'change' by then.
+function releaseSeekDrag() {
+  setTimeout(() => { if (Date.now() - _seekInputAt >= 250) state.seeking = false; }, 300);
+}
+['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(ev => seek.addEventListener(ev, releaseSeekDrag));
+
+// Clock trace (v1.9.2): when a playing song's time comes in from native but
+// the display ignores it for 2 s, say why in the Playback log, once a song.
+let _clockHeldSince = 0;
+let _clockHeldLogged = false;
+function noteClockHeld(why) {
+  if (!IS_NATIVE || audio.paused) return;
+  const now = Date.now();
+  if (!_clockHeldSince) { _clockHeldSince = now; return; }
+  if (_clockHeldLogged || now - _clockHeldSince < 2000) return;
+  _clockHeldLogged = true;
+  nativeLog(`clock held: ${why}, player at ${formatTime(audio.currentTime)}`);
+}
+audio.addEventListener('loadstart', () => { _clockHeldSince = 0; _clockHeldLogged = false; });
 
 function resetTimeDisplay() {
   seek.value = '0';
@@ -4824,12 +4859,16 @@ function resetTimeDisplay() {
 }
 
 audio.addEventListener('timeupdate', () => {
-  if (state.seeking) return;
+  if (state.seeking) { noteClockHeld('seek bar held'); return; }
   // Skip stale events from a previous source. After audio.src changes, the
   // element drops to readyState 0 and re-progresses; ignore everything before
   // metadata is available again so the old track's currentTime doesn't briefly
   // get displayed against the new track's duration.
-  if (audio.readyState < 1) return;
+  if (audio.readyState < 1) {
+    noteClockHeld(IS_NATIVE && audio._awaitOpen ? 'app still waiting for native to open the song' : 'app has the song as not loaded');
+    return;
+  }
+  _clockHeldSince = 0;
   const dur = effectiveDuration();
   if (dur > 0) seek.value = String(Math.floor((audio.currentTime / dur) * 1000));
   currentEl.textContent = formatTime(audio.currentTime);
