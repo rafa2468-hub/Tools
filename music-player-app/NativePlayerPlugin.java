@@ -1,13 +1,16 @@
 package com.brokis.musicplayer;
 
+import android.app.Activity;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ComponentCallbacks;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.Configuration;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
@@ -42,14 +45,20 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.extractor.DefaultExtractorsFactory;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStream;
@@ -97,6 +106,156 @@ public class NativePlayerPlugin extends Plugin {
     // The live plugin, so PlaybackService (notification buttons, swipe-away)
     // can reach it.
     static NativePlayerPlugin instance;
+
+    // Kept across the screen being torn down and rebuilt inside the same
+    // process (the app has closed when the car connects): whether this process
+    // already ran the plugin, the phone settings seen last, the settings
+    // changes MainActivity's manifest copes with itself (-1 = not read yet), and
+    // lines from moments when no plugin was alive to log them.
+    private static boolean processSeen = false;
+    private static boolean configWatchOn = false;
+    private static Configuration lastConfig;
+    private static int handledConfig = -1;
+    private static final List<String> pendingLines = new ArrayList<>();
+
+    // Native's own record of the queue and where it is in it (v1.8.3). Android
+    // ends the app's screen now and then (often when the car connects), and the
+    // rebuilt screen used to start over from the web layer's resume note, which
+    // can be songs behind: the web layer is frozen while native plays on with
+    // the screen off. Kept in memory for a restart inside the same process and
+    // in two files for a new one: the queue (rewritten when it changes) and
+    // the place in it (small, rewritten on every track change, pause and seek,
+    // and every 10 s while playing). The last copy written is the one in memory.
+    private static SavedQueue lastQueue;
+    private static SavedPlace lastPlace;
+    // One writer for the process, so a closing screen's last save can't land
+    // after the next screen's first one.
+    private static final ExecutorService stateWriter = Executors.newSingleThreadExecutor();
+    private static final long QUEUE_SAVE_DELAY_MS = 2000;
+    private static final long PLACE_SAVE_EVERY_MS = 10000;
+
+    static final class SavedQueue {
+        final List<String> ids = new ArrayList<>();
+        final List<String> sources = new ArrayList<>();
+        final List<String> itemIds = new ArrayList<>();
+        final List<String> containers = new ArrayList<>();
+        final List<String> titles = new ArrayList<>();
+        final List<String> artists = new ArrayList<>();
+        final List<String> albums = new ArrayList<>();
+        final List<Integer> durationsSec = new ArrayList<>();
+        final List<Integer> trackNos = new ArrayList<>();
+        String directTemplate = "", transcodeTemplate = "", repeat = "off";
+
+        String toJson() throws Exception {
+            JSONObject o = new JSONObject();
+            o.put("v", 1);
+            o.put("ids", strings(ids));
+            o.put("sources", strings(sources));
+            o.put("itemIds", strings(itemIds));
+            o.put("containers", strings(containers));
+            o.put("titles", strings(titles));
+            o.put("artists", strings(artists));
+            o.put("albums", strings(albums));
+            JSONArray d = new JSONArray(), t = new JSONArray();
+            for (Integer v : durationsSec) d.put(v == null ? 0 : v);
+            for (Integer v : trackNos) t.put(v == null ? 0 : v);
+            o.put("durations", d);
+            o.put("trackNos", t);
+            o.put("direct", directTemplate);
+            o.put("transcode", transcodeTemplate);
+            o.put("repeat", repeat);
+            return o.toString();
+        }
+
+        // Null when the text isn't a whole, readable queue.
+        static SavedQueue fromJson(String text) {
+            if (text == null || text.length() == 0) return null;
+            try {
+                JSONObject o = new JSONObject(text);
+                if (o.optInt("v", 0) != 1) return null;
+                SavedQueue q = new SavedQueue();
+                readStrings(o.getJSONArray("ids"), q.ids);
+                int n = q.ids.size();
+                readStrings(o.optJSONArray("sources"), q.sources);
+                readStrings(o.optJSONArray("itemIds"), q.itemIds);
+                readStrings(o.optJSONArray("containers"), q.containers);
+                readStrings(o.optJSONArray("titles"), q.titles);
+                readStrings(o.optJSONArray("artists"), q.artists);
+                readStrings(o.optJSONArray("albums"), q.albums);
+                readInts(o.optJSONArray("durations"), q.durationsSec);
+                readInts(o.optJSONArray("trackNos"), q.trackNos);
+                if (q.sources.size() != n || q.itemIds.size() != n || q.containers.size() != n
+                    || q.titles.size() != n || q.artists.size() != n || q.albums.size() != n
+                    || q.durationsSec.size() != n || q.trackNos.size() != n) return null;
+                q.directTemplate = o.optString("direct", "");
+                q.transcodeTemplate = o.optString("transcode", "");
+                q.repeat = o.optString("repeat", "off");
+                return q;
+            } catch (Exception e) {
+                return null;
+            }
+        }
+
+        private static JSONArray strings(List<String> list) {
+            JSONArray a = new JSONArray();
+            for (String s : list) a.put(s == null ? "" : s);
+            return a;
+        }
+
+        private static void readStrings(JSONArray a, List<String> out) throws Exception {
+            if (a == null) return;
+            for (int i = 0; i < a.length(); i++) out.add(a.optString(i, ""));
+        }
+
+        private static void readInts(JSONArray a, List<Integer> out) throws Exception {
+            if (a == null) return;
+            for (int i = 0; i < a.length(); i++) out.add(a.optInt(i, 0));
+        }
+    }
+
+    static final class SavedPlace {
+        String id = "";
+        int index = -1;
+        int positionMs = 0;
+        // The file the track was playing from, when it was a file: the way
+        // back to a local song whose path the queue doesn't carry.
+        String source = "";
+        long savedAt = 0;
+
+        String toJson() throws Exception {
+            JSONObject o = new JSONObject();
+            o.put("id", id);
+            o.put("index", index);
+            o.put("position", positionMs);
+            o.put("source", source);
+            o.put("at", savedAt);
+            return o.toString();
+        }
+
+        static SavedPlace fromJson(String text) {
+            if (text == null || text.length() == 0) return null;
+            try {
+                JSONObject o = new JSONObject(text);
+                SavedPlace p = new SavedPlace();
+                p.id = o.optString("id", "");
+                p.index = o.optInt("index", -1);
+                p.positionMs = Math.max(0, o.optInt("position", 0));
+                p.source = o.optString("source", "");
+                p.savedAt = o.optLong("at", 0);
+                return p;
+            } catch (Exception e) {
+                return null;
+            }
+        }
+    }
+
+    // Which queue entry a saved place points at: its index while that entry
+    // is still the same song, else the song's first entry, else none (-1).
+    static int restoreIndex(List<String> ids, String id, int index) {
+        if (id == null || id.length() == 0) return -1;
+        if (index >= 0 && index < ids.size() && id.equals(ids.get(index))) return index;
+        return ids.indexOf(id);
+    }
 
     // One player per source, like the MediaPlayer it replaced: a new track,
     // a retry or a switch to another source builds a fresh one.
@@ -206,6 +365,10 @@ public class NativePlayerPlugin extends Plugin {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable ticker;
+    // A queue save waiting out a burst of changes (a send, then each local file
+    // patched in), and when the place was last saved while playing.
+    private Runnable queueSave;
+    private long placeSavedWall = 0;
 
     // Fade-out over the last few seconds of each track. Many downloaded songs
     // are cut at the source and stop dead at full volume; a short fade makes
@@ -274,6 +437,7 @@ public class NativePlayerPlugin extends Plugin {
                     playWhenReady = false;
                     if (retryRunnable != null) { cancelRetry(); needsReload = true; }
                     internalPause();
+                    savePlace(currentPositionMs());
                     publishState();
                 }
                 break;
@@ -317,10 +481,19 @@ public class NativePlayerPlugin extends Plugin {
     public void load() {
         instance = this;
         loadLog();
-        plog("--- app process started ---");
+        // A rebuilt screen loads the plugin again in a process that's still
+        // alive; a fresh process means Android killed the old one (or it's a
+        // first start / reinstall).
+        plog(processSeen ? "--- app screen restarted (same process) ---" : "--- app process started ---");
+        processSeen = true;
+        synchronized (pendingLines) {
+            for (String l : pendingLines) plog(l);
+            pendingLines.clear();
+        }
         plog("player: ExoPlayer (Media3 " + MediaLibraryInfo.VERSION + "), offload off");
         audioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
         watchOutputs();
+        watchConfig();
         try {
             session = new MediaSession(getContext(), "MusicPlayer");
             session.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
@@ -330,6 +503,7 @@ public class NativePlayerPlugin extends Plugin {
         } catch (Throwable t) {
             session = null;
         }
+        restoreSaved();
     }
 
     // ---- media session ----
@@ -699,6 +873,139 @@ public class NativePlayerPlugin extends Plugin {
         return " [phone mode " + m + "]";
     }
 
+    // ---- saved queue and place (v1.8.3) ----
+
+    // Not in the phone's backup: a queue restored onto another phone means nothing.
+    private File queueFile() {
+        return new File(getContext().getNoBackupFilesDir(), "saved-queue.json");
+    }
+
+    private File placeFile() {
+        return new File(getContext().getNoBackupFilesDir(), "saved-place.json");
+    }
+
+    private static String readText(File f) {
+        try (FileInputStream in = new FileInputStream(f)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // Written whole to a temp file and renamed over the old one, so a kill
+    // mid-write leaves the previous copy, never half of one.
+    private static void writeText(final File f, final String text) {
+        try {
+            stateWriter.execute(() -> {
+                File tmp = new File(f.getPath() + ".tmp");
+                try (FileOutputStream out = new FileOutputStream(tmp, false)) {
+                    out.write(text.getBytes(StandardCharsets.UTF_8));
+                } catch (Exception e) {
+                    tmp.delete();
+                    return;
+                }
+                if (!tmp.renameTo(f)) tmp.delete();
+            });
+        } catch (Exception e) { /* ignore */ }
+    }
+
+    // The queue changed: save it once the burst of changes has settled.
+    private void saveQueueSoon() {
+        if (queueSave != null) handler.removeCallbacks(queueSave);
+        queueSave = this::saveQueueNow;
+        handler.postDelayed(queueSave, QUEUE_SAVE_DELAY_MS);
+    }
+
+    private void saveQueueNow() {
+        if (queueSave != null) { handler.removeCallbacks(queueSave); queueSave = null; }
+        SavedQueue q = new SavedQueue();
+        q.ids.addAll(ids);
+        q.sources.addAll(sources);
+        q.itemIds.addAll(itemIds);
+        q.containers.addAll(containers);
+        q.titles.addAll(titles);
+        q.artists.addAll(artists);
+        q.albums.addAll(albums);
+        q.durationsSec.addAll(durationsSec);
+        q.trackNos.addAll(trackNos);
+        q.directTemplate = directTemplate;
+        q.transcodeTemplate = transcodeTemplate;
+        q.repeat = repeatMode;
+        lastQueue = q;
+        try { writeText(queueFile(), q.toJson()); } catch (Exception e) { /* ignore */ }
+    }
+
+    // One of the listener's own files written to disk for the queue (not a
+    // download, and not the scratch file a one-off load reuses).
+    private String tracksPrefix;
+
+    private boolean isPersistedTrack(String path) {
+        if (path == null || path.length() == 0 || path.startsWith("http")) return false;
+        if (tracksPrefix == null) tracksPrefix = new File(getContext().getFilesDir(), "tracks").getAbsolutePath() + File.separator;
+        return path.startsWith(tracksPrefix);
+    }
+
+    // Save the current entry and position. No entry (nothing loaded, or a
+    // track that isn't in the queue) saves "no place", so a restart doesn't
+    // bring back a song that was stopped.
+    private void savePlace(int posMs) {
+        SavedPlace p = new SavedPlace();
+        if (queueIndex >= 0 && queueIndex < ids.size() && currentId.equals(ids.get(queueIndex))) {
+            p.id = currentId;
+            p.index = queueIndex;
+            p.positionMs = Math.max(0, posMs);
+            if (isPersistedTrack(currentSource)) p.source = currentSource;
+        }
+        p.savedAt = System.currentTimeMillis();
+        placeSavedWall = SystemClock.elapsedRealtime();
+        lastPlace = p;
+        try { writeText(placeFile(), p.toJson()); } catch (Exception e) { /* ignore */ }
+    }
+
+    // A rebuilt screen or a new process: pick up the queue and the place in it
+    // where the last screen left them, so the car's play button and the app
+    // carry on from there. Nothing is loaded until something presses play;
+    // play() then builds the player at the saved position.
+    private void restoreSaved() {
+        SavedQueue q = lastQueue != null ? lastQueue : SavedQueue.fromJson(readText(queueFile()));
+        if (q == null || q.ids.isEmpty()) return;
+        SavedPlace p = lastPlace != null ? lastPlace : SavedPlace.fromJson(readText(placeFile()));
+        lastQueue = q;
+        ids.clear();
+        ids.addAll(q.ids);
+        int n = ids.size();
+        replace(sources, q.sources, n);
+        replace(itemIds, q.itemIds, n);
+        replace(containers, q.containers, n);
+        replace(titles, q.titles, n);
+        replace(artists, q.artists, n);
+        replace(albums, q.albums, n);
+        durationsSec.clear();
+        durationsSec.addAll(q.durationsSec);
+        trackNos.clear();
+        trackNos.addAll(q.trackNos);
+        directTemplate = q.directTemplate;
+        transcodeTemplate = q.transcodeTemplate;
+        repeatMode = q.repeat;
+        int i = (p == null) ? -1 : restoreIndex(ids, p.id, p.index);
+        if (i < 0) {
+            plog("restored the queue: " + n + " tracks, no place in it saved");
+            return;
+        }
+        queueIndex = i;
+        currentId = ids.get(i);
+        lastPositionMs = p.positionMs;
+        if (isPersistedTrack(p.source) && new File(p.source).exists()) currentSource = p.source;
+        plog("restored where the music was: " + trackLabel(i) + " at " + fmt(lastPositionMs) + ", "
+            + n + " tracks (saved " + logTime.format(new Date(p.savedAt)) + ")");
+        publishMetadata();
+        publishState();
+    }
+
     // ---- calls ----
 
     // A phone or voice/video call is ringing or in progress (WhatsApp-style
@@ -801,6 +1108,7 @@ public class NativePlayerPlugin extends Plugin {
                         d.put("duration", dur > 0 ? dur / 1000.0 : 0);
                         emit("timeupdate", d);
                         maybeStartFade();
+                        if (isPlaying() && SystemClock.elapsedRealtime() - placeSavedWall >= PLACE_SAVE_EVERY_MS) savePlace(lastPositionMs);
                         // Ten seconds of steady playback since the last recovery:
                         // the connection is healthy again, so a later drop gets
                         // the full set of retries.
@@ -1144,6 +1452,115 @@ public class NativePlayerPlugin extends Plugin {
         } catch (Exception e) { deviceCallback = null; }
     }
 
+    // ---- phone settings changes (log only) ----
+
+    // Log every change of the phone's settings: what changed, from → to. The
+    // app has closed itself when the car connects (the screen destroyed, not
+    // the process killed), and a settings change the manifest doesn't cover
+    // makes Android tear the screen down and rebuild it. The watch sits on the
+    // application, once per process, so it hears those changes too.
+    private void watchConfig() {
+        try {
+            Activity a = getActivity();
+            if (handledConfig < 0 && a != null) {
+                handledConfig = a.getPackageManager().getActivityInfo(a.getComponentName(), 0).configChanges;
+            }
+        } catch (Exception e) { /* left unknown */ }
+        if (configWatchOn) return;
+        try {
+            Context app = getContext().getApplicationContext();
+            lastConfig = new Configuration(app.getResources().getConfiguration());
+            app.registerComponentCallbacks(new ConfigWatch());
+            configWatchOn = true;
+        } catch (Exception e) { /* no settings log */ }
+    }
+
+    // Static, so the application doesn't hold on to the first plugin.
+    private static final class ConfigWatch implements ComponentCallbacks {
+        @Override
+        public void onConfigurationChanged(Configuration now) {
+            if (now == null) return;
+            Configuration before = lastConfig;
+            lastConfig = new Configuration(now);
+            if (before == null) return;
+            int diff = before.diff(now);
+            if (diff == 0) return;
+            String line = "phone settings changed: " + configChangeNames(diff, handledConfig)
+                + configDetail(before, now, diff);
+            NativePlayerPlugin p = instance;
+            if (p != null) { p.plog(line); return; }
+            String at = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+            synchronized (pendingLines) { pendingLines.add(line + " (at " + at + ", while the screen was closed)"); }
+        }
+        @Override
+        public void onLowMemory() { }
+    }
+
+    private static final int[] CONFIG_BITS = {
+        0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040, 0x0080, 0x0100, 0x0200,
+        0x0400, 0x0800, 0x1000, 0x2000, 0x4000, 0x8000, 0x10000000, 0x40000000 };
+    private static final String[] CONFIG_NAMES = {
+        "mcc", "mnc", "locale", "touchscreen", "keyboard", "keyboardHidden", "navigation",
+        "orientation", "screenLayout", "uiMode", "screenSize", "smallestScreenSize", "density",
+        "layoutDirection", "colorMode", "grammaticalGender", "fontWeightAdjustment", "fontScale" };
+
+    // The changed settings by their manifest names (ActivityInfo.CONFIG_*),
+    // each one the manifest doesn't list marked "not in manifest". Bits with no
+    // public name are shown as hex. handled = -1: the manifest wasn't read.
+    static String configChangeNames(int diff, int handled) {
+        StringBuilder sb = new StringBuilder();
+        int rest = diff;
+        for (int i = 0; i < CONFIG_BITS.length; i++) {
+            if ((diff & CONFIG_BITS[i]) == 0) continue;
+            rest &= ~CONFIG_BITS[i];
+            appendConfigName(sb, CONFIG_NAMES[i], CONFIG_BITS[i], handled);
+        }
+        for (int b = 0; b < 32; b++) {
+            int bit = 1 << b;
+            if ((rest & bit) != 0) appendConfigName(sb, "0x" + Integer.toHexString(bit), bit, handled);
+        }
+        return sb.length() == 0 ? "nothing" : sb.toString();
+    }
+
+    private static void appendConfigName(StringBuilder sb, String name, int bit, int handled) {
+        if (sb.length() > 0) sb.append(", ");
+        sb.append(name);
+        if (handled >= 0 && (handled & bit) == 0) sb.append(" (not in manifest)");
+    }
+
+    // The before → after values of the settings that changed, for the ones
+    // with a readable value.
+    private static String configDetail(Configuration a, Configuration b, int diff) {
+        StringBuilder sb = new StringBuilder();
+        if ((diff & 0x0004) != 0 && Build.VERSION.SDK_INT >= 24) addDetail(sb, "locale", a.getLocales().toLanguageTags(), b.getLocales().toLanguageTags());
+        if ((diff & 0x0008) != 0) addDetail(sb, "touchscreen", "" + a.touchscreen, "" + b.touchscreen);
+        if ((diff & 0x0010) != 0) addDetail(sb, "keyboard", "" + a.keyboard, "" + b.keyboard);
+        if ((diff & 0x0020) != 0) addDetail(sb, "keyboardHidden", a.keyboardHidden + "/" + a.hardKeyboardHidden, b.keyboardHidden + "/" + b.hardKeyboardHidden);
+        if ((diff & 0x0040) != 0) addDetail(sb, "navigation", a.navigation + "/" + a.navigationHidden, b.navigation + "/" + b.navigationHidden);
+        if ((diff & 0x0080) != 0) addDetail(sb, "orientation", "" + a.orientation, "" + b.orientation);
+        if ((diff & 0x0100) != 0) addDetail(sb, "screenLayout", "0x" + Integer.toHexString(a.screenLayout), "0x" + Integer.toHexString(b.screenLayout));
+        if ((diff & 0x0200) != 0) addDetail(sb, "uiMode", "0x" + Integer.toHexString(a.uiMode), "0x" + Integer.toHexString(b.uiMode));
+        if ((diff & 0x0400) != 0) addDetail(sb, "screen", a.screenWidthDp + "x" + a.screenHeightDp, b.screenWidthDp + "x" + b.screenHeightDp);
+        if ((diff & 0x0800) != 0) addDetail(sb, "smallestWidth", "" + a.smallestScreenWidthDp, "" + b.smallestScreenWidthDp);
+        if ((diff & 0x1000) != 0) addDetail(sb, "density", "" + a.densityDpi, "" + b.densityDpi);
+        if ((diff & 0x4000) != 0 && Build.VERSION.SDK_INT >= 26) addDetail(sb, "colorMode", "0x" + Integer.toHexString(a.colorMode), "0x" + Integer.toHexString(b.colorMode));
+        if ((diff & 0x10000000) != 0 && Build.VERSION.SDK_INT >= 31) addDetail(sb, "fontWeightAdjustment", "" + a.fontWeightAdjustment, "" + b.fontWeightAdjustment);
+        if ((diff & 0x40000000) != 0) addDetail(sb, "fontScale", "" + a.fontScale, "" + b.fontScale);
+        return sb.length() == 0 ? "" : " [" + sb + "]";
+    }
+
+    private static void addDetail(StringBuilder sb, String name, String from, String to) {
+        if (sb.length() > 0) sb.append(", ");
+        sb.append(name).append(' ').append(from).append(" → ").append(to);
+    }
+
+    // Why the screen is being destroyed, for the "app closing" line.
+    static String closeReason(boolean changingConfig, boolean finishing) {
+        if (changingConfig) return "Android is rebuilding the screen for a settings change";
+        if (finishing) return "the screen was finished (back button, or the app ended it)";
+        return "Android closed the screen";
+    }
+
     // Request audio focus ONCE and hold it for the whole listening session.
     // Rebuilding an AudioFocusRequest on every track (as this used to do)
     // orphans the previous request, and the stale request can deliver a focus
@@ -1274,6 +1691,8 @@ public class NativePlayerPlugin extends Plugin {
         lastResumeAtMs = pendingSeekMs;
         lastPositionMs = pendingSeekMs;
         durationMs = 0;
+        // Every track opened (a new one, a resume, a retry) is the new place.
+        savePlace(pendingSeekMs);
         // The play intent is decided by the caller so that a play() arriving
         // during an async load isn't lost.
         playWhenReady = autoplay;
@@ -1551,6 +1970,7 @@ public class NativePlayerPlugin extends Plugin {
         if (retryRunnable != null) { cancelRetry(); needsReload = true; }
         internalPause();
         if (!wasPlaying) emit("pause");
+        savePlace(currentPositionMs());
         publishState();
         scheduleIdleStop();
     }
@@ -1578,6 +1998,7 @@ public class NativePlayerPlugin extends Plugin {
         } catch (Exception e) { /* ignore */ }
         lastPositionMs = target;
         maybeStartFade();
+        savePlace(target);
         publishState();
     }
 
@@ -1997,6 +2418,19 @@ public class NativePlayerPlugin extends Plugin {
     // reshuffle) — the web layer can lag behind native while the screen is off,
     // so its index alone can't be trusted. If the index had to be corrected,
     // "advanced" tells the web layer which track is really current.
+    // Which entry native is on after the app sends the queue. A re-send
+    // (shuffle, library refresh) can carry an index that's behind, because
+    // native auto-advanced with the screen off, so native keeps the song it
+    // has loaded and tells the app. A fresh pick names the song the app is
+    // about to load, so it's taken as given; "keeping" a song that was only
+    // restored at start-up put its title on screen over the one playing.
+    static int queueIndexAfterSend(boolean pick, boolean loaded, String currentId, List<String> ids, int index) {
+        if (pick || !loaded || currentId == null || currentId.length() == 0) return index;
+        if (index >= 0 && index < ids.size() && currentId.equals(ids.get(index))) return index;
+        int found = ids.indexOf(currentId);
+        return found >= 0 ? found : index;
+    }
+
     @PluginMethod
     public void setQueue(PluginCall call) {
         final List<String> nIds = toList(call.getArray("ids"));
@@ -2009,14 +2443,29 @@ public class NativePlayerPlugin extends Plugin {
         final List<String> nDurations = toList(call.getArray("durations"));
         final List<String> nTrackNos = toList(call.getArray("trackNos"));
         final int index = call.getInt("index", -1);
+        // Set when the app sends the queue because the listener picked a song
+        // (or pressed Next / Previous in the app): the load for that index
+        // follows straight away, so the index is the truth.
+        final boolean pick = Boolean.TRUE.equals(call.getBoolean("pick", false));
         final String repeat = call.getString("repeat", "off");
         final String direct = call.getString("directTemplate", "");
         final String transcode = call.getString("transcodeTemplate", "");
         getActivity().runOnUiThread(() -> {
+            // The listener's own files native already has on disk, by track id.
+            // After a restart the app sends its queue before it has found those
+            // files again, and a queue that forgot them skips every local song.
+            java.util.Map<String, String> known = new java.util.HashMap<>();
+            for (int i = 0; i < ids.size() && i < sources.size(); i++) {
+                if (isPersistedTrack(sources.get(i))) known.put(ids.get(i), sources.get(i));
+            }
             ids.clear();
             ids.addAll(nIds);
             int n = ids.size();
             replace(sources, nSources, n);
+            for (int i = 0; i < n; i++) {
+                String path = known.get(ids.get(i));
+                if (sources.get(i).length() == 0 && path != null && new File(path).exists()) sources.set(i, path);
+            }
             replace(itemIds, nItemIds, n);
             replace(containers, nContainers, n);
             replace(titles, nTitles, n);
@@ -2040,15 +2489,10 @@ public class NativePlayerPlugin extends Plugin {
             transcodeTemplate = transcode == null ? "" : transcode;
             repeatMode = repeat;
             errorStreak = 0;
-            int newIndex = index;
             boolean loaded = player != null || retryRunnable != null || needsReload;
-            if (loaded && currentId.length() > 0
-                && !(index >= 0 && index < n && currentId.equals(ids.get(index)))) {
-                int found = ids.indexOf(currentId);
-                if (found >= 0) newIndex = found;
-            }
+            int newIndex = queueIndexAfterSend(pick, loaded, currentId, ids, index);
             queueIndex = newIndex;
-            plog("queue from app: " + n + " tracks, at " + trackLabel(newIndex)
+            plog("queue from app" + (pick ? " (new pick)" : "") + ": " + n + " tracks, at " + trackLabel(newIndex)
                 + (newIndex != index ? " (app said #" + index + ", kept the playing track)" : ""));
             if (newIndex != index && newIndex >= 0) {
                 JSObject d = new JSObject();
@@ -2058,6 +2502,9 @@ public class NativePlayerPlugin extends Plugin {
             }
             publishMetadata();
             if (playWhenReady) schedulePrefetch();
+            saveQueueSoon();
+            // A pick's load follows at once and saves the new place itself.
+            if (!pick) savePlace(currentPositionMs());
         });
         call.resolve();
     }
@@ -2069,7 +2516,10 @@ public class NativePlayerPlugin extends Plugin {
         final int index = call.getInt("index", -1);
         final String source = call.getString("source", "");
         getActivity().runOnUiThread(() -> {
-            if (index >= 0 && index < sources.size()) sources.set(index, source);
+            if (index >= 0 && index < sources.size()) {
+                sources.set(index, source);
+                saveQueueSoon();
+            }
         });
         call.resolve();
     }
@@ -2277,12 +2727,32 @@ public class NativePlayerPlugin extends Plugin {
             alternates.clear();
             queueIndex = -1;
             currentId = "";
+            savePlace(0);
             releaseWifiLock();
             abandonFocus();
             publishState();
             stopService();
         });
         call.resolve();
+    }
+
+    // Where native is: the queue's track ids, the entry and position, and
+    // whether it's playing. The app takes this at start-up instead of its own
+    // resume note, which can be songs behind (see lastQueue).
+    @PluginMethod
+    public void getState(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            JSObject ret = new JSObject();
+            JSArray a = new JSArray();
+            for (String s : ids) a.put(s);
+            boolean known = queueIndex >= 0 && queueIndex < ids.size() && currentId.equals(ids.get(queueIndex));
+            ret.put("ids", a);
+            ret.put("index", known ? queueIndex : -1);
+            ret.put("id", known ? currentId : "");
+            ret.put("position", currentPositionMs() / 1000.0);
+            ret.put("playing", playWhenReady || isPlaying());
+            call.resolve(ret);
+        });
     }
 
     @PluginMethod
@@ -2308,7 +2778,17 @@ public class NativePlayerPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
-        plog("--- app closing ---");
+        Activity a = getActivity();
+        boolean changing = false, finishing = false;
+        try {
+            changing = a != null && a.isChangingConfigurations();
+            finishing = a != null && a.isFinishing();
+        } catch (Exception e) { /* reason unknown */ }
+        plog("--- app closing: " + closeReason(changing, finishing)
+            + (playWhenReady || isPlaying() ? ", the music was playing" : "") + " ---");
+        // The next screen (or process) starts from here.
+        saveQueueNow();
+        savePlace(currentPositionMs());
         super.handleOnDestroy();
         cancelRetry();
         stopCallWatch();

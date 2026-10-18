@@ -742,6 +742,108 @@
     padding: 12px 18px 4px;
   }
 
+  /* ---------- Spotify-style Jellyfin browsing (v1.9.0) ---------- */
+  /* .pick-btn's display beat the hidden attribute, so the Local-only file and
+     folder buttons showed on the Jellyfin source too. */
+  .pick-btn[hidden] { display: none; }
+  .chips {
+    display: flex;
+    gap: 6px;
+    padding: 10px 14px 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    appearance: none;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: transparent;
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .chip.active {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    border-color: transparent;
+    color: #fff;
+  }
+  .jf-section h3 {
+    font-size: 15px;
+    font-weight: 700;
+    margin: 16px 14px 8px;
+  }
+  .tile-row {
+    display: flex;
+    gap: 12px;
+    padding: 0 14px 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tile-row::-webkit-scrollbar { display: none; }
+  .tile { width: 120px; flex: 0 0 120px; cursor: pointer; }
+  .tile:active { transform: scale(0.98); }
+  .tile .album-art { border-radius: 10px; }
+  .tile-name {
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tile-sub {
+    font-size: 11px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .collage {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
+  .collage > div { position: relative; overflow: hidden; }
+  .album-art.liked { background: linear-gradient(135deg, #4b2dff, #ff5d6c); color: #fff; }
+  .thumb {
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+    border-radius: 6px;
+    background:
+      radial-gradient(120% 120% at 30% 20%, rgba(124,92,255,0.7), rgba(74,214,255,0.3) 60%, rgba(0,0,0,0.4) 100%),
+      var(--bg-2);
+    position: relative;
+    overflow: hidden;
+  }
+  .thumb.round { border-radius: 50%; }
+  .thumb img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .thumb .initial {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.85);
+  }
+  .thumb.has-art .initial { display: none; }
+  .play-album-btn.ghost { background: rgba(255,255,255,0.1); }
+
   @media (min-width: 720px) {
     body { padding: 0; }
     main, header { max-width: 480px; margin-left: auto; margin-right: auto; width: 100%; }
@@ -826,9 +928,12 @@
 
   <section class="library" id="library">
     <div class="tabs" id="tabs">
-      <button class="tab active" data-view="albums" type="button">Albums</button>
-      <button class="tab" data-view="songs" type="button">Songs</button>
-      <button class="tab" data-view="playlists" type="button" id="tab-playlists">Playlists</button>
+      <button class="tab active" data-view="albums" data-mode="local" type="button">Albums</button>
+      <button class="tab" data-view="songs" data-mode="local" type="button">Songs</button>
+      <button class="tab" data-view="playlists" data-mode="local" type="button" id="tab-playlists">Playlists</button>
+      <button class="tab" data-view="home" data-mode="jellyfin" type="button" hidden>Home</button>
+      <button class="tab" data-view="search" data-mode="jellyfin" type="button" hidden>Search</button>
+      <button class="tab" data-view="library" data-mode="jellyfin" type="button" hidden>Library</button>
       <div class="spacer"></div>
       <button class="clear-btn" id="clear" type="button">Clear all</button>
     </div>
@@ -850,7 +955,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.2';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1069,6 +1174,9 @@ class NativeAudioAdapter {
     this._currentTime = 0; this._duration = 0;
     this._paused = true; this._volume = 1; this._playbackRate = 1;
     this._ready = false; this._listeners = {}; this._loadSeq = 0; this._bound = false;
+    // Set from asking native for a new song until native says it's opening it.
+    // Time updates in that gap are the previous song's.
+    this._awaitOpen = false;
     // Whether the app wants playback (set by play()/pause()). Passed through to
     // native load so a play() during an async local-file load isn't lost.
     this._playIntent = false;
@@ -1088,19 +1196,28 @@ class NativeAudioAdapter {
     const p = this._plugin();
     if (!p || this._bound) return;
     this._bound = true;
-    p.addListener('loadstart', () => { this._ready = false; this._currentTime = 0; this._emit('loadstart'); });
+    p.addListener('loadstart', () => { this._awaitOpen = false; this._ready = false; this._currentTime = 0; this._emit('loadstart'); });
     p.addListener('loadedmetadata', (d) => { this._ready = true; if (d && d.duration > 0) this._duration = d.duration; this._emit('loadedmetadata'); });
     p.addListener('play', () => { this._paused = false; this._emit('play'); });
     p.addListener('playing', () => { this._emit('playing'); });
     p.addListener('pause', () => { this._paused = true; this._emit('pause'); });
-    p.addListener('timeupdate', (d) => { if (d) { this._currentTime = d.position || 0; if (d.duration > 0) this._duration = d.duration; } this._emit('timeupdate'); });
+    // Native only sends the time once the song is loaded, so a time update is
+    // proof of that even if its loadedmetadata never got through (v1.9.2: the
+    // clock sat at 0:00 after Start radio while the song played).
+    p.addListener('timeupdate', (d) => {
+      if (d) { this._currentTime = d.position || 0; if (d.duration > 0) this._duration = d.duration; }
+      if (!this._ready && !this._awaitOpen) this._ready = true;
+      this._emit('timeupdate');
+    });
     p.addListener('ended', () => { this._paused = true; this._emit('ended'); });
     // Native reports an error only once it has already recovered or moved on by
     // itself, so the web layer just shows it (see the audio 'error' handler).
     p.addListener('error', (d) => { this._jsError = false; this._nativeSkipping = !!(d && d.skipping); this._emit('error'); });
     // Native changed track on its own: auto-advance with the screen off, or the
     // car / notification Next and Previous buttons.
-    p.addListener('advanced', (d) => { try { handleNativeAdvanced(d); } catch (e) { /* ignore */ } });
+    p.addListener('advanced', (d) => {
+      try { handleNativeAdvanced(d); } catch (e) { nativeLog('track change from the player not shown: ' + String((e && e.message) || e).slice(0, 120)); }
+    });
     // A cached file turned out to be incomplete and has been deleted. Forget
     // the path so the track is fetched again next time it comes round.
     p.addListener('badcache', (d) => { try { forgetCachedTrack(d && d.index); } catch (e) { /* ignore */ } });
@@ -1124,6 +1241,7 @@ class NativeAudioAdapter {
   set src(v) {
     const val = v || '';
     this._src = val; this._currentSrc = val; this._ready = false;
+    this._awaitOpen = !!val;
     const seq = ++this._loadSeq;
     const p = this._plugin();
     if (!val) { if (p) p.stop(); return; }
@@ -1187,6 +1305,19 @@ class NativeAudioAdapter {
   play() { this._playIntent = true; const p = this._plugin(); if (p) p.play(); return Promise.resolve(); }
   pause() { this._playIntent = false; const p = this._plugin(); if (p) p.pause(); }
   load() { /* native prepares on src assignment; nothing to do */ }
+  // Start-up after native restored its own place: show its position (and
+  // whether it's already playing) without loading anything. Native builds the
+  // player at that position on the next play.
+  adopt(position, duration, playing) {
+    this._currentTime = Math.max(0, Number(position) || 0);
+    if (duration > 0) this._duration = duration;
+    this._ready = true;
+    this._awaitOpen = false;
+    this._paused = !playing;
+    this._playIntent = !!playing;
+    this._emit('timeupdate');
+    if (playing) this._emit('play');
+  }
   removeAttribute(name) { if (name === 'src') { this.src = ''; } }
   setAttribute() { /* no-op */ }
 }
@@ -1197,7 +1328,12 @@ if (IS_NATIVE) {
   // When the app is opened or put away: events the player sent while the
   // screen was off arrive in a burst at the "opened" line.
   document.addEventListener('visibilitychange', () => {
-    nativeLog(document.visibilityState === 'visible' ? 'opened (in front)' : 'put in the background');
+    // The title the app shows, so the log can tell when the app has fallen
+    // behind the track native is really on.
+    const t = state.playingTrack;
+    nativeLog(document.visibilityState === 'visible'
+      ? 'opened (in front)' + (t ? `, app shows "${String(t.title || '').slice(0, 40)}"` : '')
+      : 'put in the background');
   });
 }
 
@@ -1288,6 +1424,10 @@ const clearBtn = document.getElementById('clear');
 const toast = document.getElementById('toast');
 const sheetBackdrop = document.getElementById('sheet');
 const sheetBody = document.getElementById('sheet-body');
+const libraryEl = document.getElementById('library');
+const searchBarEl = document.getElementById('search-bar');
+const searchBtnEl = document.getElementById('search-btn');
+const searchInputEl = document.getElementById('search-input');
 
 const PLAY_ICON = '<path d="M8 5v14l11-7z"/>';
 const PAUSE_ICON = '<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>';
@@ -1342,6 +1482,15 @@ const state = {
   diag: null,
   playlists: [],       // reference to state.local.playlists or state.jellyfin.playlists
   currentPlaylist: null, // playlist record when view === 'playlist-detail'
+  // Jellyfin browsing (v1.9.0): Home / Search / Library and their pages.
+  libTab: 'playlists',  // Library section: playlists | artists | albums | liked | folders
+  nav: [],              // back stack of Jellyfin pages
+  currentArtist: null,  // artistKey() on 'artist-detail'
+  currentTagAlbum: null, // albumKeyOf() on 'tagalbum-detail'
+  currentFolder: null,  // Jellyfin folder (MusicAlbum) id on 'folder-detail'
+  jfQuery: '',          // the Search page's query
+  listCtx: {},          // the song lists on screen, by name, for tap-to-play
+  menuList: null,       // the list the open track menu was opened from
   local: { tracks: [], playlists: [] },
   jellyfin: {
     tracks: [],
@@ -1621,11 +1770,12 @@ const JF = {
       // the old behaviour. Better than returning nothing.
       return this._fetchAudioUnder(config, null);
     }
-    // Fetch MusicAlbum entities first to get authoritative album names.
-    // Jellyfin uses the folder name as a display fallback when the ID3 tag is
-    // missing, but the per-track API field stays empty — so grouping by
-    // item.Album alone dumps those songs into "Unsorted". Mapping by AlbumId
-    // gives us the same names Jellyfin's own UI shows.
+    // Jellyfin makes one MusicAlbum per folder and names it from one of its
+    // songs' album tags (or the folder name when none has one). Each song
+    // keeps its own album tag in item.Album; the folder's album name goes
+    // alongside as FolderAlbum, for folders that are one album (see
+    // finishJellyfinLibrary). Overwriting item.Album with it (before v1.9.0)
+    // labelled every song in a mixed folder with one song's album.
     const albumNameById = new Map();
     for (const lib of musicLibs) {
       try {
@@ -1642,7 +1792,7 @@ const JF = {
       const items = await this._fetchAudioUnder(config, lib.Id);
       for (const it of items) {
         if (it.AlbumId && albumNameById.has(it.AlbumId)) {
-          it.Album = albumNameById.get(it.AlbumId);
+          it.FolderAlbum = albumNameById.get(it.AlbumId);
         }
         all.push(it);
       }
@@ -1680,7 +1830,7 @@ const JF = {
     const params = new URLSearchParams({
       IncludeItemTypes: 'Audio',
       Recursive: 'true',
-      Fields: 'AlbumId,Album,Artists,AlbumArtist,ParentIndexNumber,IndexNumber,RunTimeTicks,Path,UserData',
+      Fields: 'AlbumId,Album,Artists,AlbumArtist,ParentIndexNumber,IndexNumber,RunTimeTicks,Path,UserData,DateCreated',
       SortBy: 'AlbumArtist,Album,ParentIndexNumber,IndexNumber,SortName',
       SortOrder: 'Ascending',
       Limit: '10000',
@@ -1861,7 +2011,13 @@ function jfItemToTrack(item, config) {
   const artist = Array.isArray(item.Artists) && item.Artists.length
     ? item.Artists.join(', ')
     : (item.AlbumArtist || '');
-  const albumName = (item.Album && item.Album.trim()) || UNSORTED;
+  const tagAlbum = (item.Album && item.Album.trim()) || '';
+  // The song's folder: from its path (admin accounts get one), else the name
+  // Jellyfin gave the folder's album.
+  const pathParts = item.Path ? String(item.Path).split(/[\\/]/).filter(Boolean) : [];
+  const pathFolder = pathParts.length >= 2 ? pathParts[pathParts.length - 2] : '';
+  const albumName = tagAlbum || item.FolderAlbum || UNSORTED;
+  // Refined for the whole library by finishJellyfinLibrary.
   const pictureUrl = item.AlbumId
     ? JF.imageUrl(config, item.AlbumId)
     : JF.imageUrl(config, item.Id);
@@ -1875,6 +2031,15 @@ function jfItemToTrack(item, config) {
     title: item.Name || 'Unknown',
     artist,
     album: albumName,
+    artists: Array.isArray(item.Artists) ? item.Artists.slice() : [],
+    artistItems: Array.isArray(item.ArtistItems) ? item.ArtistItems.map(a => ({ id: a.Id, name: a.Name })) : [],
+    albumArtist: item.AlbumArtist || '',
+    tagAlbum,
+    folder: pathFolder || item.FolderAlbum || '',
+    folderFromPath: !!pathFolder,
+    hasOwnImage: !!(item.ImageTags && item.ImageTags.Primary),
+    albumHasImage: !!item.AlbumPrimaryImageTag,
+    addedAt: (item.DateCreated && Date.parse(item.DateCreated)) || 0,
     container: jfContainer,
     // Used by the web/PWA build. The Android app builds its own URLs from the
     // item id (see jellyfinUrlTemplates): the original file first — always,
@@ -1953,6 +2118,7 @@ async function syncJellyfin(opts) {
     } catch (e) {
       console.warn('Jellyfin playlists refresh failed', e);
     }
+    finishJellyfinLibrary(tracks, state.jellyfin.playlists);
     if (state.source === 'jellyfin') {
       state.tracks = state.jellyfin.tracks;
       state.playlists = state.jellyfin.playlists;
@@ -1972,7 +2138,7 @@ async function syncJellyfin(opts) {
       if (playlistDetailId != null) {
         const matched = state.playlists.find(p => p.id === playlistDetailId);
         state.currentPlaylist = matched || null;
-        if (!matched && state.view === 'playlist-detail') state.view = 'playlists';
+        if (!matched && state.view === 'playlist-detail') { state.view = 'library'; state.libTab = 'playlists'; }
         // If the open playlist's cache was invalidated by this refresh, fetch
         // its items once here (NOT from render) so the detail view repopulates.
         if (matched && state.view === 'playlist-detail' && !matched.loaded && !matched.loading) {
@@ -1987,9 +2153,12 @@ async function syncJellyfin(opts) {
       render();
     }
     if (feedback) showToast(`Loaded ${tracks.length} Jellyfin track${tracks.length === 1 ? '' : 's'}`);
+    if (state.source === 'jellyfin') warmPlaylists();
     return true;
   } catch (err) {
     console.error('Jellyfin sync failed', err);
+    // At start-up this leaves the app with no library to load a song from.
+    nativeLog('Jellyfin library not loaded: ' + String((err && err.message) || err || 'sync failed').slice(0, 120));
     if (!silent) showToast(`Jellyfin: ${err.message || 'sync failed'}`);
     return false;
   } finally {
@@ -2016,9 +2185,18 @@ async function setActiveSource(nextSource, opts) {
   // now-playing area is left untouched whenever a track is loaded.
   state.source = nextSource;
   saveSource();
-  state.view = 'albums';
+  state.view = nextSource === 'jellyfin' ? 'home' : 'albums';
   state.currentAlbum = null;
   state.currentPlaylist = null;
+  state.nav = [];
+  state.currentArtist = null;
+  state.currentTagAlbum = null;
+  state.currentFolder = null;
+  state.search = '';
+  state.jfQuery = '';
+  searchInputEl.value = '';
+  searchBarEl.classList.remove('visible');
+  searchBtnEl.classList.remove('active');
 
   if (nextSource === 'local') {
     state.tracks = state.local.tracks;
@@ -2064,6 +2242,7 @@ async function setActiveSource(nextSource, opts) {
           });
         }
         state.jellyfin.playlistsLoaded = true;
+        finishJellyfinLibrary(state.jellyfin.tracks, state.jellyfin.playlists);
       } catch (e) {
         console.warn('Jellyfin playlists fetch failed', e);
       }
@@ -2077,7 +2256,7 @@ async function setActiveSource(nextSource, opts) {
   // Only the initial app boot wires the first/resume track into the now-playing
   // area. A user-initiated source switch never starts playback on its own.
   if (initial && !state.playingTrack && state.tracks.length > 0) {
-    bootPlaybackTrack(false);
+    await bootPlaybackTrack(false);
   }
 
   render();
@@ -2094,6 +2273,9 @@ function applySourceUI() {
   const folderSupported = !document.getElementById('folder-pick').dataset.unsupported;
   document.getElementById('folder-pick').hidden = !(isLocal && folderSupported);
   document.getElementById('jf-refresh').hidden = isLocal;
+  tabs.querySelectorAll('.tab').forEach(t => { t.hidden = (t.dataset.mode || 'local') !== (isLocal ? 'local' : 'jellyfin'); });
+  clearBtn.hidden = !isLocal;
+  searchInputEl.placeholder = isLocal ? 'Search by title, artist, or album' : 'Songs, artists, albums, playlists';
 }
 
 function trackMatchesSearch(t) {
@@ -2143,8 +2325,11 @@ function loadQueueCurrent(autoplay) {
   // as a native queue entry (and native auto-advances through the rest while
   // the screen is off). Bridge calls run in order, so native has the queue
   // before the load arrives. Local files are only written to disk ahead for
-  // real playback, not a boot/resume preload.
-  if (IS_NATIVE) syncNativeQueue({ fillAhead: !!autoplay });
+  // real playback, not a boot/resume preload. pick: this index is about to be
+  // loaded, so native must not "keep" a song it only has loaded (the one
+  // restored at start-up); that answered with the old song and left its title
+  // on screen over the one playing.
+  if (IS_NATIVE) syncNativeQueue({ fillAhead: !!autoplay, pick: true });
   loadTrack(trackById(state.queue[state.queuePos]), autoplay);
 }
 
@@ -2223,6 +2408,11 @@ let _nativeQueueSeq = 0;
 // Whether native has been told about the CURRENT queue. Cleared whenever the
 // queue is rebuilt, and checked again right before playback starts.
 let _nativeQueueSynced = false;
+// The queue array and position last sent to native. Every queue change makes a
+// new array, so a match means this exact queue is already on its way.
+let _sentQueue = null;
+let _sentPos = -1;
+function nativeQueueSending() { return _sentQueue === state.queue && _sentPos === state.queuePos; }
 // How many local tracks ahead of the current one to keep written to disk. Small
 // and rolling: enough to auto-advance through a locked screen, without dumping
 // the whole library to disk (or hogging the bridge) up front. (Jellyfin tracks
@@ -2242,6 +2432,8 @@ async function syncNativeQueue(opts) {
   const p = nativePlayerPlugin();
   if (!p) return;
   const seq = ++_nativeQueueSeq;
+  _sentQueue = state.queue;
+  _sentPos = state.queuePos;
   const ids = [], sources = [], itemIds = [], containers = [], titles = [], artists = [], albums = [], durations = [], trackNos = [];
   for (const id of state.queue) {
     const t = trackById(id);
@@ -2262,11 +2454,11 @@ async function syncNativeQueue(opts) {
   try {
     await p.setQueue({
       ids, sources, itemIds, containers, titles, artists, albums, durations, trackNos,
-      index: state.queuePos, repeat: state.repeat || 'off',
+      index: state.queuePos, pick: !!(opts && opts.pick), repeat: state.repeat || 'off',
       directTemplate: urls.direct, transcodeTemplate: urls.transcode,
     });
     if (seq === _nativeQueueSeq) _nativeQueueSynced = true;
-  } catch (e) { return; }
+  } catch (e) { if (seq === _nativeQueueSeq) _sentQueue = null; return; }
   if (opts && opts.fillAhead) fillNativeQueueAhead(seq);
 }
 // Background: write the next few local files to disk, one at a time, patching
@@ -2321,7 +2513,10 @@ function handleNativeAdvanced(d) {
   let pos = id ? state.queue.findIndex(q => String(q) === id) : -1;
   if (pos < 0 && typeof d.index === 'number' && d.index >= 0 && d.index < state.queue.length
       && (!id || String(state.queue[d.index]) === id)) pos = d.index;
-  if (pos < 0) return;
+  if (pos < 0) {
+    nativeLog(`track change from the player not in the app's queue (#${d.index}, ${state.queue.length} tracks)`);
+    return;
+  }
   state.queuePos = pos;
   resetPlaybackErrors();
   loadTrack(trackById(state.queue[pos]), true, true);
@@ -2387,16 +2582,24 @@ function reshuffleQueueKeepingCurrent() {
 
 /* ---------- View rendering ---------- */
 function render() {
+  const jf = state.source === 'jellyfin';
   // Update tab visuals
   tabs.querySelectorAll('.tab').forEach(t => {
-    const active = t.dataset.view === state.view
-      || (state.view === 'album-detail' && t.dataset.view === 'albums')
-      || (state.view === 'playlist-detail' && t.dataset.view === 'playlists');
+    const active = jf ? t.dataset.view === jfRootView(state.view)
+      : (t.dataset.view === state.view
+        || (state.view === 'album-detail' && t.dataset.view === 'albums')
+        || (state.view === 'playlist-detail' && t.dataset.view === 'playlists'));
     t.classList.toggle('active', active);
   });
   // Hide tabs on detail views (replaced by back-row)
-  const isDetail = state.view === 'album-detail' || state.view === 'playlist-detail';
+  const isDetail = state.view === 'album-detail' || state.view === 'playlist-detail' || (jf && JF_DETAIL_VIEWS.has(state.view));
   tabs.style.display = isDetail ? 'none' : '';
+  if (jf) {
+    // On Jellyfin the search box belongs to the Search page.
+    searchBarEl.classList.toggle('visible', state.view === 'search');
+    searchBtnEl.classList.toggle('active', state.view === 'search');
+    if (JF_VIEWS.has(state.view)) { renderJf(); return; }
+  }
   if (state.view === 'playlists') { renderPlaylistsList(); return; }
   if (state.view === 'playlist-detail') { renderPlaylistDetail(); return; }
 
@@ -2579,7 +2782,7 @@ function renderPlaylistDetail() {
     p = cur ? state.playlists.find(pl => pl.id === cur.id) : null;
   }
   if (!p) {
-    state.view = 'playlists';
+    state.view = state.source === 'jellyfin' ? 'library' : 'playlists';
     state.currentPlaylist = null;
     render();
     return;
@@ -2678,6 +2881,579 @@ function trackRow(trackIndex, number, showAlbumSub) {
   `;
 }
 
+/* ---------- Spotify-style Jellyfin browsing (v1.9.0) ----------
+   Jellyfin source only; the Local library keeps its Albums / Songs /
+   Playlists tabs. Songs are grouped by their own tags: artists from each
+   song's artists, albums from each song's album tag. A pipeline folder holds
+   songs from many albums, so it's browsed as its playlist (<Folder>.m3u, named
+   after the folder), and only the other folders (the CD rips) are listed under
+   Folders. Playback is the same as everywhere else: a tap builds a queue and
+   hands it to loadQueueCurrent. */
+const JF_VIEWS = new Set(['home', 'search', 'library', 'artist-detail', 'tagalbum-detail', 'folder-detail']);
+const JF_DETAIL_VIEWS = new Set(['artist-detail', 'tagalbum-detail', 'folder-detail', 'playlist-detail']);
+const RECENT_KEY = 'music-player-recent';
+const RECENT_MAX = 50;
+const NOTE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
+const HEART_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
+const MENU_ICON = '<svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>';
+const BACK_ICON = '<svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>';
+const RADIO_ICON = '<svg viewBox="0 0 24 24"><path d="M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm-4.95-2.95a7 7 0 0 0 0 9.9l1.41-1.41a5 5 0 0 1 0-7.08L7.05 7.05zm9.9 0-1.41 1.41a5 5 0 0 1 0 7.08l1.41 1.41a7 7 0 0 0 0-9.9z"/></svg>';
+const PLAY_SMALL_ICON = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+const LIB_TABS = [['playlists', 'Playlists'], ['artists', 'Artists'], ['albums', 'Albums'], ['liked', 'Liked'], ['folders', 'Folders']];
+
+function plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
+// Lower case, no accents (and ł, which has no accent mark to strip), so
+// "dzem" finds "Dżem".
+function foldText(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ł/g, 'l');
+}
+// One key per artist however it's spelled: "T.Love" / "T. Love",
+// "LADY PANK" / "Lady Pank", "Dzem" / "Dżem".
+function artistKey(name) {
+  const k = foldText(name).replace(/[^a-z0-9]+/g, '');
+  return k || foldText(name).trim();
+}
+function songArtists(t) {
+  if (Array.isArray(t.artists) && t.artists.length) return t.artists;
+  return t.artist ? [t.artist] : [];
+}
+// A Jellyfin picture at another size (the tiles don't need 600 px).
+function sized(url, n) {
+  return url ? String(url).replace(/fillHeight=\d+&fillWidth=\d+/, `fillHeight=${n}&fillWidth=${n}`) : url;
+}
+
+// After a library load. A folder is an album when it isn't a pipeline
+// playlist folder (one whose name is a playlist's) and, without file paths
+// (a non-admin account), when its songs carry one album tag. Its name then
+// stands in for a missing album tag, and its picture for a missing song
+// picture. A pipeline folder mixes albums, so its name and picture (one
+// song's cover) say nothing about the others: a song there shows its own
+// picture or the blue tile.
+function finishJellyfinLibrary(tracks, playlists) {
+  const playlistNames = new Set((playlists || []).map(p => foldText(p.name).trim()));
+  const folders = new Map();
+  for (const t of tracks) {
+    if (!t.albumItemId) continue;
+    let f = folders.get(t.albumItemId);
+    if (!f) { f = { tags: new Set(), albums: new Map(), albumArtists: new Map() }; folders.set(t.albumItemId, f); }
+    f.tags.add(foldText(t.tagAlbum).trim());
+    if (t.tagAlbum) f.albums.set(t.tagAlbum, (f.albums.get(t.tagAlbum) || 0) + 1);
+    if (t.albumArtist) f.albumArtists.set(t.albumArtist, (f.albumArtists.get(t.albumArtist) || 0) + 1);
+  }
+  const cfg = state.jellyfin.config;
+  for (const t of tracks) {
+    const f = t.albumItemId ? folders.get(t.albumItemId) : null;
+    t.folderIsAlbum = !!f && !!t.folder && !playlistNames.has(foldText(t.folder).trim())
+      && (t.folderFromPath || f.tags.size <= 1);
+    // An untagged song in an album folder joins the folder's album (its most
+    // common tag, else the folder's name) and album artist.
+    t.album = t.tagAlbum || (t.folderIsAlbum ? (topOf(f.albums) || t.folder) : UNSORTED);
+    if (!t.albumArtist && t.folderIsAlbum) t.albumArtist = topOf(f.albumArtists);
+    t.pictureUrl = t.hasOwnImage ? JF.imageUrl(cfg, t.itemId)
+      : (t.folderIsAlbum && t.albumHasImage ? JF.imageUrl(cfg, t.albumItemId) : null);
+  }
+}
+
+// Songs played from the Jellyfin library, newest first (this device only).
+function loadRecent() {
+  try {
+    const r = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+    return Array.isArray(r) ? r : [];
+  } catch (e) { return []; }
+}
+function noteRecentlyPlayed(track) {
+  if (!track || (track.source || 'local') !== 'jellyfin') return;
+  try {
+    const ids = loadRecent().filter(id => id !== track.id);
+    ids.unshift(track.id);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(ids.slice(0, RECENT_MAX)));
+  } catch (e) { /* ignore */ }
+}
+
+let _idxTracks = null;
+let _idxMap = null;
+function trackIndexById(id) {
+  if (_idxTracks !== state.tracks || !_idxMap || _idxMap.size !== state.tracks.length) {
+    _idxTracks = state.tracks;
+    _idxMap = new Map(state.tracks.map((t, i) => [t.id, i]));
+  }
+  const i = _idxMap.get(id);
+  return i === undefined ? -1 : i;
+}
+function topOf(counts) {
+  let best = '';
+  let n = -1;
+  for (const [k, c] of counts) if (c > n) { best = k; n = c; }
+  return best;
+}
+// Disc/track order, then title.
+function trackOrder(a, b) {
+  return ((trackNoOf(a) || 1e9) - (trackNoOf(b) || 1e9))
+    || (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' });
+}
+function byName(a, b) { return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }); }
+function firstCover(indices) {
+  for (const i of indices) if (state.tracks[i].pictureUrl) return state.tracks[i].pictureUrl;
+  return null;
+}
+
+function jfArtists() {
+  const map = new Map();
+  state.tracks.forEach((t, i) => {
+    for (const name of songArtists(t)) {
+      const key = artistKey(name);
+      if (!key) continue;
+      let a = map.get(key);
+      if (!a) { a = { key, names: new Map(), ids: new Map(), indices: [] }; map.set(key, a); }
+      a.names.set(name, (a.names.get(name) || 0) + 1);
+      if (a.indices[a.indices.length - 1] !== i) a.indices.push(i);
+      const item = (t.artistItems || []).find(x => x.name === name);
+      if (item && item.id) a.ids.set(item.id, (a.ids.get(item.id) || 0) + 1);
+    }
+  });
+  const list = Array.from(map.values()).map(a => ({ key: a.key, name: topOf(a.names), itemId: topOf(a.ids), indices: a.indices }));
+  return list.sort(byName);
+}
+function albumKeyOf(t) { return foldText(albumOf(t)).trim() + '|' + artistKey(t.albumArtist || ''); }
+function jfAlbums() {
+  const map = new Map();
+  state.tracks.forEach((t, i) => {
+    if (albumOf(t) === UNSORTED) return;
+    const key = albumKeyOf(t);
+    let a = map.get(key);
+    if (!a) {
+      a = { key, name: albumOf(t), artist: t.albumArtist || songArtists(t)[0] || '', byAlbumArtist: !!t.albumArtist, indices: [] };
+      map.set(key, a);
+    }
+    a.indices.push(i);
+  });
+  const list = Array.from(map.values());
+  for (const a of list) {
+    a.indices.sort((x, y) => trackOrder(state.tracks[x], state.tracks[y]));
+    if (!a.byAlbumArtist && new Set(a.indices.map(i => artistKey(songArtists(state.tracks[i])[0] || ''))).size > 1) a.artist = 'Various artists';
+  }
+  return list.sort(byName);
+}
+function jfFolders() {
+  const map = new Map();
+  state.tracks.forEach((t, i) => {
+    if (!t.folderIsAlbum || !t.albumItemId) return;
+    let f = map.get(t.albumItemId);
+    if (!f) { f = { key: t.albumItemId, name: t.folder, indices: [] }; map.set(t.albumItemId, f); }
+    f.indices.push(i);
+  });
+  const list = Array.from(map.values());
+  for (const f of list) f.indices.sort((x, y) => trackOrder(state.tracks[x], state.tracks[y]));
+  return list.sort(byName);
+}
+function likedIndices() {
+  return state.tracks.map((t, i) => t.isFavorite ? i : -1).filter(i => i >= 0);
+}
+function playlistCount(p) {
+  return p.source === 'jellyfin' && !p.loaded ? (p.trackCount || 0) : playlistTracks(p).length;
+}
+
+/* ---- Jellyfin view navigation: tabs reset it, opening a page pushes it ---- */
+function jfRootView(v) { return v === 'home' || v === 'search' ? v : 'library'; }
+function jfPushNav() {
+  state.nav.push({
+    view: state.view, libTab: state.libTab, currentArtist: state.currentArtist, currentTagAlbum: state.currentTagAlbum,
+    currentFolder: state.currentFolder, currentPlaylist: state.currentPlaylist, scroll: libraryEl.scrollTop,
+  });
+  if (state.nav.length > 30) state.nav.shift();
+}
+function jfOpen(viewName, patch) {
+  jfPushNav();
+  Object.assign(state, patch || {});
+  state.view = viewName;
+  render();
+  libraryEl.scrollTop = 0;
+}
+function jfBack() {
+  const prev = state.nav.pop();
+  if (!prev) { jfTab('home'); return; }
+  state.view = prev.view;
+  state.libTab = prev.libTab;
+  state.currentArtist = prev.currentArtist;
+  state.currentTagAlbum = prev.currentTagAlbum;
+  state.currentFolder = prev.currentFolder;
+  state.currentPlaylist = prev.currentPlaylist;
+  render();
+  libraryEl.scrollTop = prev.scroll || 0;
+}
+function jfTab(viewName) {
+  state.nav = [];
+  state.view = viewName;
+  state.currentArtist = null;
+  state.currentTagAlbum = null;
+  state.currentFolder = null;
+  state.currentPlaylist = null;
+  render();
+  libraryEl.scrollTop = 0;
+}
+function goToArtist(t) {
+  const name = songArtists(t)[0];
+  if (name) jfOpen('artist-detail', { currentArtist: artistKey(name) });
+}
+
+/* ---- Pieces ---- */
+function imgTag(url, size, fallback) {
+  const fb = fallback ? ` data-fallback="${escapeHtml(sized(fallback, size))}"` : '';
+  return `<img src="${escapeHtml(sized(url, size))}" alt="" loading="lazy"${fb}>`;
+}
+// A square picture, or the blue tile (also when the picture fails to load:
+// see the image error handler).
+function artBox(url, extraClass, fallback) {
+  return `<div class="album-art${extraClass || ''}${url ? ' has-art' : ''}">${NOTE_ICON}${url ? imgTag(url, 300, fallback) : ''}</div>`;
+}
+function thumbHtml(url, initial, round, fallback) {
+  return `<div class="thumb${round ? ' round' : ''}${url ? ' has-art' : ''}"><span class="initial">${escapeHtml(initial || '♪')}</span>${url ? imgTag(url, 120, fallback) : ''}</div>`;
+}
+function section(title, body) { return `<div class="jf-section"><h3>${escapeHtml(title)}</h3>${body}</div>`; }
+function jfSongRow(i, list) {
+  const t = state.tracks[i];
+  const playing = !!state.playingTrack && t.id === state.playingTrack.id;
+  const artist = artistOf(t);
+  const album = albumOf(t);
+  const sub = artist && album !== UNSORTED ? `${artist} · ${album}` : (artist || (album !== UNSORTED ? album : ''));
+  return `
+    <div class="track${playing ? ' playing' : ''}" data-track="${i}" data-list="${list}">
+      ${thumbHtml(t.pictureUrl, '', false)}
+      <div class="track-info">
+        <div class="track-name">${escapeHtml(t.title)}</div>
+        ${sub ? `<div class="track-album-sub">${escapeHtml(sub)}</div>` : ''}
+      </div>
+      <button class="track-menu" data-menu="${i}" aria-label="Track menu" type="button">${MENU_ICON}</button>
+    </div>`;
+}
+function songTile(i, list) {
+  const t = state.tracks[i];
+  return `<div class="tile" data-track="${i}" data-list="${list}">${artBox(t.pictureUrl)}<div class="tile-name">${escapeHtml(t.title)}</div><div class="tile-sub">${escapeHtml(artistOf(t))}</div></div>`;
+}
+// A playlist's picture: its first four song covers as a 2x2 grid once its
+// songs are loaded, else Jellyfin's own playlist picture, else the blue tile.
+function playlistArt(p) {
+  const urls = [];
+  if (p.loaded) {
+    for (const id of p.trackIds) {
+      const i = trackIndexById(id);
+      const u = i >= 0 ? state.tracks[i].pictureUrl : null;
+      if (u && !urls.includes(u)) urls.push(u);
+      if (urls.length === 4) break;
+    }
+  }
+  if (urls.length === 4) {
+    return `<div class="album-art has-art">${NOTE_ICON}<div class="collage">${urls.map(u => `<div>${imgTag(u, 150)}</div>`).join('')}</div></div>`;
+  }
+  if (urls.length) return artBox(urls[0]);
+  return artBox(p.source === 'jellyfin' ? JF.imageUrl(state.jellyfin.config, p.id) : null);
+}
+function likedTile(card) {
+  const n = likedIndices().length;
+  const art = `<div class="album-art liked">${HEART_ICON}</div>`;
+  return card
+    ? `<div class="album-card" data-open="liked">${art}<div class="album-name">Liked songs</div><div class="album-count">${plural(n, 'song')}</div></div>`
+    : `<div class="tile" data-open="liked">${art}<div class="tile-name">Liked songs</div><div class="tile-sub">${plural(n, 'song')}</div></div>`;
+}
+function playlistTile(p, card) {
+  const key = escapeHtml(String(p.id));
+  const n = plural(playlistCount(p), 'song');
+  return card
+    ? `<div class="album-card" data-open="playlist" data-key="${key}">${playlistArt(p)}<div class="album-name">${escapeHtml(p.name)}</div><div class="album-count">${n}</div></div>`
+    : `<div class="tile" data-open="playlist" data-key="${key}">${playlistArt(p)}<div class="tile-name">${escapeHtml(p.name)}</div><div class="tile-sub">${n}</div></div>`;
+}
+function albumTile(a, card, kind) {
+  const open = kind || 'album';
+  const sub = open === 'folder' ? plural(a.indices.length, 'song') : a.artist;
+  const art = artBox(firstCover(a.indices));
+  return card
+    ? `<div class="album-card" data-open="${open}" data-key="${escapeHtml(a.key)}">${art}<div class="album-name">${escapeHtml(a.name)}</div><div class="album-count">${escapeHtml(sub)}</div></div>`
+    : `<div class="tile" data-open="${open}" data-key="${escapeHtml(a.key)}">${art}<div class="tile-name">${escapeHtml(a.name)}</div><div class="tile-sub">${escapeHtml(sub)}</div></div>`;
+}
+function artistRows(list) {
+  const cfg = state.jellyfin.config;
+  return list.map(a => {
+    const cover = firstCover(a.indices);
+    // The artist's own picture when Jellyfin has one, else one of their covers.
+    const url = a.itemId ? JF.imageUrl(cfg, a.itemId) : cover;
+    return `
+    <div class="track" data-open="artist" data-key="${escapeHtml(a.key)}">
+      ${thumbHtml(url, a.name.charAt(0).toUpperCase(), true, a.itemId ? cover : null)}
+      <div class="track-info">
+        <div class="track-name">${escapeHtml(a.name)}</div>
+        <div class="track-album-sub">${plural(a.indices.length, 'song')}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function detailHeader(title, meta, list, radio) {
+  const radioBtn = radio
+    ? `<button class="play-album-btn ghost" data-radio="${escapeHtml(radio.id)}" data-radio-label="${escapeHtml(radio.label)}" type="button">${RADIO_ICON} Radio</button>`
+    : '';
+  return `
+    <div class="back-row">
+      <button class="back-btn" id="back" type="button" aria-label="Back">${BACK_ICON}</button>
+      <div class="back-title">
+        <h2>${escapeHtml(title)}</h2>
+        <div class="meta">${escapeHtml(meta)}</div>
+      </div>
+      ${radioBtn}
+      <button class="play-album-btn" data-play-list="${list}" type="button">${PLAY_SMALL_ICON} Play</button>
+    </div>`;
+}
+
+/* ---- Views ---- */
+function renderJf() {
+  state.listCtx = {};
+  if (state.tracks.length === 0) {
+    view.innerHTML = '<div class="empty">' + (state.jellyfin.syncing ? 'Loading your Jellyfin library…' : 'No songs found.') + '</div>';
+    return;
+  }
+  if (state.view === 'home') renderJfHome();
+  else if (state.view === 'search') renderJfSearch();
+  else if (state.view === 'library') renderJfLibrary();
+  else if (state.view === 'artist-detail') renderJfArtist();
+  else if (state.view === 'tagalbum-detail') renderJfGroup(jfAlbums(), state.currentTagAlbum, a => `${a.artist ? a.artist + ' · ' : ''}${plural(a.indices.length, 'song')}`);
+  else if (state.view === 'folder-detail') renderJfGroup(jfFolders(), state.currentFolder, f => plural(f.indices.length, 'song'));
+}
+
+function renderJfHome() {
+  const recent = [];
+  for (const id of loadRecent()) {
+    const i = trackIndexById(id);
+    if (i >= 0) recent.push(i);
+    if (recent.length >= 20) break;
+  }
+  const added = state.tracks.map((_, i) => i).filter(i => state.tracks[i].addedAt > 0)
+    .sort((a, b) => state.tracks[b].addedAt - state.tracks[a].addedAt).slice(0, 30);
+  state.listCtx.recent = recent;
+  state.listCtx.added = added;
+  let html = '';
+  if (recent.length) html += section('Recently played', `<div class="tile-row">${recent.map(i => songTile(i, 'recent')).join('')}</div>`);
+  html += section('Your playlists', `<div class="tile-row">${likedTile(false)}${state.playlists.map(p => playlistTile(p, false)).join('')}</div>`);
+  if (added.length) html += section('Recently added', added.map(i => jfSongRow(i, 'added')).join(''));
+  view.innerHTML = html;
+}
+
+function renderJfSearch() {
+  const q = foldText(state.jfQuery).trim();
+  if (!q) {
+    view.innerHTML = '<div class="empty">Search your songs, artists, albums and playlists.</div>';
+    return;
+  }
+  const words = q.split(/\s+/).filter(Boolean);
+  const hit = s => { const f = foldText(s); return words.every(w => f.includes(w)); };
+  const songs = [];
+  state.tracks.forEach((t, i) => {
+    const album = albumOf(t) === UNSORTED ? '' : albumOf(t);
+    if (hit(`${t.title} ${songArtists(t).join(' ')} ${album}`)) songs.push(i);
+  });
+  const artists = jfArtists().filter(a => hit(a.name));
+  const albums = jfAlbums().filter(a => hit(`${a.name} ${a.artist}`));
+  const lists = state.playlists.filter(p => hit(p.name));
+  state.listCtx.search = songs.slice(0, 200);
+  let html = '';
+  if (artists.length) html += section('Artists', artistRows(artists.slice(0, 8)));
+  if (lists.length) html += section('Playlists', `<div class="tile-row">${lists.map(p => playlistTile(p, false)).join('')}</div>`);
+  if (albums.length) html += section('Albums', `<div class="tile-row">${albums.slice(0, 20).map(a => albumTile(a, false)).join('')}</div>`);
+  if (songs.length) html += section('Songs', songs.slice(0, 50).map(i => jfSongRow(i, 'search')).join(''));
+  view.innerHTML = html || '<div class="empty">No matches.</div>';
+}
+
+function renderJfLibrary() {
+  const chips = '<div class="chips">' + LIB_TABS.map(([k, label]) =>
+    `<button class="chip${state.libTab === k ? ' active' : ''}" data-lib="${k}" type="button">${label}</button>`).join('') + '</div>';
+  let body;
+  if (state.libTab === 'artists') {
+    const list = jfArtists();
+    body = list.length ? artistRows(list) : '<div class="empty">No artists.</div>';
+  } else if (state.libTab === 'albums') {
+    const list = jfAlbums();
+    body = list.length ? `<div class="album-grid">${list.map(a => albumTile(a, true)).join('')}</div>` : '<div class="empty">No albums.</div>';
+  } else if (state.libTab === 'liked') {
+    const list = likedIndices();
+    state.listCtx.liked = list;
+    body = list.length
+      ? detailHeaderless('liked', list.length) + list.map(i => jfSongRow(i, 'liked')).join('')
+      : '<div class="empty">No liked songs yet.<div class="hint">Tap the heart on the song that\'s playing.</div></div>';
+  } else if (state.libTab === 'folders') {
+    const list = jfFolders();
+    body = list.length
+      ? `<div class="album-grid">${list.map(f => albumTile(f, true, 'folder')).join('')}</div>`
+      : '<div class="empty">No album folders.</div>';
+  } else {
+    const newBtn = `
+      <div class="track" data-action="new-playlist" style="border-left-color: var(--accent-2)">
+        <span class="track-num" style="color:var(--accent-2)">+</span>
+        <div class="track-info"><div class="track-name" style="color: var(--accent-2)">New playlist</div></div>
+      </div>`;
+    body = newBtn + `<div class="album-grid">${likedTile(true)}${state.playlists.map(p => playlistTile(p, true)).join('')}</div>`;
+  }
+  view.innerHTML = chips + body;
+}
+// "Play all" above a list with no page header (Liked).
+function detailHeaderless(list, n) {
+  return `<div class="settings-row" style="padding:8px 14px"><button class="primary" data-play-list="${list}" type="button">Play ${plural(n, 'song')}</button></div>`;
+}
+
+function renderJfArtist() {
+  const a = jfArtists().find(x => x.key === state.currentArtist);
+  if (!a) { jfBack(); return; }
+  const mine = new Set(a.indices);
+  const list = a.indices.slice().sort((x, y) => {
+    const tx = state.tracks[x], ty = state.tracks[y];
+    const ux = albumOf(tx) === UNSORTED, uy = albumOf(ty) === UNSORTED;
+    if (ux !== uy) return ux ? 1 : -1;
+    return albumOf(tx).localeCompare(albumOf(ty), undefined, { sensitivity: 'base' }) || trackOrder(tx, ty);
+  });
+  state.listCtx.artist = list;
+  const albums = jfAlbums().filter(al => al.indices.some(i => mine.has(i)));
+  let html = detailHeader(a.name, plural(list.length, 'song'), 'artist', { id: a.key, label: a.name });
+  if (albums.length) html += section('Albums', `<div class="tile-row">${albums.map(al => albumTile(al, false)).join('')}</div>`);
+  html += section('Songs', list.map(i => jfSongRow(i, 'artist')).join(''));
+  view.innerHTML = html;
+}
+
+function renderJfGroup(groups, key, metaOf) {
+  const g = groups.find(x => x.key === key);
+  if (!g) { jfBack(); return; }
+  state.listCtx.group = g.indices;
+  view.innerHTML = detailHeader(g.name, metaOf(g), 'group', null) + g.indices.map(i => jfSongRow(i, 'group')).join('');
+}
+
+// Load every Jellyfin playlist's songs in the background, one at a time, so
+// the playlist pictures can show their first four covers.
+let _warmingPlaylists = false;
+async function warmPlaylists() {
+  if (_warmingPlaylists || state.source !== 'jellyfin') return;
+  _warmingPlaylists = true;
+  let loaded = 0;
+  try {
+    for (const p of state.jellyfin.playlists.slice()) {
+      if (p.loaded || p.loading || p.loadFailed) continue;
+      await ensurePlaylistLoaded(p, true);
+      if (p.loaded) loaded++;
+      if (state.source !== 'jellyfin') return;
+    }
+  } finally { _warmingPlaylists = false; }
+  if (loaded && (state.view === 'home' || (state.view === 'library' && state.libTab === 'playlists'))) render();
+}
+
+// "Start radio", built here: Jellyfin's instant mix goes by genre alone, and
+// most of the library has none (the pipeline clears YouTube's "Music"), so it
+// was a shuffle of everything. Three pools, each shuffled: the artists' other
+// songs, the rest of the seed song's folder, and the songs in other folders
+// those artists appear in. Slots take the pools in turn (artist, folder,
+// related; artist, related from an artist page), falling back to whichever
+// still has songs. A song's radio starts with that song.
+const RADIO_MAX = 100;
+// The song's folder: Jellyfin makes each music folder one album item.
+function radioFolderKey(t) {
+  return t.albumItemId || (t.folder ? 'f:' + t.folder : '');
+}
+function shuffled(list) {
+  const a = list.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+// seedIndex: the song it starts from, or null from an artist page.
+// keys: artistKey()s of the artists it's built around.
+function radioIndices(seedIndex, keys) {
+  const keySet = new Set(keys.filter(Boolean));
+  const byArtist = (t) => songArtists(t).some(n => keySet.has(artistKey(n)));
+  const seedFolder = seedIndex === null ? '' : radioFolderKey(state.tracks[seedIndex]);
+  const artistFolders = new Set();
+  for (const t of state.tracks) if (byArtist(t) && radioFolderKey(t)) artistFolders.add(radioFolderKey(t));
+  const artist = [], folder = [], related = [];
+  state.tracks.forEach((t, i) => {
+    if (i === seedIndex) return;
+    const f = radioFolderKey(t);
+    if (byArtist(t)) artist.push(i);
+    else if (seedFolder && f === seedFolder) folder.push(i);
+    else if (f && artistFolders.has(f)) related.push(i);
+  });
+  const pools = seedIndex === null
+    ? [shuffled(artist), shuffled(related)]
+    : [shuffled(artist), shuffled(folder), shuffled(related)];
+  const out = [];
+  if (seedIndex !== null) out.push(seedIndex);
+  else if (pools[0].length) out.push(pools[0].shift());
+  for (let slot = 0; out.length < RADIO_MAX && pools.some(p => p.length); slot++) {
+    for (let k = 0; k < pools.length; k++) {
+      const p = pools[(slot + k) % pools.length];
+      if (p.length) { out.push(p.shift()); break; }
+    }
+  }
+  return out;
+}
+function startRadio(seedIndex, keys, label) {
+  if (state.source !== 'jellyfin') return;
+  const indices = radioIndices(seedIndex, keys);
+  if (indices.length < 2) { showToast('No radio for this one yet'); return; }
+  showToast(`Starting radio: ${label}`);
+  nativeLog(`radio from "${String(label).slice(0, 40)}", ${indices.length} songs`);
+  setQueue(indices, indices[0]);
+  loadQueueCurrent(true);
+}
+
+// Clicks on the Jellyfin views. True when handled.
+function handleJfClick(e) {
+  const chip = e.target.closest('.chip[data-lib]');
+  if (chip) {
+    state.libTab = chip.dataset.lib;
+    render();
+    libraryEl.scrollTop = 0;
+    return true;
+  }
+  if (e.target.closest('#back')) { jfBack(); return true; }
+  const open = e.target.closest('[data-open]');
+  if (open) {
+    const kind = open.dataset.open;
+    const key = open.dataset.key;
+    if (kind === 'artist') jfOpen('artist-detail', { currentArtist: key });
+    else if (kind === 'album') jfOpen('tagalbum-detail', { currentTagAlbum: key });
+    else if (kind === 'folder') jfOpen('folder-detail', { currentFolder: key });
+    else if (kind === 'liked') jfOpen('playlist-detail', { currentPlaylist: favoritesSmartPlaylist() });
+    else if (kind === 'playlist') {
+      const p = state.playlists.find(x => String(x.id) === key);
+      if (p) {
+        if (p.loadFailed) p.loadFailed = false;
+        if (p.source === 'jellyfin' && !p.loaded) {
+          ensurePlaylistLoaded(p).then(() => {
+            if (state.view === 'playlist-detail' && state.currentPlaylist && state.currentPlaylist.id === p.id) render();
+          });
+        }
+        jfOpen('playlist-detail', { currentPlaylist: p });
+      }
+    }
+    return true;
+  }
+  const tile = e.target.closest('.tile[data-track]');
+  if (tile) {
+    playTrackFromCurrentView(Number(tile.dataset.track), tile.dataset.list);
+    return true;
+  }
+  const playBtn = e.target.closest('[data-play-list]');
+  if (playBtn) {
+    const list = state.listCtx[playBtn.dataset.playList];
+    if (list && list.length) {
+      // Shuffle on: start anywhere; off: from the top (like an album's Play).
+      setQueue(list, state.shuffle ? null : list[0]);
+      loadQueueCurrent(true);
+    }
+    return true;
+  }
+  const radio = e.target.closest('[data-radio]');
+  if (radio) {
+    startRadio(null, [radio.dataset.radio], radio.dataset.radioLabel || 'radio');
+    return true;
+  }
+  return false;
+}
+
 /* ---------- Track sheet (per-track menu) ---------- */
 function openTrackSheet(trackIndex) {
   const t = state.tracks[trackIndex];
@@ -2695,6 +3471,9 @@ function openTrackSheet(trackIndex) {
   const jellyfinActions = `
     <button class="sheet-action" data-act="add-to-playlist">Add to playlist…</button>
     <button class="sheet-action" data-act="favorite">${t.isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}</button>
+    <button class="sheet-action" data-act="radio">Start radio</button>
+    ${songArtists(t).length ? '<button class="sheet-action" data-act="goartist">Go to artist</button>' : ''}
+    ${albumOf(t) !== UNSORTED ? '<button class="sheet-action" data-act="goalbum">Go to album</button>' : ''}
   `;
   sheetBody.innerHTML = `
     <div class="sheet-title">${escapeHtml(t.title)}</div>
@@ -2783,6 +3562,7 @@ async function promptCreatePlaylist() {
   const p = await createPlaylist(name);
   if (p) {
     showToast(`Created "${p.name}"`);
+    if (state.source === 'jellyfin') jfPushNav();
     state.currentPlaylist = p;
     state.view = 'playlist-detail';
     view.scrollTop = 0;
@@ -3121,7 +3901,7 @@ async function handleSheetAction(act, trackIndex) {
   if (!t) { closeSheet(); return; }
   if (act === 'play') {
     closeSheet();
-    playTrackFromCurrentView(trackIndex);
+    playTrackFromCurrentView(trackIndex, state.menuList);
   } else if (act === 'rename') {
     closeSheet();
     const next = prompt('Rename track', t.title);
@@ -3156,6 +3936,15 @@ async function handleSheetAction(act, trackIndex) {
   } else if (act === 'favorite') {
     closeSheet();
     toggleFavorite(state.tracks[trackIndex]);
+  } else if (act === 'radio') {
+    closeSheet();
+    startRadio(trackIndex, songArtists(t).map(artistKey), t.title);
+  } else if (act === 'goartist') {
+    closeSheet();
+    goToArtist(t);
+  } else if (act === 'goalbum') {
+    closeSheet();
+    jfOpen('tagalbum-detail', { currentTagAlbum: albumKeyOf(t) });
   } else {
     closeSheet();
   }
@@ -3208,7 +3997,7 @@ async function createPlaylist(name) {
   }
 }
 
-async function ensurePlaylistLoaded(playlist) {
+async function ensurePlaylistLoaded(playlist, quiet) {
   if (playlist.source !== 'jellyfin' || playlist.loaded) return;
   if (playlist.loadFailed) return; // don't hammer a server we know is unreachable
   if (playlist.loading) return;    // re-entry guard so render+click can't double-fetch
@@ -3223,7 +4012,7 @@ async function ensurePlaylistLoaded(playlist) {
   } catch (e) {
     console.error('Load playlist items failed', e);
     playlist.loadFailed = true; // breaks the renderPlaylistDetail retry loop
-    showToast('Could not load playlist — check Jellyfin connection');
+    if (!quiet) showToast('Could not load playlist — check Jellyfin connection');
   } finally {
     playlist.loading = false;
   }
@@ -3348,7 +4137,10 @@ async function playWithFallback(reason) {
   // Make sure native knows the current queue before playback starts, so it can
   // auto-advance, and start writing the next local files to disk.
   if (IS_NATIVE) {
-    if (!_nativeQueueSynced) syncNativeQueue({ fillAhead: true });
+    // Not again if loadQueueCurrent's send of this same queue is still on its
+    // way: the duplicate went without the pick flag, so for a local file (whose
+    // load is still being written) native "kept" the old song again.
+    if (!_nativeQueueSynced && !nativeQueueSending()) syncNativeQueue({ fillAhead: true });
     else fillNativeQueueAhead(_nativeQueueSeq);
   }
   const startedSrc = audio.src;
@@ -3379,9 +4171,15 @@ async function playWithFallback(reason) {
 // current source and references a track that still exists in the library,
 // use it (and seek to the saved playback position once metadata is ready);
 // otherwise fall back to the first track in the queue.
-function bootPlaybackTrack(autoplay) {
+// On the Android app native's own saved place comes first (see adoptNativePlace).
+async function bootPlaybackTrack(autoplay) {
   breadcrumb('bootPlaybackTrack');
   if (state.tracks.length === 0) return;
+  if (IS_NATIVE && !autoplay) {
+    const saved = await nativeSavedPlace();
+    if (state.playingTrack) return; // the listener picked a song meanwhile
+    if (adoptNativePlace(saved)) return;
+  }
   const resume = loadResume();
   const indices = state.tracks.map((_, i) => i);
   let startIdx = indices[0];
@@ -3408,6 +4206,48 @@ function bootPlaybackTrack(autoplay) {
   }
 }
 
+// Native's queue and place, as it saved them itself (v1.8.3). They survive
+// Android ending the app's screen and the app being killed, and they're never
+// behind: the web layer's resume note is, after native played on with the
+// screen off while the web layer was frozen. Null when there's none.
+async function nativeSavedPlace() {
+  const p = nativePlayerPlugin();
+  if (!p || !p.getState) return null;
+  try { return await p.getState(); } catch (e) { return null; }
+}
+// Take native's queue and place as the app's own, without loading anything:
+// native already holds the track, and builds the player at the saved position
+// on the next play (from the app or the car). Tracks the library no longer has
+// are left out. False when there's no place, or its song isn't in the library.
+function adoptNativePlace(saved) {
+  if (!saved || !Array.isArray(saved.ids) || typeof saved.index !== 'number'
+      || saved.index < 0 || saved.index >= saved.ids.length) return false;
+  const byKey = new Map();
+  for (const t of state.local.tracks) byKey.set(String(t.id), t.id);
+  for (const t of state.jellyfin.tracks) byKey.set(String(t.id), t.id);
+  if (!byKey.has(String(saved.ids[saved.index]))) return false;
+  const queue = [];
+  let pos = -1;
+  saved.ids.forEach((key, i) => {
+    if (!byKey.has(String(key))) return;
+    if (i === saved.index) pos = queue.length;
+    queue.push(byKey.get(String(key)));
+  });
+  const track = trackById(queue[pos]);
+  if (!track) return false;
+  resetPlaybackErrors();
+  state.queue = queue;
+  state.queuePos = pos;
+  _nativeQueueSynced = false;
+  const playing = !!saved.playing;
+  loadTrack(track, playing, true);
+  audio.adopt(saved.position, track.durationSec || 0, playing);
+  nativeLog(`start-up: took the player's place, "${String(track.title || '').slice(0, 40)}" at ${formatTime(Number(saved.position) || 0)}`);
+  // The same queue back to native, as a re-send: it keeps the song it has.
+  syncNativeQueue({ fillAhead: playing });
+  return true;
+}
+
 // nativeAlreadyPlaying: set when the NATIVE queue auto-advanced to this track
 // on its own (screen off). The audio is already loaded and playing in native,
 // so we only refresh the UI/metadata — we must NOT reassign audio.src or call
@@ -3423,6 +4263,7 @@ function loadTrack(track, autoplay, nativeAlreadyPlaying) {
   playbackIntended = !!autoplay;
   state.playingTrack = track;
   state.playingSource = track.source || 'local';
+  if (autoplay) noteRecentlyPlayed(track);
   if (!nativeAlreadyPlaying) { _nativeSrcTrack = track; audio.src = track.url; }
   titleEl.textContent = track.title;
   subtitleEl.textContent = subtitleFor(track);
@@ -3430,6 +4271,7 @@ function loadTrack(track, autoplay, nativeAlreadyPlaying) {
   // Reset the seek/time display; loadedmetadata will refresh once the audio
   // header is parsed, but for Jellyfin transcodes the metadata duration is
   // already known up-front so prefer it.
+  state.seeking = false; // a drag on the old song means nothing for this one
   seek.value = '0';
   currentEl.textContent = '0:00';
   durationEl.textContent = track.durationSec > 0 ? formatTime(track.durationSec) : '0:00';
@@ -3539,10 +4381,13 @@ function setNowPlayingArt(url) {
   }
 }
 
-function playTrackFromCurrentView(trackIndex) {
+function playTrackFromCurrentView(trackIndex, list) {
   breadcrumb('playFromView view=' + state.view + ' pl=' + (state.currentPlaylist && state.currentPlaylist.id) + ' idx=' + trackIndex);
-  // Queue depends on the current view.
-  if (state.view === 'album-detail' && state.currentAlbum) {
+  // Queue depends on the current view. A Jellyfin page names its list.
+  const listed = list && state.listCtx[list];
+  if (listed && listed.includes(trackIndex)) {
+    setQueue(listed, trackIndex);
+  } else if (state.view === 'album-detail' && state.currentAlbum) {
     const album = state.currentAlbum;
     const indices = state.tracks
       .map((t, i) => albumOf(t) === album ? i : -1)
@@ -3976,12 +4821,34 @@ function effectiveDuration() {
   return 0;
 }
 
-seek.addEventListener('input', () => { state.seeking = true; });
+let _seekInputAt = 0;
+seek.addEventListener('input', () => { state.seeking = true; _seekInputAt = Date.now(); });
 seek.addEventListener('change', () => {
   const dur = effectiveDuration();
   if (dur > 0) audio.currentTime = (Number(seek.value) / 1000) * dur;
   state.seeking = false;
 });
+// A drag that ends with no 'change' (Android cancelled the touch) left the
+// clock frozen until the next drag. Let go of it shortly after the finger
+// does, without moving the song; a real release has had its 'change' by then.
+function releaseSeekDrag() {
+  setTimeout(() => { if (Date.now() - _seekInputAt >= 250) state.seeking = false; }, 300);
+}
+['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(ev => seek.addEventListener(ev, releaseSeekDrag));
+
+// Clock trace (v1.9.2): when a playing song's time comes in from native but
+// the display ignores it for 2 s, say why in the Playback log, once a song.
+let _clockHeldSince = 0;
+let _clockHeldLogged = false;
+function noteClockHeld(why) {
+  if (!IS_NATIVE || audio.paused) return;
+  const now = Date.now();
+  if (!_clockHeldSince) { _clockHeldSince = now; return; }
+  if (_clockHeldLogged || now - _clockHeldSince < 2000) return;
+  _clockHeldLogged = true;
+  nativeLog(`clock held: ${why}, player at ${formatTime(audio.currentTime)}`);
+}
+audio.addEventListener('loadstart', () => { _clockHeldSince = 0; _clockHeldLogged = false; });
 
 function resetTimeDisplay() {
   seek.value = '0';
@@ -3992,12 +4859,16 @@ function resetTimeDisplay() {
 }
 
 audio.addEventListener('timeupdate', () => {
-  if (state.seeking) return;
+  if (state.seeking) { noteClockHeld('seek bar held'); return; }
   // Skip stale events from a previous source. After audio.src changes, the
   // element drops to readyState 0 and re-progresses; ignore everything before
   // metadata is available again so the old track's currentTime doesn't briefly
   // get displayed against the new track's duration.
-  if (audio.readyState < 1) return;
+  if (audio.readyState < 1) {
+    noteClockHeld(IS_NATIVE && audio._awaitOpen ? 'app still waiting for native to open the song' : 'app has the song as not loaded');
+    return;
+  }
+  _clockHeldSince = 0;
   const dur = effectiveDuration();
   if (dur > 0) seek.value = String(Math.floor((audio.currentTime / dur) * 1000));
   currentEl.textContent = formatTime(audio.currentTime);
@@ -4103,6 +4974,11 @@ audio.addEventListener('error', () => {
 tabs.addEventListener('click', e => {
   const tab = e.target.closest('.tab');
   if (!tab) return;
+  if (state.source === 'jellyfin') {
+    jfTab(tab.dataset.view);
+    if (tab.dataset.view === 'search') setTimeout(() => searchInputEl.focus(), 0);
+    return;
+  }
   state.view = tab.dataset.view;
   state.currentAlbum = null;
   view.scrollTop = 0;
@@ -4114,6 +4990,8 @@ view.addEventListener('click', e => {
   const menu = e.target.closest('.track-menu[data-menu]');
   if (menu) {
     e.stopPropagation();
+    const row = menu.closest('[data-list]');
+    state.menuList = row ? row.dataset.list : null;
     const idx = Number(menu.dataset.menu);
     if (!Number.isNaN(idx)) openTrackSheet(idx);
     return;
@@ -4131,6 +5009,7 @@ view.addEventListener('click', e => {
     promptCreatePlaylist();
     return;
   }
+  if (state.source === 'jellyfin' && handleJfClick(e)) return;
   // Playlist row in playlists list
   const plRow = e.target.closest('[data-playlist-id]');
   if (plRow) {
@@ -4168,7 +5047,7 @@ view.addEventListener('click', e => {
   const trackRow = e.target.closest('.track[data-track]');
   if (trackRow) {
     const idx = Number(trackRow.dataset.track);
-    if (!Number.isNaN(idx)) playTrackFromCurrentView(idx);
+    if (!Number.isNaN(idx)) playTrackFromCurrentView(idx, trackRow.dataset.list);
     return;
   }
   const albumCard = e.target.closest('.album-card');
@@ -4360,7 +5239,8 @@ async function handlePlaylistMenuAction(act) {
     if (!confirm(`Delete playlist "${p.name}"? The songs in it are not affected.`)) return;
     await deletePlaylist(p.id);
     state.currentPlaylist = null;
-    state.view = 'playlists';
+    state.nav = [];
+    state.view = state.source === 'jellyfin' ? 'library' : 'playlists';
     render();
     showToast('Playlist deleted');
     return;
@@ -4423,6 +5303,13 @@ document.getElementById('favorite-btn').addEventListener('click', () => {
   const searchBar = document.getElementById('search-bar');
   const searchInput = document.getElementById('search-input');
   searchBtn.addEventListener('click', () => {
+    if (state.source === 'jellyfin') {
+      // The Search page; pressing again goes Home.
+      if (state.view === 'search') { jfTab('home'); return; }
+      jfTab('search');
+      setTimeout(() => searchInput.focus(), 0);
+      return;
+    }
     const opening = !searchBar.classList.contains('visible');
     searchBar.classList.toggle('visible', opening);
     searchBtn.classList.toggle('active', opening);
@@ -4436,6 +5323,11 @@ document.getElementById('favorite-btn').addEventListener('click', () => {
     }
   });
   searchInput.addEventListener('input', () => {
+    if (state.source === 'jellyfin') {
+      state.jfQuery = searchInput.value.trim();
+      if (state.view === 'search') render();
+      return;
+    }
     state.search = searchInput.value.trim().toLowerCase();
     render();
   });
@@ -4479,6 +5371,24 @@ if (!isNativeApp() && 'mediaSession' in navigator) {
 // On the Android app, lock-screen / car / Bluetooth / hardware media buttons
 // are handled natively by the NativePlayer plugin's own media session, so they
 // work with the screen off; nothing is registered from here.
+
+// A picture that fails to load (no such image on the server, offline) falls
+// back to its data-fallback picture if it has one, else to the blue tile.
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (!img || img.tagName !== 'IMG') return;
+  const fb = img.getAttribute('data-fallback');
+  if (fb) { img.removeAttribute('data-fallback'); img.src = fb; return; }
+  if (img.id === 'artwork-img') {
+    img.removeAttribute('src');
+    img.hidden = true;
+    document.getElementById('artwork').classList.remove('has-art');
+    return;
+  }
+  const box = img.parentElement;
+  img.remove();
+  if (box) box.classList.remove('has-art');
+}, true);
 
 /* ---------- Service worker + install prompt ---------- */
 if ('serviceWorker' in navigator) {
