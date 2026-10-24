@@ -955,7 +955,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.9.2';
+const APP_VERSION = '1.9.3';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1905,9 +1905,10 @@ const JF = {
     });
     if (!res.ok) throw new Error(`Playlists fetch failed (HTTP ${res.status})`);
     const json = await res.json();
-    // Only audio playlists make sense here. Jellyfin sometimes returns a
-    // mixed MediaType, sometimes not — accept both null and 'Audio'.
-    return (json.Items || []).filter(p => !p.MediaType || p.MediaType === 'Audio');
+    // Drop only video playlists. Hand-made playlists come back as 'Audio',
+    // but the library's .m3u playlists come back as 'Unknown' (or no
+    // MediaType at all), and those are music too.
+    return (json.Items || []).filter(p => p.MediaType !== 'Video');
   },
   async fetchPlaylistItems(config, playlistId) {
     const params = new URLSearchParams({
