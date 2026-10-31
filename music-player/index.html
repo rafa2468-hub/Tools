@@ -955,7 +955,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.9.3';
+const APP_VERSION = '1.9.4';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1373,7 +1373,7 @@ function continuesAlbum(cur, next) {
 }
 function stopWebFade(restore) {
   if (webFade.timer) { clearInterval(webFade.timer); webFade.timer = 0; }
-  if (restore) audio.volume = webFade.base;
+  if (restore) audio.volume = webFade.base * webLevel;
 }
 function webFadeTick() {
   const total = effectiveDuration();
@@ -1381,7 +1381,7 @@ function webFadeTick() {
   // Paused, or sought back out of the fade: full volume, and let the next
   // timeupdate start it again near the end.
   if (audio.paused || total < FADE_MIN_TRACK_SEC || left > FADE_SEC + 1) { stopWebFade(true); return; }
-  audio.volume = webFade.base * fadeGain(left);
+  audio.volume = webFade.base * webLevel * fadeGain(left);
 }
 function maybeStartWebFade() {
   if (IS_NATIVE || webFade.timer || audio.paused) return;
@@ -1403,6 +1403,49 @@ if (!IS_NATIVE) {
   // A new track (or the end of this one) starts at the listener's volume.
   audio.addEventListener('loadstart', () => stopWebFade(true));
   audio.addEventListener('ended', () => stopWebFade(true));
+}
+
+/* ---------- Volume levelling ---------- */
+// Library songs are mastered anywhere from about -34 to -5 LUFS, so the next
+// song can sound twice as loud as this one. Jellyfin measures every song and
+// album and sends NormalizationGain: the dB that would bring it to -18 LUFS.
+// We level to LEVEL_TARGET_LUFS instead and only ever turn down: neither
+// ExoPlayer nor audio.volume goes above full scale. A song played as part of
+// its album, in order, takes the album's gain, so the album's quiet tracks
+// stay quiet against the rest of it.
+const JF_GAIN_REF_LUFS = -18;
+const LEVEL_TARGET_LUFS = -16;
+const LEVEL_FLOOR_DB = -20; // a wild measurement can't silence a song
+let levelingOn = true;
+// dB to apply to track t, given the songs before and after it in the queue.
+function levelDb(t, prev, next) {
+  if (!levelingOn || !t || (t.source || 'local') !== 'jellyfin') return 0;
+  const inAlbum = typeof t.albumGainDb === 'number' && (continuesAlbum(prev, t) || continuesAlbum(t, next));
+  const g = inAlbum ? t.albumGainDb : t.gainDb;
+  if (typeof g !== 'number' || !isFinite(g)) return 0;
+  return Math.max(LEVEL_FLOOR_DB, Math.min(0, g + LEVEL_TARGET_LUFS - JF_GAIN_REF_LUFS));
+}
+// Browser only: the playing song's level as a volume factor. The listener's
+// volume and the end fade multiply with it.
+let webLevel = 1;
+function refreshWebLevel() {
+  if (IS_NATIVE) return;
+  const t = state.playingTrack;
+  const q = state.queue, pos = state.queuePos;
+  const inQueue = !!t && pos >= 0 && q[pos] === t.id;
+  const db = inQueue
+    ? levelDb(t, pos > 0 ? trackById(q[pos - 1]) : null, pos + 1 < q.length ? trackById(q[pos + 1]) : null)
+    : levelDb(t, null, null);
+  webLevel = Math.pow(10, db / 20);
+  if (!webFade.timer) audio.volume = webFade.base * webLevel;
+}
+// The Settings switch: re-level the playing song straight away.
+function setLeveling(on) {
+  levelingOn = !!on;
+  savePrefs();
+  refreshWebLevel();
+  // Native takes the levels with the queue; a re-send keeps the playing song.
+  if (IS_NATIVE && state.queue.length) syncNativeQueue();
 }
 const fileInput = document.getElementById('file-input');
 const folderInput = document.getElementById('folder-input');
@@ -1550,6 +1593,7 @@ function loadPrefs() {
       audio.volume = p.volume;
       webFade.base = audio.volume;
     }
+    if (typeof p.leveling === 'boolean') levelingOn = p.leveling;
     if (typeof p.shuffle === 'boolean') {
       state.shuffle = p.shuffle;
       shuffleBtn.classList.toggle('active', p.shuffle);
@@ -1568,6 +1612,7 @@ function savePrefs() {
       // The listener's volume, not the element's: that one dips during the
       // end-of-track fade.
       volume: webFade.base,
+      leveling: levelingOn,
       shuffle: state.shuffle,
       repeat: state.repeat,
     }));
@@ -2054,6 +2099,10 @@ function jfItemToTrack(item, config) {
     indexNumber: item.IndexNumber || 0,
     parentIndexNumber: item.ParentIndexNumber || 0,
     durationSec: item.RunTimeTicks ? Math.round(item.RunTimeTicks / 1e7) : 0,
+    // Jellyfin's loudness correction to -18 LUFS for the song and for its
+    // album, in dB (null when it hasn't measured them). See levelDb.
+    gainDb: typeof item.NormalizationGain === 'number' ? item.NormalizationGain : null,
+    albumGainDb: typeof item.AlbumNormalizationGain === 'number' ? item.AlbumNormalizationGain : null,
     tagsRead: true,
     isFavorite: !!(item.UserData && item.UserData.IsFavorite),
   };
@@ -2436,8 +2485,10 @@ async function syncNativeQueue(opts) {
   _sentQueue = state.queue;
   _sentPos = state.queuePos;
   const ids = [], sources = [], itemIds = [], containers = [], titles = [], artists = [], albums = [], durations = [], trackNos = [];
+  const queued = [];
   for (const id of state.queue) {
     const t = trackById(id);
+    queued.push(t);
     const jf = !!t && (t.source || 'local') === 'jellyfin';
     ids.push(String(id));
     sources.push(jf ? '' : nativeSourceSync(t));
@@ -2451,10 +2502,12 @@ async function syncNativeQueue(opts) {
     // fade when the next song simply continues the same album.
     trackNos.push(String(jf && t.indexNumber > 0 ? (t.parentIndexNumber || 1) * 1000 + t.indexNumber : 0));
   }
+  // Each song's level in dB (0 or below), from its neighbours in this queue.
+  const gainsDb = queued.map((t, i) => String(Math.round(levelDb(t, queued[i - 1] || null, queued[i + 1] || null) * 10) / 10));
   const urls = jellyfinUrlTemplates();
   try {
     await p.setQueue({
-      ids, sources, itemIds, containers, titles, artists, albums, durations, trackNos,
+      ids, sources, itemIds, containers, titles, artists, albums, durations, trackNos, gainsDb,
       index: state.queuePos, pick: !!(opts && opts.pick), repeat: state.repeat || 'off',
       directTemplate: urls.direct, transcodeTemplate: urls.transcode,
     });
@@ -3632,6 +3685,11 @@ function openSettingsSheet() {
   sheetBody.innerHTML = `
     <div class="sheet-section-title">Sleep timer</div>
     <div class="sleep-grid">${sleepHtml}</div>
+    <div class="sheet-section-title">Volume levelling</div>
+    <div class="sleep-grid">
+      <button class="sleep-btn${levelingOn ? '' : ' active'}" data-level="0" type="button">Off</button>
+      <button class="sleep-btn${levelingOn ? ' active' : ''}" data-level="1" type="button">On</button>
+    </div>
     <div class="sheet-divider"></div>
     <div class="sheet-title">Jellyfin</div>
     ${status}
@@ -4264,6 +4322,7 @@ function loadTrack(track, autoplay, nativeAlreadyPlaying) {
   playbackIntended = !!autoplay;
   state.playingTrack = track;
   state.playingSource = track.source || 'local';
+  refreshWebLevel();
   if (autoplay) noteRecentlyPlayed(track);
   if (!nativeAlreadyPlaying) { _nativeSrcTrack = track; audio.src = track.url; }
   titleEl.textContent = track.title;
@@ -5256,6 +5315,14 @@ sheetBackdrop.addEventListener('click', e => {
     setSleepTimer(minutes);
     showToast(minutes > 0 ? `Sleep in ${minutes} min` : 'Sleep timer off');
     // Re-render the settings sheet so the active pill updates
+    openSettingsSheet();
+    return;
+  }
+  const levelBtn = e.target.closest('[data-level]');
+  if (levelBtn) {
+    const on = levelBtn.dataset.level === '1';
+    setLeveling(on);
+    showToast(on ? 'Volume levelling on' : 'Volume levelling off');
     openSettingsSheet();
     return;
   }

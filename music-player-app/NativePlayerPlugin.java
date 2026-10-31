@@ -144,6 +144,7 @@ public class NativePlayerPlugin extends Plugin {
         final List<String> albums = new ArrayList<>();
         final List<Integer> durationsSec = new ArrayList<>();
         final List<Integer> trackNos = new ArrayList<>();
+        final List<Float> gainsDb = new ArrayList<>();
         String directTemplate = "", transcodeTemplate = "", repeat = "off";
 
         String toJson() throws Exception {
@@ -161,6 +162,9 @@ public class NativePlayerPlugin extends Plugin {
             for (Integer v : trackNos) t.put(v == null ? 0 : v);
             o.put("durations", d);
             o.put("trackNos", t);
+            JSONArray g = new JSONArray();
+            for (Float v : gainsDb) g.put(v == null ? 0.0 : (double) v);
+            o.put("gainsDb", g);
             o.put("direct", directTemplate);
             o.put("transcode", transcodeTemplate);
             o.put("repeat", repeat);
@@ -187,6 +191,12 @@ public class NativePlayerPlugin extends Plugin {
                 if (q.sources.size() != n || q.itemIds.size() != n || q.containers.size() != n
                     || q.titles.size() != n || q.artists.size() != n || q.albums.size() != n
                     || q.durationsSec.size() != n || q.trackNos.size() != n) return null;
+                // A queue saved before v1.9.4 has no levels: it plays unlevelled.
+                readFloats(o.optJSONArray("gainsDb"), q.gainsDb);
+                if (q.gainsDb.size() != n) {
+                    q.gainsDb.clear();
+                    for (int i = 0; i < n; i++) q.gainsDb.add(0f);
+                }
                 q.directTemplate = o.optString("direct", "");
                 q.transcodeTemplate = o.optString("transcode", "");
                 q.repeat = o.optString("repeat", "off");
@@ -210,6 +220,11 @@ public class NativePlayerPlugin extends Plugin {
         private static void readInts(JSONArray a, List<Integer> out) throws Exception {
             if (a == null) return;
             for (int i = 0; i < a.length(); i++) out.add(a.optInt(i, 0));
+        }
+
+        private static void readFloats(JSONArray a, List<Float> out) throws Exception {
+            if (a == null) return;
+            for (int i = 0; i < a.length(); i++) out.add((float) a.optDouble(i, 0.0));
         }
     }
 
@@ -321,6 +336,11 @@ public class NativePlayerPlugin extends Plugin {
     // Disc * 1000 + track number from the server (0 when unknown), so the fade
     // can tell when the next song simply continues the same album.
     private final List<Integer> trackNos = new ArrayList<>();
+    // Volume levelling (v1.9.4): each song's level in dB from the app (0 or
+    // below, 0 when unknown or levelling is off), and the playing song's level
+    // as a volume factor. The listener's volume and the end fade multiply with it.
+    private final List<Float> gainsDb = new ArrayList<>();
+    private float trackLevel = 1f;
     // Jellyfin URL templates with an "{id}" placeholder for the item id.
     private String directTemplate = "", transcodeTemplate = "";
     private int queueIndex = -1;
@@ -932,6 +952,7 @@ public class NativePlayerPlugin extends Plugin {
         q.albums.addAll(albums);
         q.durationsSec.addAll(durationsSec);
         q.trackNos.addAll(trackNos);
+        q.gainsDb.addAll(gainsDb);
         q.directTemplate = directTemplate;
         q.transcodeTemplate = transcodeTemplate;
         q.repeat = repeatMode;
@@ -988,6 +1009,8 @@ public class NativePlayerPlugin extends Plugin {
         durationsSec.addAll(q.durationsSec);
         trackNos.clear();
         trackNos.addAll(q.trackNos);
+        gainsDb.clear();
+        gainsDb.addAll(q.gainsDb);
         directTemplate = q.directTemplate;
         transcodeTemplate = q.transcodeTemplate;
         repeatMode = q.repeat;
@@ -1151,6 +1174,29 @@ public class NativePlayerPlugin extends Plugin {
         return (i >= 0 && i < trackNos.size()) ? trackNos.get(i) : 0;
     }
 
+    // Volume factor for a level in dB. Never louder than the file (ExoPlayer
+    // can't go above 1); NaN or a positive level plays as is.
+    static float levelFactor(float db) {
+        if (!(db < 0f)) return 1f;
+        return (float) Math.pow(10.0, Math.max(db, -40f) / 20.0);
+    }
+
+    private float levelDbAt(int i) {
+        Float v = (i >= 0 && i < gainsDb.size()) ? gainsDb.get(i) : null;
+        return v == null ? 0f : v;
+    }
+
+    // The playing song's level, when it is the queue entry native is on.
+    private float currentLevel() {
+        boolean onEntry = queueIndex >= 0 && queueIndex < ids.size() && currentId.equals(ids.get(queueIndex));
+        return onEntry ? levelFactor(levelDbAt(queueIndex)) : 1f;
+    }
+
+    private String levelNote() {
+        if (trackLevel >= 1f) return "";
+        return " · level " + (Math.round(levelDbAt(queueIndex) * 10f) / 10f) + " dB";
+    }
+
     private boolean nextContinuesAlbum() {
         int i = queueIndex;
         if (i < 0 || i + 1 >= ids.size() || !currentId.equals(ids.get(i))) return false;
@@ -1187,12 +1233,12 @@ public class NativePlayerPlugin extends Plugin {
                     if (left > FADE_MS + 1000) {
                         // Sought back out of the fade: full volume, and let the
                         // ticker start it again near the end.
-                        player.setVolume(volume);
+                        player.setVolume(volume * trackLevel);
                         fader = null;
                         return;
                     }
                     lastFadeGain = fadeGain(left, FADE_MS);
-                    player.setVolume(volume * lastFadeGain);
+                    player.setVolume(volume * trackLevel * lastFadeGain);
                 } catch (Exception e) { fader = null; return; }
                 handler.postDelayed(this, FADE_STEP_MS);
             }
@@ -1685,6 +1731,7 @@ public class NativePlayerPlugin extends Plugin {
         needsReload = false;
         fadeLogged = false;
         lastFadeGain = 1f;
+        trackLevel = currentLevel();
         trailCount = 0; trailNext = 0;
         currentSource = (path == null) ? "" : path;
         pendingSeekMs = Math.max(0, seekMs);
@@ -1697,13 +1744,13 @@ public class NativePlayerPlugin extends Plugin {
         // during an async load isn't lost.
         playWhenReady = autoplay;
         emit("loadstart");
-        plog("  open " + srcKind(currentSource) + (pendingSeekMs > 0 ? " at " + fmt(pendingSeekMs) : ""));
+        plog("  open " + srcKind(currentSource) + (pendingSeekMs > 0 ? " at " + fmt(pendingSeekMs) : "") + levelNote());
         if (currentSource.length() == 0) { onSourceFailed(lastPositionMs); return; }
         try {
             final ExoPlayer p = buildPlayer();
             player = p;
             decoderName = "";
-            p.setVolume(volume);
+            p.setVolume(volume * trackLevel);
             p.addListener(new Player.Listener() {
                 @Override
                 public void onPlaybackStateChanged(int state) {
@@ -1892,7 +1939,7 @@ public class NativePlayerPlugin extends Plugin {
         // Refused outside a call: some devices refuse spuriously, so play
         // anyway rather than silently doing nothing.
         try {
-            player.setVolume(volume);
+            player.setVolume(volume * trackLevel);
             // Play after the end of the queue starts the last song again, as
             // MediaPlayer did (a finished ExoPlayer otherwise stays finished).
             if (player.getPlaybackState() == Player.STATE_ENDED) player.seekTo(0);
@@ -1988,7 +2035,7 @@ public class NativePlayerPlugin extends Plugin {
                 segStartWall = SystemClock.elapsedRealtime();
                 segStartPos = target;
                 trailCount = 0; trailNext = 0;
-                player.setVolume(volume);
+                player.setVolume(volume * trackLevel);
             } else {
                 // Still loading: ExoPlayer takes the seek now and starts
                 // there once it's ready.
@@ -2442,6 +2489,7 @@ public class NativePlayerPlugin extends Plugin {
         final List<String> nAlbums = toList(call.getArray("albums"));
         final List<String> nDurations = toList(call.getArray("durations"));
         final List<String> nTrackNos = toList(call.getArray("trackNos"));
+        final List<String> nGainsDb = toList(call.getArray("gainsDb"));
         final int index = call.getInt("index", -1);
         // Set when the app sends the queue because the listener picked a song
         // (or pressed Next / Previous in the app): the load for that index
@@ -2485,6 +2533,13 @@ public class NativePlayerPlugin extends Plugin {
                 trackNos.add(v);
             }
             while (trackNos.size() < n) trackNos.add(0);
+            gainsDb.clear();
+            for (String s : nGainsDb) {
+                float v;
+                try { v = Float.parseFloat(s.trim()); } catch (Exception e) { v = 0f; }
+                gainsDb.add(v);
+            }
+            while (gainsDb.size() < n) gainsDb.add(0f);
             directTemplate = direct == null ? "" : direct;
             transcodeTemplate = transcode == null ? "" : transcode;
             repeatMode = repeat;
@@ -2494,6 +2549,14 @@ public class NativePlayerPlugin extends Plugin {
             queueIndex = newIndex;
             plog("queue from app" + (pick ? " (new pick)" : "") + ": " + n + " tracks, at " + trackLabel(newIndex)
                 + (newIndex != index ? " (app said #" + index + ", kept the playing track)" : ""));
+            // A level can change with the queue (album order, the Settings
+            // switch): the playing song takes its new one now.
+            float level = currentLevel();
+            if (player != null && level != trackLevel) {
+                trackLevel = level;
+                try { player.setVolume(volume * trackLevel * (fader != null ? lastFadeGain : 1f)); } catch (Exception e) { /* ignore */ }
+                plog("  level now " + (trackLevel >= 1f ? "off" : (Math.round(levelDbAt(queueIndex) * 10f) / 10f) + " dB"));
+            }
             if (newIndex != index && newIndex >= 0) {
                 JSObject d = new JSObject();
                 d.put("index", newIndex);
@@ -2760,7 +2823,7 @@ public class NativePlayerPlugin extends Plugin {
         final double v = call.getDouble("value", 1.0);
         volume = (float) Math.max(0.0, Math.min(1.0, v));
         getActivity().runOnUiThread(() -> {
-            try { if (player != null) player.setVolume(volume); } catch (Exception e) { /* ignore */ }
+            try { if (player != null) player.setVolume(volume * trackLevel); } catch (Exception e) { /* ignore */ }
         });
         call.resolve();
     }
