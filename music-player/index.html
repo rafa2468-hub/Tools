@@ -1168,7 +1168,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '2.0.1';
+const APP_VERSION = '2.0.2';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -2338,6 +2338,14 @@ async function syncJellyfin(opts) {
 
   state.jellyfin.syncing = true;
   if (!silent) updateRefreshSpin(true);
+  // v2.0.2: log how long each refresh takes and whether the song or queue
+  // changed while it ran, so the phone log shows a pick made mid-fetch.
+  const t0 = Date.now();
+  const secs = () => ((Date.now() - t0) / 1000).toFixed(1);
+  const startPlayingId = state.playingTrack ? state.playingTrack.id : null;
+  const startQueue = state.queue.join('\n');
+  let changedMeanwhile = false;
+  nativeLog('library refresh started (' + (silent ? 'app opened' : feedback ? 'Refresh tapped' : 'start-up') + ')');
 
   try {
     const items = await JF.fetchAllAudio(cfg);
@@ -2386,6 +2394,7 @@ async function syncJellyfin(opts) {
       const queueIds = state.queue.slice();
       const playlistDetailId = (state.currentPlaylist && !state.currentPlaylist.smart) ? state.currentPlaylist.id : null;
       const wasOnFavorites = !!(state.currentPlaylist && state.currentPlaylist.smart);
+      changedMeanwhile = playingId !== startPlayingId || queueIds.join('\n') !== startQueue;
       state.tracks = state.jellyfin.tracks;
       state.playlists = state.jellyfin.playlists;
       // Re-resolve playback state by id (handles new/removed tracks and
@@ -2418,13 +2427,15 @@ async function syncJellyfin(opts) {
       updateFavoriteUI();
       render();
     }
+    nativeLog(`library refresh done in ${secs()} s: ${tracks.length.toLocaleString('en-US')} songs` +
+      (changedMeanwhile ? ', song or queue changed meanwhile (kept)' : ''));
     if (feedback) showToast(`Loaded ${tracks.length} Jellyfin track${tracks.length === 1 ? '' : 's'}`);
     if (state.source === 'jellyfin') warmPlaylists();
     return true;
   } catch (err) {
     console.error('Jellyfin sync failed', err);
     // At start-up this leaves the app with no library to load a song from.
-    nativeLog('Jellyfin library not loaded: ' + String((err && err.message) || err || 'sync failed').slice(0, 120));
+    nativeLog('Jellyfin library not loaded (after ' + secs() + ' s): ' + String((err && err.message) || err || 'sync failed').slice(0, 120));
     if (!silent) showToast(`Jellyfin: ${err.message || 'sync failed'}`);
     return false;
   } finally {
