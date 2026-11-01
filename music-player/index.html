@@ -1168,7 +1168,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.0.1';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -2339,16 +2339,6 @@ async function syncJellyfin(opts) {
   state.jellyfin.syncing = true;
   if (!silent) updateRefreshSpin(true);
 
-  // Capture playback state before we swap the tracks array out from under it.
-  // We re-resolve by track id afterward so a refresh doesn't kill the queue.
-  const playingId = state.playingTrack ? state.playingTrack.id : null;
-  // state.queue already holds track ids — copy them. (This previously mapped
-  // them as indices into state.tracks, producing an empty list that wiped the
-  // queue on every foreground resync — e.g. each time the phone was unlocked.)
-  const queueIds = state.queue.slice();
-  const playlistDetailId = (state.currentPlaylist && !state.currentPlaylist.smart) ? state.currentPlaylist.id : null;
-  const wasOnFavorites = !!(state.currentPlaylist && state.currentPlaylist.smart);
-
   try {
     const items = await JF.fetchAllAudio(cfg);
     const tracks = items.map(it => jfItemToTrack(it, cfg));
@@ -2383,6 +2373,19 @@ async function syncJellyfin(opts) {
     }
     finishJellyfinLibrary(tracks, state.jellyfin.playlists);
     if (state.source === 'jellyfin') {
+      // Read playback state now, after the fetches and just before the swap,
+      // and re-resolve it by track id so a refresh doesn't kill the queue.
+      // (v2.0.1: this used to be read before the fetch, which takes seconds on
+      // the phone. The track changes native reports at an app open, and any
+      // pick made meanwhile, were then overwritten by that stale copy: the
+      // screen showed an old song and the app went back to an old queue.)
+      const playingId = state.playingTrack ? state.playingTrack.id : null;
+      // state.queue already holds track ids — copy them. (This previously mapped
+      // them as indices into state.tracks, producing an empty list that wiped the
+      // queue on every foreground resync — e.g. each time the phone was unlocked.)
+      const queueIds = state.queue.slice();
+      const playlistDetailId = (state.currentPlaylist && !state.currentPlaylist.smart) ? state.currentPlaylist.id : null;
+      const wasOnFavorites = !!(state.currentPlaylist && state.currentPlaylist.smart);
       state.tracks = state.jellyfin.tracks;
       state.playlists = state.jellyfin.playlists;
       // Re-resolve playback state by id (handles new/removed tracks and
