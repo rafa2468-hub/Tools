@@ -1168,7 +1168,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.9.6';
+const APP_VERSION = '2.0.0';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -5902,9 +5902,8 @@ function tintFrom(src) {
 }
 
 /* Open and close the full player. Opening adds a history entry, so the
-   browser's Back closes it on the PWA. (The Android app has no Back handling
-   of its own, so there Back still leaves the app; the arrow and a swipe down
-   close the player.) */
+   browser's Back closes it on the PWA. In the Android app, Back goes through
+   appBack() below; the arrow and a swipe down close it too. */
 function openPlayer() {
   if (playerEl.classList.contains('open')) return;
   playerEl.classList.add('open');
@@ -5921,6 +5920,32 @@ function closePlayer(fromHistory) {
   }
 }
 window.addEventListener('popstate', () => { if (playerEl.classList.contains('open')) closePlayer(true); });
+
+/* Android's Back button (v2.0.0). MainActivity asks this first: an open menu
+   closes, then the full player, then an album / artist / playlist page goes
+   back as its own arrow does. Returns false on the main library screen, and
+   the app then leaves the normal way (the music keeps playing). */
+function appBack() {
+  if (sheetBackdrop.classList.contains('visible')) {
+    closeSheet();
+    nativeLog('Back pressed, closed the menu');
+    return true;
+  }
+  if (playerEl.classList.contains('open')) {
+    closePlayer();
+    nativeLog('Back pressed, closed the player');
+    return true;
+  }
+  const back = view.querySelector('#back');
+  if (back) {
+    back.click();
+    nativeLog('Back pressed, went back a page');
+    return true;
+  }
+  nativeLog('Back pressed, leaving the app');
+  return false;
+}
+window.appBack = appBack;
 
 miniArtBtn.addEventListener('click', e => { e.stopPropagation(); playPause(); });
 document.getElementById('mini-open').addEventListener('click', openPlayer);
