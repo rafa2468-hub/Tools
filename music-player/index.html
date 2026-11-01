@@ -15,13 +15,16 @@
 <script src="vendor/jsmediatags.min.js"></script>
 <style>
   :root {
-    --bg: #0b0b10;
-    --bg-2: #15151d;
-    --surface: #1d1d27;
-    --text: #f2f2f5;
-    --muted: #9b9bb0;
-    --accent: #7c5cff;
-    --accent-2: #4ad6ff;
+    /* v1.9.6: Finamp-style colours (near-black, Jellyfin teal-blue). */
+    --bg: #101418;
+    --bg-2: #171c21;
+    --surface: #1d242b;
+    --text: #f1f3f5;
+    --muted: #9aa4ad;
+    --accent: #00a4dc;
+    --accent-2: #2bb5e8;
+    --pill: #0e4d6b;
+    --tile: linear-gradient(135deg, #25303a, #161c22);
     --danger: #ff5d6c;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -29,7 +32,7 @@
   body {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background: radial-gradient(140% 90% at 50% 0%, #21214a 0%, var(--bg) 55%, #06060a 100%);
+    background: var(--bg);
     color: var(--text);
     min-height: 100dvh;
     display: flex;
@@ -71,7 +74,7 @@
     border-radius: 999px;
     font-size: 13px;
     cursor: pointer;
-    box-shadow: 0 6px 18px rgba(124, 92, 255, 0.35);
+    box-shadow: 0 6px 18px rgba(0, 164, 220, 0.3);
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -98,36 +101,175 @@
 
   main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
+  /* ---------- v1.9.6: Finamp-style player ----------
+     The library gets the whole screen. The song playing sits in a floating
+     bar at the bottom (.mini-player); tapping it slides up the full-screen
+     player (.player), which holds the original now-playing elements and
+     controls under their old ids. Both take their colours from the cover
+     (--tint-* set by applyTint, with dark teal-grey defaults). */
+  .player {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    flex-direction: column;
+    background: linear-gradient(180deg, var(--tint-deep, #24303a) 0%, var(--bg) 88%);
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: max(18px, env(safe-area-inset-bottom));
+    transform: translateY(100%);
+    visibility: hidden;
+    transition: transform 0.28s ease, visibility 0s linear 0.28s;
+  }
+  .player.open { transform: none; visibility: visible; transition: transform 0.28s ease, visibility 0s; }
+  .player-top {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 10px 4px;
+  }
+  .player-top .back-btn { width: 44px; height: 44px; flex: none; }
+  .player-top .back-btn svg { width: 30px; height: 30px; }
+  .player-top .spacer { width: 44px; flex: none; }
+  .player-from { flex: 1; min-width: 0; text-align: center; }
+  .player-from small { display: block; font-size: 12px; color: var(--muted); }
+  .player-from strong {
+    display: block;
+    font-size: 15px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .now-playing {
-    padding: 8px 18px 12px;
+    flex: 1;
+    min-height: 0;
+    padding: 6px 16px 0;
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
     text-align: center;
-    gap: 14px;
-    position: relative;
+    gap: 16px;
   }
+  .player-row {
+    display: grid;
+    grid-template-columns: 44px 1fr 44px;
+    align-items: center;
+    width: 100%;
+    margin-top: 8px;
+  }
+  .pchips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; min-width: 0; }
+  .pchip {
+    appearance: none;
+    border: 0;
+    background: rgba(255,255,255,0.1);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.3;
+    font-family: inherit;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .pchip:active { background: rgba(255,255,255,0.18); }
+  .pchip[hidden] { display: none; }
+  .player-sleep { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .player-sleep[hidden] { display: none; }
+  .player .track-sub { display: none; }
+  .player.no-track .track-sub { display: block; }
+  .player.no-track .pchips { visibility: hidden; }
   .fav-btn {
     appearance: none;
     border: 0;
     background: transparent;
-    color: var(--muted);
-    padding: 6px;
+    color: var(--text);
+    width: 44px;
+    height: 44px;
+    padding: 0;
     cursor: pointer;
-    position: absolute;
-    right: 14px;
-    bottom: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
-  .fav-btn svg { width: 22px; height: 22px; fill: currentColor; opacity: 0.7; }
+  .fav-btn[hidden] { visibility: hidden; display: inline-flex; }
+  .fav-btn svg { width: 26px; height: 26px; fill: currentColor; }
+  .fav-btn .h-on, .fav-btn.active .h-off { display: none; }
+  .fav-btn.active .h-on { display: block; }
   .fav-btn.active { color: var(--danger); }
-  .fav-btn.active svg { opacity: 1; }
   .fav-btn:active { transform: scale(0.92); }
+  .mini-player {
+    position: fixed;
+    left: max(10px, calc(50% - 230px));
+    right: max(10px, calc(50% - 230px));
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    height: 64px;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--tint-bar, #2a3640);
+    color: var(--tint-ink, #fff);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  }
+  .mini-player[hidden] { display: none; }
+  .mini-fill {
+    position: absolute;
+    inset: 0;
+    background: var(--tint-fill, #3a4a57);
+    transform-origin: left center;
+    transform: scaleX(0);
+    pointer-events: none;
+  }
+  .mini-art {
+    appearance: none;
+    border: 0;
+    padding: 0;
+    position: relative;
+    width: 64px;
+    height: 64px;
+    flex: none;
+    background: var(--tile);
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .mini-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .mini-art .mini-icon {
+    position: relative;
+    width: 34px;
+    height: 34px;
+    fill: #fff;
+    filter: drop-shadow(0 1px 3px rgba(0,0,0,0.7));
+  }
+  .mini-meta { position: relative; flex: 1; min-width: 0; padding: 0 12px; cursor: pointer; }
+  .mini-title, .mini-sub {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mini-title { font-size: 15px; font-weight: 700; }
+  .mini-sub { display: flex; gap: 8px; font-size: 13px; font-weight: 600; margin-top: 3px; opacity: 0.85; }
+  .mini-sub span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .mini-sub span:last-child { flex: none; font-variant-numeric: tabular-nums; }
+  .mini-player .fav-btn { position: relative; color: inherit; width: 44px; height: 64px; margin-left: -8px; }
+  .mini-player .fav-btn[hidden] { display: none; }
+  .mini-player .fav-btn.active { color: var(--danger); }
   .artwork {
-    width: min(58vw, 260px);
+    width: min(100%, 440px, 46vh);
+    flex: none;
     aspect-ratio: 1 / 1;
-    border-radius: 22px;
+    border-radius: 10px;
     background:
-      radial-gradient(120% 120% at 30% 20%, rgba(124,92,255,0.7), rgba(74,214,255,0.3) 60%, rgba(0,0,0,0.4) 100%),
+      var(--tile),
       var(--surface);
     box-shadow: 0 20px 60px rgba(0,0,0,0.5);
     display: flex;
@@ -146,31 +288,10 @@
     object-fit: cover;
   }
   .artwork.has-art svg { display: none; }
-  .artwork { cursor: pointer; }
-  /* Compact now-playing (the default): a small cover beside the title, so the
-     library list below gets most of the screen. Tapping the cover switches
-     between this and the big cover; the choice is saved in prefs (bigArt). */
-  .now-playing.compact {
-    flex-direction: row;
-    align-items: center;
-    text-align: left;
-    gap: 12px;
-    padding: 6px 52px 6px 18px;
-  }
-  .now-playing.compact .artwork {
-    width: 64px;
-    flex: none;
-    border-radius: 10px;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.45);
-  }
-  .now-playing.compact .track-meta { padding: 0; min-width: 0; }
-  .now-playing.compact .fav-btn { top: 50%; bottom: auto; transform: translateY(-50%); }
-  .now-playing.compact .fav-btn:active { transform: translateY(-50%) scale(0.92); }
-  .now-playing.compact ~ .controls { padding-top: 6px; }
   .track-meta { width: 100%; padding: 0 8px; }
   .track-title {
-    font-size: 17px;
-    font-weight: 600;
+    font-size: 21px;
+    font-weight: 700;
     margin: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -185,7 +306,7 @@
     white-space: nowrap;
   }
 
-  .progress-wrap { padding: 0 18px; width: 100%; }
+  .progress-wrap { padding: 0 26px; width: 100%; }
   .progress {
     width: 100%;
     -webkit-appearance: none;
@@ -223,7 +344,7 @@
   .times {
     display: flex;
     justify-content: space-between;
-    font-size: 11px;
+    font-size: 13px;
     color: var(--muted);
     margin-top: 2px;
     font-variant-numeric: tabular-nums;
@@ -232,9 +353,9 @@
   .controls {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 18px;
-    padding: 14px 18px 4px;
+    justify-content: space-between;
+    gap: 4px;
+    padding: 10px 22px 4px;
   }
   .ctrl {
     appearance: none;
@@ -255,11 +376,12 @@
   .ctrl.play {
     width: 72px;
     height: 72px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    border-radius: 20px;
+    background: rgba(255,255,255,0.14);
     color: #fff;
-    box-shadow: 0 12px 30px rgba(124, 92, 255, 0.4);
   }
-  .ctrl.play svg { width: 32px; height: 32px; }
+  .ctrl.play:active { background: rgba(255,255,255,0.22); }
+  .ctrl.play svg { width: 34px; height: 34px; }
 
   .volume-row {
     padding: 6px 18px 12px;
@@ -276,35 +398,32 @@
     min-height: 160px;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    background: rgba(255,255,255,0.02);
-    border-top: 1px solid rgba(255,255,255,0.06);
-    padding-bottom: 8px;
+    padding-bottom: calc(92px + env(safe-area-inset-bottom));
   }
   .tabs {
     position: sticky;
     top: 0;
     z-index: 5;
-    background: rgba(11, 11, 16, 0.95);
+    background: rgba(16, 20, 24, 0.96);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     display: flex;
     align-items: center;
-    padding: 8px 12px;
+    padding: 8px 10px;
     gap: 4px;
-    border-bottom: 1px solid rgba(255,255,255,0.06);
   }
   .tab {
     appearance: none;
     border: 0;
     background: transparent;
-    color: var(--muted);
+    color: var(--text);
     padding: 8px 14px;
-    border-radius: 999px;
-    font-size: 13px;
+    border-radius: 12px;
+    font-size: 15px;
     font-weight: 600;
     cursor: pointer;
   }
-  .tab.active { background: rgba(124,92,255,0.18); color: var(--text); }
+  .tab.active { background: var(--pill); color: #fff; }
   .tabs .spacer { flex: 1; }
   .tabs .clear-btn {
     background: transparent;
@@ -321,7 +440,7 @@
     position: sticky;
     top: 0;
     z-index: 5;
-    background: rgba(11, 11, 16, 0.95);
+    background: rgba(16, 20, 24, 0.96);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     display: flex;
@@ -378,14 +497,13 @@
 
   .album-grid {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-    padding: 14px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px 10px;
+    padding: 12px;
   }
   .album-card {
-    background: var(--surface);
-    border-radius: 14px;
-    overflow: hidden;
+    background: transparent;
+    min-width: 0;
     cursor: pointer;
     display: flex;
     flex-direction: column;
@@ -393,8 +511,9 @@
   .album-card:active { transform: scale(0.98); }
   .album-art {
     aspect-ratio: 1 / 1;
+    border-radius: 8px;
     background:
-      radial-gradient(120% 120% at 30% 20%, rgba(124,92,255,0.7), rgba(74,214,255,0.3) 60%, rgba(0,0,0,0.4) 100%),
+      var(--tile),
       var(--bg-2);
     display: flex;
     align-items: center;
@@ -415,7 +534,7 @@
   .album-name {
     font-size: 13px;
     font-weight: 600;
-    padding: 8px 10px 2px;
+    padding: 6px 2px 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -423,19 +542,49 @@
   .album-count {
     font-size: 11px;
     color: var(--muted);
-    padding: 0 10px 10px;
+    padding: 1px 2px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .track {
-    padding: 12px 18px;
+    padding: 8px 8px;
+    margin: 2px 6px;
     display: flex;
     align-items: center;
     gap: 12px;
     cursor: pointer;
-    border-left: 3px solid transparent;
+    border-radius: 10px;
+    border-left: 0;
   }
   .track:active { background: rgba(255,255,255,0.06); }
-  .track.playing { border-left-color: var(--accent-2); background: rgba(124,92,255,0.08); }
+  .track.playing { background: var(--tint-row, rgba(0,164,220,0.2)); }
+  .track-dur {
+    flex: none;
+    font-size: 13px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .row-fav {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    width: 34px;
+    height: 34px;
+    flex: none;
+    padding: 0;
+    border-radius: 50%;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .row-fav svg { width: 22px; height: 22px; fill: currentColor; }
+  .row-fav .h-on, .row-fav.active .h-off { display: none; }
+  .row-fav.active .h-on { display: block; }
+  .row-fav.active { color: var(--danger); }
   .track-num {
     width: 24px;
     font-size: 12px;
@@ -448,10 +597,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 14px;
+    font-size: 15px;
+    font-weight: 600;
   }
   .track-album-sub {
-    font-size: 11px;
+    font-size: 13px;
     color: var(--muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -473,7 +623,8 @@
   }
   .track-menu:active { background: rgba(255,255,255,0.08); }
   .track-menu svg { width: 18px; height: 18px; fill: currentColor; }
-  .track.playing .track-name { color: var(--accent-2); font-weight: 600; }
+  .track.playing .track-name { color: #fff; }
+  .track.playing .track-album-sub, .track.playing .track-dur { color: rgba(255,255,255,0.8); }
 
   .empty {
     color: var(--muted);
@@ -487,8 +638,8 @@
   .install-banner {
     margin: 8px 18px 0;
     padding: 10px 14px;
-    background: rgba(124, 92, 255, 0.12);
-    border: 1px solid rgba(124, 92, 255, 0.3);
+    background: rgba(0, 164, 220, 0.12);
+    border: 1px solid rgba(0, 164, 220, 0.3);
     border-radius: 12px;
     font-size: 12px;
     color: var(--text);
@@ -519,7 +670,7 @@
   .toast {
     position: fixed;
     left: 50%;
-    bottom: calc(env(safe-area-inset-bottom) + 24px);
+    bottom: calc(env(safe-area-inset-bottom) + 88px);
     transform: translateX(-50%) translateY(20px);
     background: rgba(20, 20, 30, 0.95);
     color: var(--text);
@@ -676,7 +827,7 @@
     color: var(--muted);
     line-height: 1.4;
   }
-  .conn-status.ok { color: var(--accent-2); background: rgba(74,214,255,0.08); }
+  .conn-status.ok { color: var(--accent-2); background: rgba(0,164,220,0.08); }
   .conn-status.err { color: var(--danger); background: rgba(255,93,108,0.08); }
   .conn-hint { font-size: 11px; color: var(--muted); padding: 0 18px 12px; line-height: 1.5; }
   .playback-log {
@@ -709,7 +860,7 @@
     top: 0;
     z-index: 4;
     padding: 8px 14px;
-    background: rgba(11,11,16,0.95);
+    background: rgba(16,20,24,0.96);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid rgba(255,255,255,0.06);
@@ -731,7 +882,7 @@
     outline: none;
     border-color: var(--accent);
   }
-  #search-btn.active { background: rgba(124,92,255,0.25); color: #fff; }
+  #search-btn.active { background: var(--pill); color: #fff; }
 
   .sleep-grid {
     display: grid;
@@ -789,7 +940,7 @@
     font-family: inherit;
   }
   .chip.active {
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    background: var(--pill);
     border-color: transparent;
     color: #fff;
   }
@@ -832,14 +983,14 @@
     grid-template-rows: 1fr 1fr;
   }
   .collage > div { position: relative; overflow: hidden; }
-  .album-art.liked { background: linear-gradient(135deg, #4b2dff, #ff5d6c); color: #fff; }
+  .album-art.liked { background: linear-gradient(135deg, #0e4d6b, #ff5d6c); color: #fff; }
   .thumb {
-    width: 42px;
-    height: 42px;
-    flex: 0 0 42px;
+    width: 52px;
+    height: 52px;
+    flex: 0 0 52px;
     border-radius: 6px;
     background:
-      radial-gradient(120% 120% at 30% 20%, rgba(124,92,255,0.7), rgba(74,214,255,0.3) 60%, rgba(0,0,0,0.4) 100%),
+      var(--tile),
       var(--bg-2);
     position: relative;
     overflow: hidden;
@@ -907,25 +1058,84 @@
 </div>
 
 <main>
-  <section class="now-playing compact" id="now-playing">
-    <div class="artwork" id="artwork" title="Tap to switch cover size">
+  <section class="library" id="library">
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-view="albums" data-mode="local" type="button">Albums</button>
+      <button class="tab" data-view="songs" data-mode="local" type="button">Songs</button>
+      <button class="tab" data-view="playlists" data-mode="local" type="button" id="tab-playlists">Playlists</button>
+      <button class="tab" data-view="home" data-mode="jellyfin" type="button" hidden>Home</button>
+      <button class="tab" data-view="search" data-mode="jellyfin" type="button" hidden>Search</button>
+      <button class="tab" data-view="library" data-mode="jellyfin" type="button" hidden>Library</button>
+      <div class="spacer"></div>
+      <button class="clear-btn" id="clear" type="button">Clear all</button>
+    </div>
+    <div class="search-bar" id="search-bar">
+      <input id="search-input" type="search" placeholder="Search by title, artist, or album" autocomplete="off">
+    </div>
+    <div id="view"></div>
+    <div class="lib-footer" id="lib-footer"></div>
+  </section>
+</main>
+
+<!-- v1.9.6: the song playing, as a floating bar. Tap the cover to play or
+     pause, anywhere else to open the full player. -->
+<div class="mini-player" id="mini-player">
+  <div class="mini-fill" id="mini-fill"></div>
+  <button class="mini-art" id="mini-art" type="button" aria-label="Play">
+    <img id="mini-art-img" alt="" hidden>
+    <svg class="mini-icon" id="mini-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+  </button>
+  <div class="mini-meta" id="mini-open" role="button" tabindex="0" aria-label="Open player">
+    <p class="mini-title" id="mini-title">No track loaded</p>
+    <p class="mini-sub"><span id="mini-sub"></span><span id="mini-left"></span></p>
+  </div>
+  <button class="fav-btn" id="mini-fav" type="button" aria-label="Favorite" hidden>
+    <svg class="h-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z"/></svg>
+    <svg class="h-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+  </button>
+</div>
+
+<!-- v1.9.6: the full-screen player. Keeps the old ids, so all the playback
+     code drives it unchanged. -->
+<section class="player no-track" id="player" aria-label="Now playing" aria-hidden="true">
+  <div class="player-top">
+    <button class="back-btn" id="player-close" type="button" aria-label="Close player">
+      <svg viewBox="0 0 24 24"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg>
+    </button>
+    <div class="player-from"><small id="player-from-kind">Playing from</small><strong id="player-from">Your library</strong></div>
+    <span class="spacer"></span>
+  </div>
+  <div class="now-playing" id="now-playing">
+    <div class="artwork" id="artwork">
       <img id="artwork-img" alt="" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
     </div>
     <div class="track-meta">
       <p class="track-title" id="title">No track loaded</p>
       <p class="track-sub" id="subtitle">Tap "Add files" to load music</p>
+      <div class="player-row">
+        <button class="back-btn" id="player-menu" type="button" aria-label="Song menu">
+          <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+        </button>
+        <div class="pchips">
+          <button class="pchip" id="chip-artist" type="button" hidden></button>
+          <button class="pchip" id="chip-album" type="button" hidden></button>
+        </div>
+        <button class="fav-btn" id="favorite-btn" type="button" aria-label="Favorite" hidden>
+          <svg class="h-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z"/></svg>
+          <svg class="h-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+        </button>
+      </div>
+      <p class="player-sleep" id="player-sleep" hidden></p>
     </div>
-    <button class="fav-btn" id="favorite-btn" type="button" aria-label="Favorite" hidden>
-      <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-    </button>
-  </section>
+  </div>
 
   <div class="progress-wrap">
     <input id="seek" class="progress" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
     <div class="times">
       <span id="current">0:00</span>
-      <span id="duration">0:00</span>
+      <span id="duration" hidden>0:00</span>
+      <span id="player-left">0:00</span>
     </div>
   </div>
 
@@ -946,25 +1156,7 @@
       <svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
     </button>
   </div>
-
-  <section class="library" id="library">
-    <div class="tabs" id="tabs">
-      <button class="tab active" data-view="albums" data-mode="local" type="button">Albums</button>
-      <button class="tab" data-view="songs" data-mode="local" type="button">Songs</button>
-      <button class="tab" data-view="playlists" data-mode="local" type="button" id="tab-playlists">Playlists</button>
-      <button class="tab" data-view="home" data-mode="jellyfin" type="button" hidden>Home</button>
-      <button class="tab" data-view="search" data-mode="jellyfin" type="button" hidden>Search</button>
-      <button class="tab" data-view="library" data-mode="jellyfin" type="button" hidden>Library</button>
-      <div class="spacer"></div>
-      <button class="clear-btn" id="clear" type="button">Clear all</button>
-    </div>
-    <div class="search-bar" id="search-bar">
-      <input id="search-input" type="search" placeholder="Search by title, artist, or album" autocomplete="off">
-    </div>
-    <div id="view"></div>
-    <div class="lib-footer" id="lib-footer"></div>
-  </section>
-</main>
+</section>
 
 <div class="sheet-backdrop" id="sheet" role="dialog" aria-modal="true">
   <div class="sheet" id="sheet-body"></div>
@@ -976,7 +1168,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.9.5';
+const APP_VERSION = '1.9.6';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1615,8 +1807,6 @@ function loadPrefs() {
       webFade.base = audio.volume;
     }
     if (typeof p.leveling === 'boolean') levelingOn = p.leveling;
-    if (typeof p.bigArt === 'boolean') bigArt = p.bigArt;
-    applyArtSize();
     if (typeof p.shuffle === 'boolean') {
       state.shuffle = p.shuffle;
       shuffleBtn.classList.toggle('active', p.shuffle);
@@ -1636,25 +1826,11 @@ function savePrefs() {
       // end-of-track fade.
       volume: webFade.base,
       leveling: levelingOn,
-      bigArt,
       shuffle: state.shuffle,
       repeat: state.repeat,
     }));
   } catch (e) { /* ignore */ }
 }
-
-// Now-playing cover size: compact by default, so the library list has room.
-// Tapping the cover switches to the big one and back.
-let bigArt = false;
-function applyArtSize() {
-  const np = document.getElementById('now-playing');
-  if (np) np.classList.toggle('compact', !bigArt);
-}
-document.getElementById('artwork').addEventListener('click', () => {
-  bigArt = !bigArt;
-  applyArtSize();
-  savePrefs();
-});
 
 function applyRepeatVisual() {
   const active = state.repeat !== 'off';
@@ -2647,6 +2823,7 @@ function setQueue(indices, startIndex) {
   } else {
     state.queuePos = ids.length > 0 ? 0 : -1;
   }
+  state.playingFrom = queueSourceLabel();
 }
 
 function reshuffleQueueKeepingCurrent() {
@@ -2932,11 +3109,12 @@ function playlistTrackRow(trackIndex, positionInPlaylist) {
   const sub = subText ? `<div class="track-album-sub">${escapeHtml(subText)}</div>` : '';
   return `
     <div class="track${playing ? ' playing' : ''}" data-track="${trackIndex}" data-playlist-pos="${positionInPlaylist}">
-      <span class="track-num">${positionInPlaylist + 1}</span>
+      ${(t.source || 'local') === 'jellyfin' ? thumbHtml(t.pictureUrl, '', false) : `<span class="track-num">${positionInPlaylist + 1}</span>`}
       <div class="track-info">
         <div class="track-name">${escapeHtml(t.title)}</div>
         ${sub}
       </div>
+      ${rowExtras(t, trackIndex)}
       <button class="track-menu" data-playlist-track="${positionInPlaylist}" aria-label="Track menu" type="button">
         <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
       </button>
@@ -2965,6 +3143,7 @@ function trackRow(trackIndex, number, showAlbumSub) {
         <div class="track-name">${escapeHtml(t.title)}</div>
         ${sub}
       </div>
+      ${rowExtras(t, trackIndex)}
       <button class="track-menu" data-menu="${trackIndex}" aria-label="Track menu" type="button">
         <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
       </button>
@@ -2984,6 +3163,24 @@ const JF_VIEWS = new Set(['home', 'search', 'library', 'artist-detail', 'tagalbu
 const JF_DETAIL_VIEWS = new Set(['artist-detail', 'tagalbum-detail', 'folder-detail', 'playlist-detail']);
 const RECENT_KEY = 'music-player-recent';
 const RECENT_MAX = 50;
+const HEART_OFF_ICON = '<svg class="h-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z"/></svg>';
+const HEART_ON_ICON = '<svg class="h-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
+// A song row's right side (v1.9.6): its length, and a heart on Jellyfin songs.
+function rowExtras(t, i) {
+  const dur = t.durationSec > 0 ? `<span class="track-dur">${formatTime(t.durationSec)}</span>` : '';
+  const fav = (t.source || 'local') === 'jellyfin'
+    ? `<button class="row-fav${t.isFavorite ? ' active' : ''}" data-fav="${i}" type="button" aria-label="Favorite" aria-pressed="${t.isFavorite ? 'true' : 'false'}">${HEART_OFF_ICON}${HEART_ON_ICON}</button>`
+    : '';
+  return dur + fav;
+}
+function refreshRowHearts(t) {
+  const i = trackIndexById(t.id);
+  if (i < 0) return;
+  document.querySelectorAll(`.row-fav[data-fav="${i}"]`).forEach(b => {
+    b.classList.toggle('active', !!t.isFavorite);
+    b.setAttribute('aria-pressed', String(!!t.isFavorite));
+  });
+}
 const NOTE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
 const HEART_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
 const MENU_ICON = '<svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>';
@@ -3214,6 +3411,7 @@ function jfSongRow(i, list) {
         <div class="track-name">${escapeHtml(t.title)}</div>
         ${sub ? `<div class="track-album-sub">${escapeHtml(sub)}</div>` : ''}
       </div>
+      ${rowExtras(t, i)}
       <button class="track-menu" data-menu="${i}" aria-label="Track menu" type="button">${MENU_ICON}</button>
     </div>`;
 }
@@ -3487,6 +3685,7 @@ function startRadio(seedIndex, keys, label) {
   showToast(`Starting radio: ${label}`);
   nativeLog(`radio from "${String(label).slice(0, 40)}", ${indices.length} songs`);
   setQueue(indices, indices[0]);
+  state.playingFrom = { kind: 'Radio', name: String(label) };
   loadQueueCurrent(true);
 }
 
@@ -4037,9 +4236,11 @@ async function handleSheetAction(act, trackIndex) {
     startRadio(trackIndex, songArtists(t).map(artistKey), t.title);
   } else if (act === 'goartist') {
     closeSheet();
+    closePlayer();
     goToArtist(t);
   } else if (act === 'goalbum') {
     closeSheet();
+    closePlayer();
     jfOpen('tagalbum-detail', { currentTagAlbum: albumKeyOf(t) });
   } else {
     closeSheet();
@@ -4292,6 +4493,7 @@ async function bootPlaybackTrack(autoplay) {
     }
   }
   setQueue(indices, startIdx);
+  state.playingFrom = null; // a resumed song: the player names its album
   loadQueueCurrent(!!autoplay);
   if (seekTo > 0) {
     const handler = () => {
@@ -4400,6 +4602,7 @@ async function toggleFavorite(t) {
   const newVal = !t.isFavorite;
   // Optimistic update for snappy feedback; revert on failure.
   t.isFavorite = newVal;
+  refreshRowHearts(t);
   if (state.playingTrack && t.id === state.playingTrack.id) updateFavoriteUI();
   try {
     await JF.setFavorite(state.jellyfin.config, t.itemId, newVal);
@@ -4411,6 +4614,7 @@ async function toggleFavorite(t) {
   } catch (e) {
     console.error('Favorite toggle failed', e);
     t.isFavorite = !newVal; // revert
+    refreshRowHearts(t);
     if (state.playingTrack && t.id === state.playingTrack.id) updateFavoriteUI();
     showToast('Could not update favorite');
   }
@@ -4484,6 +4688,8 @@ function playTrackFromCurrentView(trackIndex, list) {
   const listed = list && state.listCtx[list];
   if (listed && listed.includes(trackIndex)) {
     setQueue(listed, trackIndex);
+    const names = { recent: 'Recently played', added: 'Recently added', search: 'Search', liked: 'Liked songs' };
+    if (names[list]) state.playingFrom = { kind: list === 'liked' ? 'Playlist' : '', name: names[list] };
   } else if (state.view === 'album-detail' && state.currentAlbum) {
     const album = state.currentAlbum;
     const indices = state.tracks
@@ -5083,6 +5289,18 @@ tabs.addEventListener('click', e => {
 });
 
 view.addEventListener('click', e => {
+  // A row's heart (v1.9.6)
+  const rowFav = e.target.closest('.row-fav[data-fav]');
+  if (rowFav) {
+    e.stopPropagation();
+    const t = state.tracks[Number(rowFav.dataset.fav)];
+    if (t) {
+      toggleFavorite(t).then(() => {
+        if (state.source === 'jellyfin' && state.view === 'library' && state.libTab === 'liked') render();
+      });
+    }
+    return;
+  }
   // Track ⋮ in album-detail / songs / albums views
   const menu = e.target.closest('.track-menu[data-menu]');
   if (menu) {
@@ -5490,10 +5708,279 @@ document.addEventListener('error', (e) => {
     document.getElementById('artwork').classList.remove('has-art');
     return;
   }
+  if (img.id === 'mini-art-img') { img.removeAttribute('src'); img.hidden = true; return; }
   const box = img.parentElement;
   img.remove();
   if (box) box.classList.remove('has-art');
 }, true);
+
+/* ---------- v1.9.6: Finamp-style player ----------
+   The floating bar and the full-screen player. The playback code still
+   writes to the player's original elements (#title, #subtitle, #artwork-img,
+   #favorite-btn, #play-icon, #current, #duration); everything else here
+   follows them through MutationObservers, so no playback path changed. */
+const playerEl = document.getElementById('player');
+const miniFill = document.getElementById('mini-fill');
+const miniArtImg = document.getElementById('mini-art-img');
+const miniArtBtn = document.getElementById('mini-art');
+const miniIcon = document.getElementById('mini-icon');
+const miniTitle = document.getElementById('mini-title');
+const miniSub = document.getElementById('mini-sub');
+const miniLeft = document.getElementById('mini-left');
+const miniFav = document.getElementById('mini-fav');
+const favBtnEl = document.getElementById('favorite-btn');
+const artworkImgEl = document.getElementById('artwork-img');
+const chipArtist = document.getElementById('chip-artist');
+const chipAlbum = document.getElementById('chip-album');
+const playerSleepEl = document.getElementById('player-sleep');
+const playerLeftEl = document.getElementById('player-left');
+
+// "1:23" or "1:02:03" to seconds.
+function parseClock(s) {
+  const parts = String(s || '').trim().split(':').map(Number);
+  if (!parts.length || parts.some(n => !isFinite(n))) return 0;
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+// Where the queue came from, for the player's "Playing from" line. Read off
+// the page on screen when a queue is built (setQueue).
+function queueSourceLabel() {
+  const v = state.view;
+  const nameOf = (list, key) => { const x = list.find(g => g.key === key); return x ? x.name : ''; };
+  if (v === 'album-detail' && state.currentAlbum) return { kind: 'Album', name: state.currentAlbum };
+  if (v === 'playlist-detail' && state.currentPlaylist) return { kind: 'Playlist', name: state.currentPlaylist.name };
+  if (state.source === 'jellyfin') {
+    if (v === 'artist-detail') return { kind: 'Artist', name: nameOf(jfArtists(), state.currentArtist) };
+    if (v === 'tagalbum-detail') return { kind: 'Album', name: nameOf(jfAlbums(), state.currentTagAlbum) };
+    if (v === 'folder-detail') return { kind: 'Folder', name: nameOf(jfFolders(), state.currentFolder) };
+    if (v === 'library' && state.libTab === 'liked') return { kind: 'Playlist', name: 'Liked songs' };
+    if (v === 'search') return { kind: '', name: 'Search' };
+    if (v === 'home') return { kind: '', name: 'Home' };
+  }
+  if (v === 'songs') return { kind: '', name: 'All songs' };
+  return { kind: '', name: 'Your library' };
+}
+
+function syncPlayerTime() {
+  const cur = parseClock(currentEl.textContent);
+  const dur = parseClock(durationEl.textContent);
+  const f = dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
+  miniFill.style.transform = `scaleX(${f})`;
+  const left = dur > 0 ? '-' + formatTime(Math.max(0, dur - cur)) : '';
+  miniLeft.textContent = state.playingTrack ? left : '';
+  playerLeftEl.textContent = left || '0:00';
+}
+
+function syncPlayerUI() {
+  const t = state.playingTrack;
+  playerEl.classList.toggle('no-track', !t);
+  miniTitle.textContent = titleEl.textContent;
+  miniSub.textContent = t ? (artistOf(t) || subtitleEl.textContent) : subtitleEl.textContent;
+  // Heart
+  miniFav.hidden = favBtnEl.hidden;
+  const fav = favBtnEl.classList.contains('active');
+  miniFav.classList.toggle('active', fav);
+  miniFav.setAttribute('aria-pressed', String(fav));
+  // Cover
+  const src = !artworkImgEl.hidden ? artworkImgEl.getAttribute('src') : null;
+  if (src) {
+    if (miniArtImg.getAttribute('src') !== src) miniArtImg.src = src;
+    miniArtImg.hidden = false;
+  } else {
+    miniArtImg.removeAttribute('src');
+    miniArtImg.hidden = true;
+  }
+  tintFrom(src);
+  // Play / pause
+  const playing = playIcon.innerHTML.includes('M6 5h4');
+  miniIcon.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
+  miniArtBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+  // Artist and album chips. They open the pages only on the source being browsed.
+  if (t) {
+    const browsable = (t.source || 'local') === state.source;
+    const artist = artistOf(t);
+    chipArtist.textContent = artist;
+    chipArtist.hidden = !artist;
+    chipArtist.disabled = !browsable || state.source !== 'jellyfin';
+    const album = albumOf(t);
+    chipAlbum.textContent = album;
+    chipAlbum.hidden = album === UNSORTED;
+    chipAlbum.disabled = !browsable;
+  }
+  // Sleep timer
+  if (state.sleep.expiresAt > 0) {
+    const ms = Math.max(0, state.sleep.expiresAt - Date.now());
+    playerSleepEl.textContent = `Sleep timer ${Math.floor(ms / 60000)}:${Math.floor((ms % 60000) / 1000).toString().padStart(2, '0')}`;
+    playerSleepEl.hidden = false;
+  } else {
+    playerSleepEl.hidden = true;
+  }
+  // Playing from
+  const from = state.playingFrom;
+  let kind = 'Playing from', name = 'Your library';
+  if (from && from.name) { kind = from.kind ? `Playing from ${from.kind}` : 'Playing from'; name = from.name; }
+  else if (t && albumOf(t) !== UNSORTED) { kind = 'Playing from Album'; name = albumOf(t); }
+  document.getElementById('player-from-kind').textContent = kind;
+  document.getElementById('player-from').textContent = name;
+  syncPlayerTime();
+}
+
+{
+  const obs = new MutationObserver(syncPlayerUI);
+  for (const el of [titleEl, subtitleEl, playIcon, favBtnEl, artworkImgEl]) {
+    obs.observe(el, { childList: true, characterData: true, subtree: true, attributes: true });
+  }
+  const timeObs = new MutationObserver(syncPlayerTime);
+  for (const el of [currentEl, durationEl]) timeObs.observe(el, { childList: true, characterData: true, subtree: true });
+  // While the seek bar is dragged the clock holds; the bar follows the finger.
+  seek.addEventListener('input', () => { miniFill.style.transform = `scaleX(${Number(seek.value) / 1000})`; });
+}
+
+/* Cover colours. The most common colour of the cover (saturated ones count
+   more) tints the bar, the player and the row playing, like Finamp. Jellyfin
+   sends Access-Control-Allow-Origin: *, so its covers can be read; a cover
+   that can't be read keeps the plain teal-grey. */
+let _tintSrc = null;
+function pickTint(img) {
+  const n = 24;
+  const c = document.createElement('canvas');
+  c.width = n; c.height = n;
+  const ctx = c.getContext && c.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0, n, n);
+  const d = ctx.getImageData(0, 0, n, n).data;
+  const bins = new Map();
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 128) continue;
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const w = 0.15 + (max ? (max - min) / max : 0);
+    const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
+    let e = bins.get(key);
+    if (!e) { e = { w: 0, r: 0, g: 0, b: 0 }; bins.set(key, e); }
+    e.w += w; e.r += r * w; e.g += g * w; e.b += b * w;
+  }
+  let best = null;
+  for (const e of bins.values()) if (!best || e.w > best.w) best = e;
+  return best ? [best.r / best.w, best.g / best.w, best.b / best.w].map(Math.round) : null;
+}
+function applyTint(rgb) {
+  const st = document.documentElement.style;
+  const names = ['--tint-bar', '--tint-fill', '--tint-ink', '--tint-deep', '--tint-row'];
+  if (!rgb) { names.forEach(p => st.removeProperty(p)); return; }
+  const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * k));
+  const lum = a => (0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2]) / 255;
+  const css = a => `rgb(${a[0]}, ${a[1]}, ${a[2]})`;
+  const W = [255, 255, 255], K = [0, 0, 0], BG = [16, 20, 24];
+  let base = rgb;
+  if (lum(base) < 0.12) base = mix(base, W, 0.16); // a black cover still shows a bar
+  const light = lum(base) > 0.5;
+  const bar = light ? mix(base, K, 0.18) : mix(base, W, 0.06);
+  const fill = light ? mix(base, W, 0.5) : mix(base, W, 0.26);
+  let row = mix(base, BG, 0.4);
+  if (lum(row) > 0.42) row = mix(row, K, 0.35); // keeps white text readable
+  st.setProperty('--tint-bar', css(bar));
+  st.setProperty('--tint-fill', css(fill));
+  st.setProperty('--tint-ink', lum(mix(bar, fill, 0.5)) > 0.45 ? '#14181c' : '#ffffff');
+  st.setProperty('--tint-deep', css(mix(base, K, 0.55)));
+  st.setProperty('--tint-row', css(row));
+}
+function tintFrom(src) {
+  if (src === _tintSrc) return;
+  _tintSrc = src;
+  if (!src) { applyTint(null); return; }
+  const img = new Image();
+  if (!/^(blob|data):/.test(src)) img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    if (_tintSrc !== src) return;
+    let rgb = null;
+    try { rgb = pickTint(img); } catch (e) { rgb = null; }
+    applyTint(rgb);
+  };
+  img.onerror = () => { if (_tintSrc === src) applyTint(null); };
+  img.src = sized(src, 64);
+}
+
+/* Open and close the full player. Opening adds a history entry, so the
+   browser's Back closes it on the PWA. (The Android app has no Back handling
+   of its own, so there Back still leaves the app; the arrow and a swipe down
+   close the player.) */
+function openPlayer() {
+  if (playerEl.classList.contains('open')) return;
+  playerEl.classList.add('open');
+  playerEl.setAttribute('aria-hidden', 'false');
+  try { history.pushState({ player: 1 }, ''); } catch (e) { /* ignore */ }
+}
+function closePlayer(fromHistory) {
+  if (!playerEl.classList.contains('open')) return;
+  playerEl.classList.remove('open');
+  playerEl.setAttribute('aria-hidden', 'true');
+  playerEl.style.transform = '';
+  if (!fromHistory && history.state && history.state.player) {
+    try { history.back(); } catch (e) { /* ignore */ }
+  }
+}
+window.addEventListener('popstate', () => { if (playerEl.classList.contains('open')) closePlayer(true); });
+
+miniArtBtn.addEventListener('click', e => { e.stopPropagation(); playPause(); });
+document.getElementById('mini-open').addEventListener('click', openPlayer);
+document.getElementById('mini-open').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPlayer(); }
+});
+miniFav.addEventListener('click', e => { e.stopPropagation(); favBtnEl.click(); });
+document.getElementById('player-close').addEventListener('click', () => closePlayer());
+document.getElementById('player-menu').addEventListener('click', () => {
+  const t = state.playingTrack;
+  const i = t ? trackIndexById(t.id) : -1;
+  if (i < 0) return;
+  state.menuList = null;
+  openTrackSheet(i);
+});
+chipArtist.addEventListener('click', () => {
+  const t = state.playingTrack;
+  if (!t || chipArtist.disabled) return;
+  closePlayer();
+  goToArtist(t);
+});
+chipAlbum.addEventListener('click', () => {
+  const t = state.playingTrack;
+  if (!t || chipAlbum.disabled) return;
+  closePlayer();
+  if (state.source === 'jellyfin') {
+    jfOpen('tagalbum-detail', { currentTagAlbum: albumKeyOf(t) });
+  } else {
+    state.view = 'album-detail';
+    state.currentAlbum = albumOf(t);
+    render();
+    libraryEl.scrollTop = 0;
+  }
+});
+
+// Swipe the player down to close it (not from the seek bar or the buttons).
+{
+  let startY = null, dy = 0;
+  playerEl.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1 || e.target.closest('.progress, .controls, button')) { startY = null; return; }
+    startY = e.touches[0].clientY;
+    dy = 0;
+  }, { passive: true });
+  playerEl.addEventListener('touchmove', e => {
+    if (startY === null) return;
+    dy = Math.max(0, e.touches[0].clientY - startY);
+    playerEl.style.transition = 'none';
+    playerEl.style.transform = `translateY(${dy}px)`;
+  }, { passive: true });
+  const end = () => {
+    if (startY === null) return;
+    startY = null;
+    playerEl.style.transition = '';
+    if (dy > 110) closePlayer();
+    else playerEl.style.transform = '';
+    dy = 0;
+  };
+  playerEl.addEventListener('touchend', end);
+  playerEl.addEventListener('touchcancel', end);
+}
 
 /* ---------- Service worker + install prompt ---------- */
 if ('serviceWorker' in navigator) {
