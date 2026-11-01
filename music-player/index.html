@@ -146,6 +146,27 @@
     object-fit: cover;
   }
   .artwork.has-art svg { display: none; }
+  .artwork { cursor: pointer; }
+  /* Compact now-playing (the default): a small cover beside the title, so the
+     library list below gets most of the screen. Tapping the cover switches
+     between this and the big cover; the choice is saved in prefs (bigArt). */
+  .now-playing.compact {
+    flex-direction: row;
+    align-items: center;
+    text-align: left;
+    gap: 12px;
+    padding: 6px 52px 6px 18px;
+  }
+  .now-playing.compact .artwork {
+    width: 64px;
+    flex: none;
+    border-radius: 10px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  }
+  .now-playing.compact .track-meta { padding: 0; min-width: 0; }
+  .now-playing.compact .fav-btn { top: 50%; bottom: auto; transform: translateY(-50%); }
+  .now-playing.compact .fav-btn:active { transform: translateY(-50%) scale(0.92); }
+  .now-playing.compact ~ .controls { padding-top: 6px; }
   .track-meta { width: 100%; padding: 0 8px; }
   .track-title {
     font-size: 17px;
@@ -886,8 +907,8 @@
 </div>
 
 <main>
-  <section class="now-playing">
-    <div class="artwork" id="artwork">
+  <section class="now-playing compact" id="now-playing">
+    <div class="artwork" id="artwork" title="Tap to switch cover size">
       <img id="artwork-img" alt="" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
     </div>
@@ -955,7 +976,7 @@
 <script>
 "use strict";
 
-const APP_VERSION = '1.9.4';
+const APP_VERSION = '1.9.5';
 
 /* ---------- Crash capture ----------
    The Capacitor WebView gives us no console, so persist any uncaught JS error
@@ -1594,6 +1615,8 @@ function loadPrefs() {
       webFade.base = audio.volume;
     }
     if (typeof p.leveling === 'boolean') levelingOn = p.leveling;
+    if (typeof p.bigArt === 'boolean') bigArt = p.bigArt;
+    applyArtSize();
     if (typeof p.shuffle === 'boolean') {
       state.shuffle = p.shuffle;
       shuffleBtn.classList.toggle('active', p.shuffle);
@@ -1613,11 +1636,25 @@ function savePrefs() {
       // end-of-track fade.
       volume: webFade.base,
       leveling: levelingOn,
+      bigArt,
       shuffle: state.shuffle,
       repeat: state.repeat,
     }));
   } catch (e) { /* ignore */ }
 }
+
+// Now-playing cover size: compact by default, so the library list has room.
+// Tapping the cover switches to the big one and back.
+let bigArt = false;
+function applyArtSize() {
+  const np = document.getElementById('now-playing');
+  if (np) np.classList.toggle('compact', !bigArt);
+}
+document.getElementById('artwork').addEventListener('click', () => {
+  bigArt = !bigArt;
+  applyArtSize();
+  savePrefs();
+});
 
 function applyRepeatVisual() {
   const active = state.repeat !== 'off';

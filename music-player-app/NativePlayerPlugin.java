@@ -2550,9 +2550,12 @@ public class NativePlayerPlugin extends Plugin {
             plog("queue from app" + (pick ? " (new pick)" : "") + ": " + n + " tracks, at " + trackLabel(newIndex)
                 + (newIndex != index ? " (app said #" + index + ", kept the playing track)" : ""));
             // A level can change with the queue (album order, the Settings
-            // switch): the playing song takes its new one now.
+            // switch): the playing song takes its new one now. Only while it
+            // is still the queue entry: on a new pick the old song is about to
+            // be replaced, and the new one takes its level when it opens.
+            boolean onEntry = newIndex >= 0 && newIndex < n && currentId.equals(ids.get(newIndex));
             float level = currentLevel();
-            if (player != null && level != trackLevel) {
+            if (player != null && onEntry && level != trackLevel) {
                 trackLevel = level;
                 try { player.setVolume(volume * trackLevel * (fader != null ? lastFadeGain : 1f)); } catch (Exception e) { /* ignore */ }
                 plog("  level now " + (trackLevel >= 1f ? "off" : (Math.round(levelDbAt(queueIndex) * 10f) / 10f) + " dB"));
