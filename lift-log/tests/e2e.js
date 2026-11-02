@@ -131,7 +131,7 @@ const server = http.createServer((req, res) => {
   ok((await text('#view')).includes('last done'), 'Today shows last done');
   await shot('07-today-after');
   await tap('[data-a="start-day"]');
-  ok((await text('#view')).includes('Last time: 95 lb × 10, 9'), 'shows last time for bench');
+  ok(/Last time \([A-Z][a-z]{2} \d{1,2}\): 95 lb × 10, 9 · Best 95 lb × 10/.test(await text('#view')), 'shows last time (dated) and best for bench', await text('#view'));
   ok(await page.getAttribute('[data-in="w"][data-e="1"][data-s="0"]', 'placeholder') === '95' && await page.getAttribute('[data-in="r"][data-e="1"][data-s="2"]', 'placeholder') === '9', 'placeholders from last time');
   await tap('[data-a="set-done"][data-e="1"][data-s="0"]');
   st = await state();

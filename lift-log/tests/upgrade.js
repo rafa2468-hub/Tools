@@ -7,6 +7,9 @@ const { chromium } = require('playwright-core');
 const OLD = path.resolve(process.argv[2]), NEW = path.resolve(process.argv[3]), CHROME = process.argv[4];
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 let serveDir = OLD, pass = 0, fail = 0;
+const verOf = dir => (fs.readFileSync(path.join(dir, 'index.html'), 'utf8').match(/APP_VERSION = '([^']+)'/) || [])[1];
+const OLD_V = verOf(OLD), NEW_V = verOf(NEW);
+if (!OLD_V || !NEW_V || OLD_V === NEW_V) { console.error('need two different builds', OLD_V, NEW_V); process.exit(2); }
 const ok = (c, n, x) => { if (c) { pass++; console.log('PASS', n); } else { fail++; console.log('FAIL', n, JSON.stringify(x === undefined ? '' : x)); } };
 const server = http.createServer((req, res) => {
   let p = decodeURIComponent(req.url.split('?')[0]).replace(/^\/app\//, '/'); if (p.endsWith('/')) p += 'index.html';
@@ -45,14 +48,14 @@ const seed = {
   await page.evaluate(s => localStorage.setItem('liftlog.v1', JSON.stringify(s)), seed);
   await page.evaluate(() => navigator.serviceWorker.ready);
   await page.reload();
-  ok(await version() === '1.0.0' && await page.evaluate(() => !!navigator.serviceWorker.controller), 'old 1.0.0 running with the worker in control');
+  ok(await version() === OLD_V && await page.evaluate(() => !!navigator.serviceWorker.controller), 'old ' + OLD_V + ' running with the worker in control');
   ok((await page.locator('#view').innerText()).includes('Quads/Hams'), 'old build shows her split');
 
   // 2. Deploy the new build; she opens the app a few times
   serveDir = NEW;
   const seen = [];
-  for (let i = 0; i < 4 && (seen[seen.length - 1] !== '1.0.1'); i++) { await page.reload(); await page.waitForTimeout(800); seen.push(await version()); }
-  ok(seen.includes('1.0.1') && seen.indexOf('1.0.1') <= 1, 'update shows up by the second open', seen);
+  for (let i = 0; i < 4 && (seen[seen.length - 1] !== NEW_V); i++) { await page.reload(); await page.waitForTimeout(800); seen.push(await version()); }
+  ok(seen.includes(NEW_V) && seen.indexOf(NEW_V) <= 1, 'update to ' + NEW_V + ' shows up by the second open', seen);
   const st = await state();
   ok(st.sessions.length === 1 && st.splits[0].days.length === 4 && await dayNames() === 'Push,Pull,Quads/Hams,Glutes', 'her split and workout survive the update', st.splits[0].days.map(d => d.name));
 
