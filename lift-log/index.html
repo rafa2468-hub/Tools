@@ -114,7 +114,7 @@ tr.gain td{padding-top:0;text-align:left}
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script>
 'use strict';
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.0.4';
 const KEY = 'liftlog.v1';
 const GROUPS = ['Push', 'Pull', 'Legs', 'Core'];
 const DEFAULTS = {
@@ -310,7 +310,7 @@ function viewWorkout() {
   a.entries.forEach((en, i) => {
     const last = lastPerformance(en.exId);
     const t = en.target;
-    const goal = (t ? (t.reps ? `Goal ${t.sets} × ${esc(t.reps)} · ` : `Goal ${t.sets} sets · `) : '') + (en.rest > 0 ? `Rest ${fmtSecs(en.rest)} · ` : '');
+    const goal = (t ? (t.reps ? `Goal ${t.sets} × ${esc(t.reps)} · ` : `Goal ${t.sets} ${t.sets === 1 ? 'set' : 'sets'} · `) : '') + (en.rest > 0 ? `Rest ${fmtSecs(en.rest)} · ` : '');
     const best = bestBefore(en.exId, Infinity);
     const lastLine = last ? `Last time (${esc(shortDate(last.start))}): ${esc(setsSummary(last.sets, last.unit))}${best ? ` · Best ${esc(fmtNum(conv(best.w, best.unit, a.unit)) + ' ' + a.unit)} × ${best.r}` : ''}` : 'First time';
     b += `<div class="card"><div class="row"><div class="grow"><h3>${esc(exName(en.exId, en.name))}</h3><div class="small muted">${goal}${lastLine}</div></div><button class="btn ghost sm" data-a="ex-menu" data-e="${i}" aria-label="Exercise options">•••</button></div>`;
@@ -407,7 +407,7 @@ function viewExercise() {
 
 function sessionRow(s) {
   const st = sessionStats(s);
-  return `<div class="item" data-a="view-session" data-id="${esc(s.id)}"><div class="grow"><b>${esc(s.name)}</b> <span class="small muted">${fmtDate(s.start)}</span><div class="small muted">${st.mins} min · ${st.sets} sets · ${st.vol.toLocaleString()} ${s.unit} lifted</div></div><span class="muted">›</span></div>`;
+  return `<div class="item" data-a="view-session" data-id="${esc(s.id)}"><div class="grow"><b>${esc(s.name)}</b> <span class="small muted">${fmtDate(s.start)}</span><div class="small muted">${st.mins} min · ${st.sets} ${st.sets === 1 ? 'set' : 'sets'} · ${st.vol.toLocaleString()} ${s.unit} lifted</div></div><span class="muted">›</span></div>`;
 }
 function viewHistory() {
   const ss = sessionsSorted();
@@ -426,7 +426,7 @@ function viewSession() {
   const st = sessionStats(s);
   let b = `<button class="link" data-a="back-history">‹ History</button>`;
   if (ui.justSaved) b += `<div class="card" style="border-color:var(--ok)"><h3>Workout saved. Nice work!</h3></div>`;
-  b += `<div class="muted small">${fmtDate(s.start)}, ${fmtTime(s.start)}</div><div class="card row" style="margin-top:10px"><div class="stat"><b>${st.mins}</b><span class="small muted">${st.mins === 1 ? 'minute' : 'minutes'}</span></div><div class="stat"><b>${st.sets}</b><span class="small muted">sets</span></div>${st.restAvg ? `<div class="stat"><b>${fmtSecs(st.restAvg)}</b><span class="small muted">between sets</span></div>` : ''}<div class="stat"><b>${st.vol.toLocaleString()}</b><span class="small muted">${s.unit} lifted</span></div></div>`;
+  b += `<div class="muted small">${fmtDate(s.start)}, ${fmtTime(s.start)}</div><div class="card row" style="margin-top:10px"><div class="stat"><b>${st.mins}</b><span class="small muted">${st.mins === 1 ? 'minute' : 'minutes'}</span></div><div class="stat"><b>${st.sets}</b><span class="small muted">${st.sets === 1 ? 'set' : 'sets'}</span></div>${st.restAvg ? `<div class="stat"><b>${fmtSecs(st.restAvg)}</b><span class="small muted">between sets</span></div>` : ''}<div class="stat"><b>${st.vol.toLocaleString()}</b><span class="small muted">${s.unit} lifted</span></div></div>`;
   let compared = 0; const ups = [];
   for (const en of s.entries) {
     const prev = prevEntry(en.exId, s.start); if (!prev) continue;
