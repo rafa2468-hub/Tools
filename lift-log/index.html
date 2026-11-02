@@ -81,6 +81,7 @@ tr.done .check{background:var(--ok);border-color:var(--ok);color:#fff}
 .toast{position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 12px);transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;z-index:20;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw;text-align:center}
 .toast.show{opacity:1}
 .stat{flex:1;text-align:center}.stat b{display:block;font-size:20px}
+.arrow{min-width:44px;padding:4px 10px;display:inline-grid;place-items:center}
 </style>
 </head>
 <body>
@@ -99,7 +100,7 @@ tr.done .check{background:var(--ok);border-color:var(--ok);color:#fff}
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script>
 'use strict';
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const KEY = 'liftlog.v1';
 const GROUPS = ['Push', 'Pull', 'Legs', 'Core'];
 const DEFAULTS = {
@@ -110,6 +111,8 @@ const DEFAULTS = {
 };
 const TEMPLATES = [['ppl', 'Push / Pull / Legs', ['Push', 'Pull', 'Legs']], ['ul', 'Upper / Lower', ['Upper', 'Lower']], ['fb', 'Full body', ['Full Body']], ['blank', 'Start blank', []]];
 
+const UP = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>';
+const DOWN = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
 const $ = s => document.querySelector(s);
 const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -238,7 +241,11 @@ function viewPlan() {
   for (const sp of S.splits) {
     const on = sp.id === S.activeSplitId;
     b += `<div class="card"><div class="row"><div class="grow"><h3>${esc(sp.name)}${on ? '<span class="tag acc">In use</span>' : ''}</h3></div>${on ? '' : `<button class="btn sm" data-a="use-split" data-split="${sp.id}">Use this</button>`}<button class="btn ghost sm" data-a="split-menu" data-split="${sp.id}" aria-label="Split options">•••</button></div><div class="list">`;
-    for (const d of sp.days) b += `<div class="item" data-a="edit-day" data-split="${sp.id}" data-day="${d.id}"><div class="grow"><b>${esc(d.name)}</b><div class="small muted">${d.items.length ? esc(d.items.map(it => exName(it.exId)).join(', ')) : 'No exercises yet'}</div></div><span class="muted">›</span></div>`;
+    sp.days.forEach((d, i) => {
+      b += `<div class="item" data-a="edit-day" data-split="${sp.id}" data-day="${d.id}"><div class="grow"><b>${esc(d.name)}</b><div class="small muted">${d.items.length ? esc(d.items.map(it => exName(it.exId)).join(', ')) : 'No exercises yet'}</div></div>` +
+        (sp.days.length > 1 ? `<div><button class="btn ghost sm arrow" data-a="day-move" data-split="${sp.id}" data-i="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(d.name)} up">${UP}</button><br><button class="btn ghost sm arrow" data-a="day-move" data-split="${sp.id}" data-i="${i}" data-d="1" ${i === sp.days.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(d.name)} down">${DOWN}</button></div>` : '') +
+        `<span class="muted">›</span></div>`;
+    });
     b += `</div><button class="btn sm" style="margin-top:8px" data-a="add-day" data-split="${sp.id}">+ Add day</button></div>`;
   }
   b += `<button class="btn primary block" data-a="new-split">+ New split</button>`;
@@ -250,7 +257,7 @@ function viewDay() {
   if (!d) { ui.editDay = null; return viewPlan(); }
   let b = `<button class="link" data-a="back-plan">‹ ${esc(sp.name)}</button>`;
   if (!d.items.length) b += `<div class="card muted">No exercises yet. Tap <b>Add exercises</b> to pick from the list.</div>`;
-  else b += `<div class="card list">` + d.items.map((it, i) => `<div class="item"><div class="grow"><b>${esc(exName(it.exId))}</b><div class="row small muted" style="margin-top:6px;gap:6px">Sets <input class="txt num" inputmode="numeric" data-in="item-sets" data-i="${i}" value="${it.sets}" aria-label="Sets"> Reps <input class="txt num" style="width:80px" data-in="item-reps" data-i="${i}" value="${esc(it.reps)}" placeholder="8-12" aria-label="Reps"></div></div><div><button class="btn ghost sm" data-a="item-move" data-i="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><br><button class="btn ghost sm" data-a="item-move" data-i="${i}" data-d="1" ${i === d.items.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button></div><button class="btn ghost sm" data-a="item-remove" data-i="${i}" aria-label="Remove">✕</button></div>`).join('') + `</div>`;
+  else b += `<div class="card list">` + d.items.map((it, i) => `<div class="item"><div class="grow"><b>${esc(exName(it.exId))}</b><div class="row small muted" style="margin-top:6px;gap:6px">Sets <input class="txt num" inputmode="numeric" data-in="item-sets" data-i="${i}" value="${it.sets}" aria-label="Sets"> Reps <input class="txt num" style="width:80px" data-in="item-reps" data-i="${i}" value="${esc(it.reps)}" placeholder="8-12" aria-label="Reps"></div></div><div><button class="btn ghost sm arrow" data-a="item-move" data-i="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">${UP}</button><br><button class="btn ghost sm arrow" data-a="item-move" data-i="${i}" data-d="1" ${i === d.items.length - 1 ? 'disabled' : ''} aria-label="Move down">${DOWN}</button></div><button class="btn ghost sm" data-a="item-remove" data-i="${i}" aria-label="Remove">✕</button></div>`).join('') + `</div>`;
   b += `<button class="btn block" data-a="day-add-ex">+ Add exercises</button>`;
   if (d.items.length) b += `<button class="btn primary block" data-a="day-start">Start this workout</button>`;
   b += `<div class="row" style="margin-top:16px"><button class="btn ghost sm" data-a="rename-day">Rename day</button><button class="btn danger sm" data-a="delete-day">Delete day</button></div>`;
@@ -494,6 +501,7 @@ const A = {
     ]);
   },
   'add-day'(el) { const sp = S.splits.find(s => s.id === el.dataset.split); askText('New day', '', v => { const d = { id: uid(), name: v, items: [] }; sp.days.push(d); ui.editDay = { splitId: sp.id, dayId: d.id }; }, 'e.g. Legs, Upper, Glutes'); },
+  'day-move'(el) { const sp = S.splits.find(s => s.id === el.dataset.split); if (!sp) return; const i = +el.dataset.i, j = i + (+el.dataset.d); if (j < 0 || j >= sp.days.length) return; sp.days.splice(j, 0, sp.days.splice(i, 1)[0]); save(); render(); },
   'back-plan'() { ui.editDay = null; render(true); },
   'rename-day'() { const { d } = findDay(ui.editDay); askText('Rename day', d.name, v => { d.name = v; }); },
   'delete-day'() { const { sp, d } = findDay(ui.editDay); if (!confirm(`Delete the "${d.name}" day? Past workouts stay in History.`)) return; sp.days = sp.days.filter(x => x !== d); ui.editDay = null; save(); render(true); },
