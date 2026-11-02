@@ -63,7 +63,11 @@ tr.done .check{background:var(--ok);border-color:var(--ok);color:#fff}
 .setno{width:30px;color:var(--muted);font-weight:600}
 .restbar{position:fixed;left:12px;right:12px;bottom:calc(66px + env(safe-area-inset-bottom));z-index:6;background:var(--text);color:var(--bg);border-radius:12px;padding:8px 8px 8px 16px;display:none;align-items:center;justify-content:space-between;font-weight:600}
 .restbar.show{display:flex}
-.restbar button{background:none;border:0;color:var(--bg);font-size:15px;padding:6px 10px}
+.restbar.go{background:var(--ok);color:#fff}
+.restbar .rb{display:flex;gap:2px}
+.restbar button{background:none;border:0;color:inherit;font-size:15px;font-weight:600;padding:8px 10px;min-width:44px}
+#restText{font-variant-numeric:tabular-nums}
+.sel{font:inherit;font-size:16px;padding:7px 6px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text)}
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10;display:none}
 .scrim.show{display:block}
 .sheet{position:fixed;left:0;right:0;bottom:0;z-index:11;background:var(--card);border-radius:18px 18px 0 0;max-height:88vh;display:none;flex-direction:column;padding-bottom:env(safe-area-inset-bottom)}
@@ -97,7 +101,7 @@ tr.gain td{padding-top:0;text-align:left}
 <body>
 <header class="top"><h1 id="title">Today</h1><div id="right"></div></header>
 <main id="view"></main>
-<div class="restbar" id="restbar"><span id="restText">Rest 0:00</span><button data-a="rest-close" aria-label="Hide rest timer">Hide</button></div>
+<div class="restbar" id="restbar" role="timer"><span id="restText">Rest 0:00</span><span class="rb"><button data-a="rest-adj" data-d="-15" aria-label="15 seconds less rest">−15</button><button data-a="rest-adj" data-d="15" aria-label="15 seconds more rest">+15</button><button data-a="rest-skip" aria-label="Skip the rest">Skip</button></span></div>
 <nav class="tabs">
   <button data-a="tab" data-tab="today"><span class="dot" id="activeDot" style="display:none"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 7v10M3 9v6M18 7v10M21 9v6M6 12h12"/></svg>Today</button>
   <button data-a="tab" data-tab="plan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>Plan</button>
@@ -110,7 +114,7 @@ tr.gain td{padding-top:0;text-align:left}
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script>
 'use strict';
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.0.3';
 const KEY = 'liftlog.v1';
 const GROUPS = ['Push', 'Pull', 'Legs', 'Core'];
 const DEFAULTS = {
@@ -133,13 +137,18 @@ const fmtTime = t => new Date(t).toLocaleTimeString(undefined, { hour: 'numeric'
 function fmtDur(ms) { const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); }
 
 function defaultExercises() { const out = []; for (const g of GROUPS) for (const n of DEFAULTS[g]) out.push({ id: 'd-' + slug(n), name: n, group: g, custom: false }); return out; }
-function freshState() { return { v: 1, unit: 'lb', exercises: defaultExercises(), splits: [], activeSplitId: null, sessions: [], active: null, lastBackup: null, hideInstall: false }; }
+const REST_DEFAULTS = [60, 90, 120, 180];
+const REST_CHOICES = [30, 45, 60, 75, 90, 120, 150, 180, 240, 300];
+const REST_DROP = 15 * 60000; // a rest timer left running this long past its target is dropped
+function freshState() { return { v: 1, unit: 'lb', exercises: defaultExercises(), splits: [], activeSplitId: null, sessions: [], active: null, lastBackup: null, hideInstall: false, restDefault: 90, restSound: true }; }
 function valid(d) { return !!d && d.v === 1 && Array.isArray(d.exercises) && Array.isArray(d.splits) && Array.isArray(d.sessions); }
 function normalize(d) {
   const have = new Set(d.exercises.map(e => e.id));
   for (const e of defaultExercises()) if (!have.has(e.id)) d.exercises.push(e);
   if (d.unit !== 'kg') d.unit = 'lb';
   if (d.active === undefined) d.active = null;
+  if (!(d.restDefault > 0)) d.restDefault = 90;
+  d.restSound = d.restSound !== false;
   return d;
 }
 function load() {
@@ -154,7 +163,6 @@ function save() {
 }
 
 let ui = { tab: 'today', settings: false, editDay: null, viewEx: null, viewSession: null, justSaved: false, exFilter: 'All', exSearch: '', persisted: null };
-let restStart = null;
 let sheet = null;
 
 // ---------- data helpers ----------
@@ -185,8 +193,12 @@ function hintFor(last, en, k, unit) {
 function sessionStats(s) {
   let sets = 0, vol = 0;
   for (const en of s.entries) for (const x of en.sets) { sets++; vol += (x.w || 0) * x.r; }
-  return { sets, vol: Math.round(vol), mins: Math.max(1, Math.round((s.end - s.start) / 60000)) };
+  const rests = [];
+  for (const en of s.entries) for (const x of en.sets) if (x.rest > 0) rests.push(x.rest);
+  const restAvg = rests.length ? Math.round(rests.reduce((t, x) => t + x, 0) / rests.length) : null;
+  return { sets, vol: Math.round(vol), mins: Math.max(1, Math.round((s.end - s.start) / 60000)), restAvg };
 }
+const fmtSecs = n => fmtDur(n * 1000);
 // ---------- progress ----------
 const shortDate = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 // Top set of a list: the heaviest (compared in lb), ties go to more reps; a weighted set beats a bodyweight one;
@@ -298,7 +310,7 @@ function viewWorkout() {
   a.entries.forEach((en, i) => {
     const last = lastPerformance(en.exId);
     const t = en.target;
-    const goal = t ? (t.reps ? `Goal ${t.sets} × ${esc(t.reps)} · ` : `Goal ${t.sets} sets · `) : '';
+    const goal = (t ? (t.reps ? `Goal ${t.sets} × ${esc(t.reps)} · ` : `Goal ${t.sets} sets · `) : '') + (en.rest > 0 ? `Rest ${fmtSecs(en.rest)} · ` : '');
     const best = bestBefore(en.exId, Infinity);
     const lastLine = last ? `Last time (${esc(shortDate(last.start))}): ${esc(setsSummary(last.sets, last.unit))}${best ? ` · Best ${esc(fmtNum(conv(best.w, best.unit, a.unit)) + ' ' + a.unit)} × ${best.r}` : ''}` : 'First time';
     b += `<div class="card"><div class="row"><div class="grow"><h3>${esc(exName(en.exId, en.name))}</h3><div class="small muted">${goal}${lastLine}</div></div><button class="btn ghost sm" data-a="ex-menu" data-e="${i}" aria-label="Exercise options">•••</button></div>`;
@@ -343,7 +355,7 @@ function viewDay() {
   if (!d) { ui.editDay = null; return viewPlan(); }
   let b = `<button class="link" data-a="back-plan">‹ ${esc(sp.name)}</button>`;
   if (!d.items.length) b += `<div class="card muted">No exercises yet. Tap <b>Add exercises</b> to pick from the list.</div>`;
-  else b += `<div class="card list">` + d.items.map((it, i) => `<div class="item"><div class="grow"><b>${esc(exName(it.exId))}</b><div class="row small muted" style="margin-top:6px;gap:6px">Sets <input class="txt num" inputmode="numeric" data-in="item-sets" data-i="${i}" value="${it.sets}" aria-label="Sets"> Reps <input class="txt num" style="width:80px" data-in="item-reps" data-i="${i}" value="${esc(it.reps)}" placeholder="8-12" aria-label="Reps"></div></div><div><button class="btn ghost sm arrow" data-a="item-move" data-i="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">${UP}</button><br><button class="btn ghost sm arrow" data-a="item-move" data-i="${i}" data-d="1" ${i === d.items.length - 1 ? 'disabled' : ''} aria-label="Move down">${DOWN}</button></div><button class="btn ghost sm" data-a="item-remove" data-i="${i}" aria-label="Remove">✕</button></div>`).join('') + `</div>`;
+  else b += `<div class="card list">` + d.items.map((it, i) => `<div class="item"><div class="grow"><b>${esc(exName(it.exId))}</b><div class="row small muted" style="margin-top:6px;gap:6px">Sets <input class="txt num" inputmode="numeric" data-in="item-sets" data-i="${i}" value="${it.sets}" aria-label="Sets"> Reps <input class="txt num" style="width:80px" data-in="item-reps" data-i="${i}" value="${esc(it.reps)}" placeholder="8-12" aria-label="Reps"></div><div class="row small muted" style="margin-top:6px;gap:6px">Rest <select class="sel" data-in="item-rest" data-i="${i}" aria-label="Rest between sets">${restOptions(it.rest)}</select></div></div><div><button class="btn ghost sm arrow" data-a="item-move" data-i="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">${UP}</button><br><button class="btn ghost sm arrow" data-a="item-move" data-i="${i}" data-d="1" ${i === d.items.length - 1 ? 'disabled' : ''} aria-label="Move down">${DOWN}</button></div><button class="btn ghost sm" data-a="item-remove" data-i="${i}" aria-label="Remove">✕</button></div>`).join('') + `</div>`;
   b += `<button class="btn block" data-a="day-add-ex">+ Add exercises</button>`;
   if (d.items.length) b += `<button class="btn primary block" data-a="day-start">Start this workout</button>`;
   b += `<div class="row" style="margin-top:16px"><button class="btn ghost sm" data-a="rename-day">Rename day</button><button class="btn danger sm" data-a="delete-day">Delete day</button></div>`;
@@ -414,7 +426,7 @@ function viewSession() {
   const st = sessionStats(s);
   let b = `<button class="link" data-a="back-history">‹ History</button>`;
   if (ui.justSaved) b += `<div class="card" style="border-color:var(--ok)"><h3>Workout saved. Nice work!</h3></div>`;
-  b += `<div class="muted small">${fmtDate(s.start)}, ${fmtTime(s.start)}</div><div class="card row" style="margin-top:10px"><div class="stat"><b>${st.mins}</b><span class="small muted">minutes</span></div><div class="stat"><b>${st.sets}</b><span class="small muted">sets</span></div><div class="stat"><b>${st.vol.toLocaleString()}</b><span class="small muted">${s.unit} lifted</span></div></div>`;
+  b += `<div class="muted small">${fmtDate(s.start)}, ${fmtTime(s.start)}</div><div class="card row" style="margin-top:10px"><div class="stat"><b>${st.mins}</b><span class="small muted">${st.mins === 1 ? 'minute' : 'minutes'}</span></div><div class="stat"><b>${st.sets}</b><span class="small muted">sets</span></div>${st.restAvg ? `<div class="stat"><b>${fmtSecs(st.restAvg)}</b><span class="small muted">between sets</span></div>` : ''}<div class="stat"><b>${st.vol.toLocaleString()}</b><span class="small muted">${s.unit} lifted</span></div></div>`;
   let compared = 0; const ups = [];
   for (const en of s.entries) {
     const prev = prevEntry(en.exId, s.start); if (!prev) continue;
@@ -426,7 +438,7 @@ function viewSession() {
     if (up || isBest) ups.push(`<div class="item"><div class="grow"><b>${esc(exName(en.exId, en.name))}</b><div class="small">${esc(setStr(cur, s.unit))} <span class="muted">· was ${esc(setStr(p, prev.unit))} on ${esc(shortDate(prev.start))}</span></div></div><div>${up ? `<span class="badge up">${esc(up)}</span>` : ''}${isBest ? '<span class="badge best">New best</span>' : ''}</div></div>`);
   }
   if (compared) b += ups.length ? `<h2>Went up vs last time: ${ups.length} of ${compared}</h2><div class="card list">${ups.join('')}</div>` : `<div class="card small muted">No lift went up vs last time on this one.</div>`;
-  for (const en of s.entries) b += `<div class="card"><h3>${esc(exName(en.exId, en.name))}</h3>` + en.sets.map((x, k) => `<div class="small" style="margin-top:4px"><span class="muted">${k + 1}.</span> ${esc(setStr(x, s.unit))}</div>`).join('') + `</div>`;
+  for (const en of s.entries) b += `<div class="card"><h3>${esc(exName(en.exId, en.name))}</h3>` + en.sets.map((x, k) => `<div class="small" style="margin-top:4px"><span class="muted">${k + 1}.</span> ${esc(setStr(x, s.unit))}${x.rest > 0 ? ` <span class="muted">· ${fmtSecs(x.rest)} after the last set</span>` : ''}</div>`).join('') + `</div>`;
   if (s.notes) b += `<h2>Notes</h2><div class="card">${esc(s.notes)}</div>`;
   b += `<button class="btn danger block" data-a="delete-session">Delete this workout</button>`;
   return { title: s.name, right: '', body: b };
@@ -434,6 +446,11 @@ function viewSession() {
 function viewSettings() {
   let b = `<button class="link" data-a="back-today">‹ Today</button>`;
   b += `<div class="card"><h3>Weight unit</h3>${chips(['lb', 'kg'], S.unit, 'unit')}<p class="small muted">Applies to new workouts. Past workouts keep the unit they were logged in.</p></div>`;
+  b += `<div class="card"><h3>Rest timer</h3><p class="small muted">Starts when you tick a set and counts down. Exercises can have their own time in Plan.</p><div class="small">Default rest</div><div class="chips">` +
+    REST_DEFAULTS.map(n => `<button class="chip ${n === S.restDefault ? 'on' : ''}" data-a="rest-default" data-n="${n}">${fmtSecs(n)}</button>`).join('') +
+    `</div><div class="small">Beep when rest is over</div><div class="chips">` +
+    [['on', true], ['off', false]].map(([l, v]) => `<button class="chip ${S.restSound === v ? 'on' : ''}" data-a="rest-sound" data-v="${l}">${l === 'on' ? 'On' : 'Off'}</button>`).join('') +
+    `</div><p class="small muted">The beep plays while Lift Log is open on screen, and the screen stays on during rest so it can. A locked phone can't beep, and iPhones can't vibrate for web apps.</p></div>`;
   b += `<div class="card"><h3>Backup</h3><p class="small muted">Your workouts are stored only on this phone. Save a backup now and then: it goes wherever you choose, like Files or iCloud Drive. Restoring replaces everything on this phone.</p><p class="small">Last backup: <b>${S.lastBackup ? fmtDate(S.lastBackup) : 'never'}</b></p><button class="btn primary block" data-a="export">Save a backup</button><button class="btn block" data-a="import">Restore from a backup</button></div>`;
   b += `<div class="card"><h3>About</h3><p class="small muted">Lift Log ${APP_VERSION}. ${S.sessions.length} workouts, ${S.exercises.length} exercises.${ui.persisted === true ? ' Storage: kept by the browser.' : ''}</p></div>`;
   b += `<button class="btn danger block" data-a="erase">Erase everything</button>`;
@@ -455,13 +472,65 @@ function render(top) {
   renderRest();
   window.scrollTo(0, top ? 0 : y);
 }
-function renderRest() {
-  const bar = $('#restbar');
-  if (restStart && S.active && Date.now() - restStart > 15 * 60000) restStart = null;
-  const show = !!(restStart && S.active && ui.tab === 'today' && !ui.settings);
-  bar.classList.toggle('show', show);
-  if (show) $('#restText').textContent = 'Rest ' + fmtDur(Date.now() - restStart);
+// ---------- rest timer ----------
+// S.active.rest = { start, secs, ex, s, beeped }: saved with the workout, so it survives the app being
+// closed or a tab switch. It counts down from secs, beeps once at zero, then counts the time over.
+function restOptions(cur) {
+  const list = REST_CHOICES.includes(cur) || !(cur > 0) ? REST_CHOICES : [...REST_CHOICES, cur].sort((a, b) => a - b);
+  return `<option value="" ${cur > 0 ? '' : 'selected'}>Default (${fmtSecs(S.restDefault)})</option>` + list.map(n => `<option value="${n}" ${n === cur ? 'selected' : ''}>${fmtSecs(n)}</option>`).join('');
 }
+let audio = null, wake = null;
+// Called from a tap, because iOS only lets a page start sound from a user gesture.
+function audioUnlock() {
+  if (!S.restSound) return;
+  try {
+    if (navigator.audioSession) navigator.audioSession.type = 'transient';
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    if (!audio) audio = new AC();
+    if (audio.state !== 'running') audio.resume().catch(() => { });
+  } catch (e) { }
+}
+function beep() {
+  if (!audio || !S.restSound) return;
+  try {
+    const t0 = audio.currentTime + 0.05;
+    for (let i = 0; i < 3; i++) {
+      const o = audio.createOscillator(), g = audio.createGain(), t = t0 + i * 0.3;
+      o.type = 'sine'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.7, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+      o.connect(g); g.connect(audio.destination); o.start(t); o.stop(t + 0.22);
+    }
+  } catch (e) { }
+  setTimeout(audioIdle, 1500);
+}
+// Let go of the audio between rests, so the app doesn't hold on to the phone's sound.
+function audioIdle() { const r = S.active && S.active.rest; if (audio && audio.state === 'running' && !(r && !r.beeped)) audio.suspend().catch(() => { }); }
+function wakeOn() { if (wake || !navigator.wakeLock || document.visibilityState !== 'visible') return; navigator.wakeLock.request('screen').then(l => { wake = l; l.addEventListener('release', () => { if (wake === l) wake = null; }); }).catch(() => { }); }
+function wakeOff() { if (wake) { const l = wake; wake = null; l.release().catch(() => { }); } }
+function restLeft(r) { return r.secs * 1000 - (Date.now() - r.start); }
+function stopRest() { if (S.active) S.active.rest = null; wakeOff(); audioIdle(); }
+function startRest(en, k) {
+  S.active.rest = { start: Date.now(), secs: en.rest > 0 ? en.rest : S.restDefault, ex: en.exId, s: k, beeped: false };
+  audioUnlock(); wakeOn();
+}
+function renderRest() {
+  const bar = $('#restbar'), r = S.active && S.active.rest;
+  if (r && restLeft(r) < -REST_DROP) { S.active.rest = null; save(); wakeOff(); }
+  const live = S.active && S.active.rest;
+  if (live && !live.beeped && restLeft(live) <= 0) {
+    live.beeped = true; save(); wakeOff();
+    if (restLeft(live) > -5000) beep(); // back in the app long after zero: no late beep
+  }
+  bar.classList.toggle('show', !!live);
+  if (!live) return;
+  const left = restLeft(live), go = left <= 0;
+  bar.classList.toggle('go', go);
+  $('#restText').textContent = go ? 'Go! +' + fmtDur(-left) : 'Rest ' + fmtDur(left + 999);
+}
+document.addEventListener('visibilitychange', () => {
+  const r = S.active && S.active.rest;
+  if (document.visibilityState === 'visible') { if (r && !r.beeped) wakeOn(); renderRest(); }
+});
 let toastTimer = null;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600); }
 
@@ -516,22 +585,22 @@ function startWorkout(sp, d) {
   if (S.active) { toast('Finish or discard the workout in progress first'); ui.tab = 'today'; ui.settings = false; render(true); return; }
   S.active = {
     id: uid(), dayId: d ? d.id : null, splitId: sp ? sp.id : null, name: d ? d.name : 'Workout', start: Date.now(), unit: S.unit, notes: '',
-    entries: (d ? d.items : []).map(it => ({ exId: it.exId, name: exName(it.exId), target: { sets: it.sets, reps: it.reps }, sets: Array.from({ length: Math.max(1, it.sets || 3) }, () => ({ w: '', r: '', done: false })) }))
+    entries: (d ? d.items : []).map(it => ({ exId: it.exId, name: exName(it.exId), target: { sets: it.sets, reps: it.reps }, rest: it.rest > 0 ? it.rest : null, sets: Array.from({ length: Math.max(1, it.sets || 3) }, () => ({ w: '', r: '', done: false })) }))
   };
-  restStart = null; ui.tab = 'today'; ui.settings = false; save(); render(true);
+  ui.tab = 'today'; ui.settings = false; save(); render(true);
 }
 function finishWorkout() {
   const a = S.active; let skipped = 0;
   const entries = a.entries.map(en => {
     const sets = [];
-    for (const s of en.sets) { const r = parseInt(s.r, 10); if ((s.done || String(s.r).trim() !== '') && r > 0) { const w = parseW(s.w); sets.push({ w: w === undefined ? null : w, r }); } else skipped++; }
+    for (const s of en.sets) { const r = parseInt(s.r, 10); if ((s.done || String(s.r).trim() !== '') && r > 0) { const w = parseW(s.w); const x = { w: w === undefined ? null : w, r }; if (s.done && s.rest > 0) x.rest = s.rest; sets.push(x); } else skipped++; }
     return { exId: en.exId, name: exName(en.exId, en.name), sets };
   }).filter(en => en.sets.length);
   const n = entries.reduce((t, en) => t + en.sets.length, 0);
-  if (!n) { if (confirm('Nothing logged yet. Discard this workout?')) { S.active = null; restStart = null; save(); render(true); } return; }
+  if (!n) { if (confirm('Nothing logged yet. Discard this workout?')) { stopRest(); S.active = null; save(); render(true); } return; }
   if (!confirm(`Finish workout? ${n} set${n === 1 ? '' : 's'} will be saved.${skipped ? ` ${skipped} empty set${skipped === 1 ? '' : 's'} will be left out.` : ''}`)) return;
   S.sessions.push({ id: a.id, dayId: a.dayId, splitId: a.splitId, name: a.name, start: a.start, end: Date.now(), unit: a.unit, notes: (a.notes || '').trim(), entries });
-  S.active = null; restStart = null; save();
+  stopRest(); S.active = null; save();
   ui.tab = 'history'; ui.viewSession = a.id; ui.justSaved = true; render(true);
 }
 async function exportData() {
@@ -552,7 +621,7 @@ $('#importFile').addEventListener('change', async ev => {
     const p = JSON.parse(await f.text()); const d = p && p.app === 'liftlog' ? p.data : p;
     if (!valid(d)) throw new Error("that isn't a Lift Log backup");
     const when = p && p.exportedAt ? ' from ' + fmtDate(Date.parse(p.exportedAt)) : '';
-    if (confirm(`Restore the backup${when}? It has ${d.sessions.length} workouts. Everything on this phone now will be replaced.`)) { S = normalize(d); restStart = null; save(); ui = { ...ui, tab: 'today', settings: false, editDay: null, viewEx: null, viewSession: null }; render(true); toast('Backup restored'); }
+    if (confirm(`Restore the backup${when}? It has ${d.sessions.length} workouts. Everything on this phone now will be replaced.`)) { wakeOff(); S = normalize(d); save(); ui = { ...ui, tab: 'today', settings: false, editDay: null, viewEx: null, viewSession: null }; render(true); toast('Backup restored'); }
   } catch (e) { alert('Could not restore: ' + e.message); }
   finally { ev.target.value = ''; }
 });
@@ -566,16 +635,34 @@ const A = {
   'start-day'(el) { const { sp, d } = findDay({ splitId: el.dataset.split, dayId: el.dataset.day }); if (d) startWorkout(sp, d); },
   'start-empty'() { startWorkout(null, null); },
   'edit-day'(el) { ui.tab = 'plan'; ui.editDay = { splitId: el.dataset.split, dayId: el.dataset.day }; render(true); },
-  'rest-close'() { restStart = null; renderRest(); },
+  'rest-skip'() { stopRest(); save(); renderRest(); },
+  'rest-adj'(el) {
+    const a = S.active, r = a && a.rest; if (!r) return;
+    const elapsed = Math.floor((Date.now() - r.start) / 1000);
+    r.secs = Math.max(0, (r.beeped ? elapsed : r.secs) + (+el.dataset.d));
+    const en = a.entries.find(x => x.exId === r.ex); if (en && r.secs > 0) en.rest = r.secs; // the rest of this workout uses it
+    if (restLeft(r) > 0) { r.beeped = false; audioUnlock(); wakeOn(); }
+    save(); render();
+  },
+  'rest-default'(el) { S.restDefault = +el.dataset.n; save(); render(); },
+  'rest-sound'(el) { S.restSound = el.dataset.v === 'on'; if (!S.restSound) audioIdle(); save(); render(); },
   'set-done'(el) {
     const en = S.active.entries[+el.dataset.e], k = +el.dataset.s, s = en.sets[k];
-    if (s.done) { s.done = false; save(); render(); return; }
+    if (s.done) {
+      s.done = false; delete s.t; delete s.rest;
+      const r = S.active.rest; if (r && r.ex === en.exId && r.s === k) stopRest();
+      save(); render(); return;
+    }
     const h = hintFor(lastPerformance(en.exId), en, k, S.active.unit);
     if (String(s.w).trim() === '' && h.w !== '') s.w = h.w;
     if (String(s.r).trim() === '' && h.r !== '') s.r = h.r;
     if (!(parseInt(s.r, 10) > 0)) { toast('Enter your reps first'); const i = document.querySelector(`input[data-in="r"][data-e="${el.dataset.e}"][data-s="${k}"]`); if (i) i.focus(); return; }
     if (parseW(s.w) === undefined) { toast('Weight should be a number (or leave it empty for bodyweight)'); return; }
-    s.done = true; restStart = Date.now(); save(); render();
+    // Time since the previous tick in this workout (rest plus the set itself); gaps over 15 min aren't counted.
+    let prevT = 0; for (const x of S.active.entries) for (const y of x.sets) if (y !== s && y.done && y.t > prevT) prevT = y.t;
+    s.done = true; s.t = Date.now();
+    s.rest = prevT && s.t - prevT <= REST_DROP ? Math.round((s.t - prevT) / 1000) : null;
+    startRest(en, k); save(); render();
     if (newBestIndex(en, S.active.unit) === k) toast(`New best on ${exName(en.exId, en.name)}: ${s.w} ${S.active.unit} × ${s.r}!`);
   },
   'add-set'(el) { const en = S.active.entries[+el.dataset.e]; const p = en.sets[en.sets.length - 1]; en.sets.push({ w: p ? p.w : '', r: '', done: false }); save(); render(); },
@@ -591,7 +678,7 @@ const A = {
   },
   'workout-add-ex'() { const a = S.active; openPicker('Add exercises', null, a.entries.map(e => e.exId), ids => { for (const id of ids) a.entries.push({ exId: id, name: exName(id), target: null, sets: [0, 1, 2].map(() => ({ w: '', r: '', done: false })) }); }); },
   finish() { finishWorkout(); },
-  discard() { if (confirm('Discard this workout? Nothing from it will be saved.')) { S.active = null; restStart = null; save(); render(true); } },
+  discard() { if (confirm('Discard this workout? Nothing from it will be saved.')) { stopRest(); S.active = null; save(); render(true); } },
   'new-split'() { openNewSplit(); },
   tpl(el) { sheet.tpl = el.dataset.t; document.querySelectorAll('#tplChips .chip').forEach(c => c.classList.toggle('on', c.dataset.t === sheet.tpl)); },
   'create-split'() {
@@ -644,7 +731,7 @@ const A = {
   unit(el) { S.unit = el.dataset.g; save(); render(); },
   export() { exportData(); },
   import() { $('#importFile').click(); },
-  erase() { if (confirm('Erase everything: splits, workouts and your own exercises?') && confirm('Are you sure? This cannot be undone unless you have a backup.')) { S = freshState(); restStart = null; save(); ui.settings = false; render(true); toast('Erased'); } },
+  erase() { if (confirm('Erase everything: splits, workouts and your own exercises?') && confirm('Are you sure? This cannot be undone unless you have a backup.')) { wakeOff(); S = freshState(); save(); ui.settings = false; render(true); toast('Erased'); } },
   'sheet-close'() { closeSheet(); },
   'sheet-save'() { const v = $('#sheetText').value.trim(); if (!v) { toast('Please enter a name'); return; } const f = sheet.onSave; closeSheet(); f(v); save(); render(true); },
   'menu-pick'(el) { const it = sheet.items[+el.dataset.i]; closeSheet(); const jump = it.run(); save(); render(!!jump); },
@@ -665,6 +752,7 @@ document.addEventListener('input', ev => {
   if (k === 'w' || k === 'r') { const en = S.active && S.active.entries[+el.dataset.e]; const s = en && en.sets[+el.dataset.s]; if (s) { s[k] = el.value; save(); } return; }
   if (k === 'notes') { if (S.active) { S.active.notes = el.value; save(); } return; }
   if (k === 'item-sets' || k === 'item-reps') { const { d } = findDay(ui.editDay); const it = d && d.items[+el.dataset.i]; if (!it) return; if (k === 'item-reps') it.reps = el.value.slice(0, 12); else { const n = parseInt(el.value, 10); if (n >= 1 && n <= 20) it.sets = n; } save(); return; }
+  if (k === 'item-rest') { setItemRest(el); return; }
   if (k === 'ex-search') { ui.exSearch = el.value; $('#exlist').innerHTML = exListHtml(); return; }
   if (k === 'pick-search') { sheet.search = el.value; drawPicker(); }
 });
@@ -676,7 +764,8 @@ document.addEventListener('keydown', ev => {
   if (el.dataset && el.dataset.in === 'r') { ev.preventDefault(); el.blur(); }
 });
 // Leaving the item-sets box blank or invalid snaps it back to the saved value.
-document.addEventListener('change', ev => { if (ev.target.dataset && ev.target.dataset.in === 'item-sets') render(); });
+document.addEventListener('change', ev => { const k = ev.target.dataset && ev.target.dataset.in; if (k === 'item-sets') render(); if (k === 'item-rest') setItemRest(ev.target); });
+function setItemRest(el) { const { d } = findDay(ui.editDay); const it = d && d.items[+el.dataset.i]; if (!it) return; const n = parseInt(el.value, 10); if (n > 0) it.rest = n; else delete it.rest; save(); }
 
 setInterval(() => { const el = $('#elapsed'); if (el && S.active) el.textContent = fmtDur(Date.now() - S.active.start); renderRest(); }, 1000);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().then(p => { ui.persisted = p; }).catch(() => { });
