@@ -15,8 +15,8 @@
 <title>Lift Log</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-:root{--bg:#f4f4f7;--card:#fff;--text:#17171c;--muted:#6b6b76;--line:#e4e4ea;--accent:#6c4cf1;--soft:#efeafe;--danger:#d93a3a;--ok:#1f9d55;--okSoft:#e3f6ea}
-@media (prefers-color-scheme:dark){:root{--bg:#0f0f13;--card:#1b1b22;--text:#f2f2f5;--muted:#a0a0ab;--line:#2c2c36;--accent:#8b72ff;--soft:#2a2440;--danger:#ff6b6b;--ok:#2fb86a;--okSoft:#173325}}
+:root{--bg:#f4f4f7;--card:#fff;--text:#17171c;--muted:#6b6b76;--line:#e4e4ea;--accent:#6c4cf1;--soft:#efeafe;--danger:#d93a3a;--ok:#1f9d55;--okSoft:#e3f6ea;--gold:#8a6100;--goldSoft:#fff1c2}
+@media (prefers-color-scheme:dark){:root{--bg:#0f0f13;--card:#1b1b22;--text:#f2f2f5;--muted:#a0a0ab;--line:#2c2c36;--accent:#8b72ff;--soft:#2a2440;--danger:#ff6b6b;--ok:#2fb86a;--okSoft:#173325;--gold:#f5c542;--goldSoft:#3a3010}}
 html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 button{font:inherit;cursor:pointer}
 button:disabled{opacity:.35}
@@ -82,6 +82,16 @@ tr.done .check{background:var(--ok);border-color:var(--ok);color:#fff}
 .toast.show{opacity:1}
 .stat{flex:1;text-align:center}.stat b{display:block;font-size:20px}
 .arrow{min-width:44px;padding:4px 10px;display:inline-grid;place-items:center}
+.badge{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:2px 7px;margin:0 6px 0 0;white-space:nowrap}
+.badge.up{background:var(--okSoft);color:var(--ok)}
+.badge.best{background:var(--goldSoft);color:var(--gold)}
+.badge.down{color:var(--muted);border:1px solid var(--line);font-weight:600}
+tr.gain td{padding-top:0;text-align:left}
+.chart{width:100%;height:auto;display:block;margin-top:6px}
+.chart .ln{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}
+.chart .pt{fill:var(--accent)}
+.chart .grid{stroke:var(--line)}
+.chart text{fill:var(--muted);font-size:11px}
 </style>
 </head>
 <body>
@@ -100,7 +110,7 @@ tr.done .check{background:var(--ok);border-color:var(--ok);color:#fff}
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script>
 'use strict';
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 const KEY = 'liftlog.v1';
 const GROUPS = ['Push', 'Pull', 'Legs', 'Core'];
 const DEFAULTS = {
@@ -177,6 +187,74 @@ function sessionStats(s) {
   for (const en of s.entries) for (const x of en.sets) { sets++; vol += (x.w || 0) * x.r; }
   return { sets, vol: Math.round(vol), mins: Math.max(1, Math.round((s.end - s.start) / 60000)) };
 }
+// ---------- progress ----------
+const shortDate = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+// Top set of a list: the heaviest (compared in lb), ties go to more reps; a weighted set beats a bodyweight one;
+// bodyweight-only lists compare by reps.
+function topSet(sets, unit) {
+  let top = null;
+  for (const x of sets) {
+    const lb = x.w == null ? null : conv(x.w, unit, 'lb');
+    if (!top) top = { w: x.w, r: x.r, lb, unit };
+    else if (lb != null && (top.lb == null || lb > top.lb || (lb === top.lb && x.r > top.r))) top = { w: x.w, r: x.r, lb, unit };
+    else if (lb == null && top.lb == null && x.r > top.r) top = { w: x.w, r: x.r, lb, unit };
+  }
+  return top;
+}
+// Progressive overload: more weight, or the same weight for more reps. Returns "+5 lb", "+2 reps" or ''.
+function beatLabel(cur, curUnit, prev, prevUnit) {
+  if (!cur || !prev) return '';
+  const reps = n => '+' + n + ' rep' + (n === 1 ? '' : 's');
+  if (cur.w == null || prev.w == null) return (cur.w == null && prev.w == null && cur.r > prev.r) ? reps(cur.r - prev.r) : '';
+  const pw = conv(prev.w, prevUnit, curUnit);
+  if (cur.w > pw) return '+' + fmtNum(cur.w - pw) + ' ' + curUnit;
+  if (cur.w === pw && cur.r > prev.r) return reps(cur.r - prev.r);
+  return '';
+}
+// Change between two top sets, for history rows: up (green), down or same (grey).
+function changeLabel(cur, curUnit, prev, prevUnit) {
+  const p = { w: prev.w == null ? null : conv(prev.w, prevUnit, curUnit), r: prev.r };
+  const up = beatLabel(cur, curUnit, p, curUnit); if (up) return { t: up, cls: 'up' };
+  const down = beatLabel(p, curUnit, cur, curUnit); if (down) return { t: '−' + down.slice(1), cls: 'down' };
+  return (cur.w == null) === (p.w == null) ? { t: 'same', cls: 'down' } : null;
+}
+// The most recent session with this exercise before a time, and the best weighted set before it.
+function prevEntry(exId, before) {
+  let hit = null;
+  for (const s of S.sessions) { if (s.start >= before) continue; const en = s.entries.find(e => e.exId === exId); if (en && en.sets.length && (!hit || s.start > hit.start)) hit = { start: s.start, unit: s.unit, sets: en.sets }; }
+  return hit;
+}
+function bestBefore(exId, before) {
+  let best = null;
+  for (const s of S.sessions) {
+    if (s.start >= before) continue;
+    const en = s.entries.find(e => e.exId === exId); if (!en) continue;
+    const t = topSet(en.sets.filter(x => x.w != null), s.unit);
+    if (t && (!best || t.lb > best.lb || (t.lb === best.lb && t.r > best.r))) best = t;
+  }
+  return best;
+}
+// In a workout in progress: which ticked set (if any) is a new all-time best.
+function newBestIndex(en, unit) {
+  const prior = bestBefore(en.exId, Infinity); if (!prior) return -1;
+  let idx = -1, top = null;
+  en.sets.forEach((s, k) => { if (!s.done) return; const w = parseW(s.w); if (w == null) return; const lb = conv(w, unit, 'lb'), r = parseInt(s.r, 10); if (!top || lb > top.lb || (lb === top.lb && r > top.r)) { top = { lb, r }; idx = k; } });
+  return top && (top.lb > prior.lb || (top.lb === prior.lb && top.r > prior.r)) ? idx : -1;
+}
+function chartSvg(pts, label) {
+  if (pts.length < 2) return `<div class="card small muted">The progress chart appears once you've done this twice.</div>`;
+  const W = 320, H = 130, L = 36, R = 12, T = 12, B = 24;
+  let lo = Math.min(...pts.map(p => p.v)), hi = Math.max(...pts.map(p => p.v));
+  if (hi === lo) { lo = Math.max(0, lo - 1); hi = hi + 1; }
+  const x = i => L + i * (W - L - R) / (pts.length - 1), y = v => T + (hi - v) * (H - T - B) / (hi - lo);
+  return `<div class="card"><div class="small muted">Top set per session (${esc(label)})</div><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Top set per session, from ${fmtNum(pts[0].v)} to ${fmtNum(pts[pts.length - 1].v)} ${esc(label)}">` +
+    `<line class="grid" x1="${L}" y1="${T}" x2="${W - R}" y2="${T}"/><line class="grid" x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}"/>` +
+    `<text x="${L - 6}" y="${T + 4}" text-anchor="end">${fmtNum(hi)}</text><text x="${L - 6}" y="${H - B + 4}" text-anchor="end">${fmtNum(lo)}</text>` +
+    `<polyline class="ln" points="${pts.map((p, i) => x(i).toFixed(1) + ',' + y(p.v).toFixed(1)).join(' ')}"/>` +
+    pts.map((p, i) => `<circle class="pt" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="${i === pts.length - 1 ? 4.5 : 3}"/>`).join('') +
+    `<text x="${L}" y="${H - 6}">${esc(shortDate(pts[0].t))}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${esc(shortDate(pts[pts.length - 1].t))}</text></svg></div>`;
+}
+
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
 const backupDue = () => S.sessions.length >= 3 && (!S.lastBackup || Date.now() - S.lastBackup > 21 * 864e5);
@@ -221,11 +299,19 @@ function viewWorkout() {
     const last = lastPerformance(en.exId);
     const t = en.target;
     const goal = t ? (t.reps ? `Goal ${t.sets} × ${esc(t.reps)} · ` : `Goal ${t.sets} sets · `) : '';
-    b += `<div class="card"><div class="row"><div class="grow"><h3>${esc(exName(en.exId, en.name))}</h3><div class="small muted">${goal}${last ? 'Last time: ' + esc(setsSummary(last.sets, last.unit)) : 'First time'}</div></div><button class="btn ghost sm" data-a="ex-menu" data-e="${i}" aria-label="Exercise options">•••</button></div>`;
+    const best = bestBefore(en.exId, Infinity);
+    const lastLine = last ? `Last time (${esc(shortDate(last.start))}): ${esc(setsSummary(last.sets, last.unit))}${best ? ` · Best ${esc(fmtNum(conv(best.w, best.unit, a.unit)) + ' ' + a.unit)} × ${best.r}` : ''}` : 'First time';
+    b += `<div class="card"><div class="row"><div class="grow"><h3>${esc(exName(en.exId, en.name))}</h3><div class="small muted">${goal}${lastLine}</div></div><button class="btn ghost sm" data-a="ex-menu" data-e="${i}" aria-label="Exercise options">•••</button></div>`;
     b += `<table class="sets"><tr><th>Set</th><th>${a.unit}</th><th>Reps</th><th></th></tr>`;
+    const nb = newBestIndex(en, a.unit);
     en.sets.forEach((s, k) => {
       const h = hintFor(last, en, k, a.unit);
       b += `<tr class="${s.done ? 'done' : ''}"><td class="setno">${k + 1}</td><td><input inputmode="decimal" enterkeyhint="next" data-in="w" data-e="${i}" data-s="${k}" value="${esc(s.w)}" placeholder="${esc(h.w)}" aria-label="Weight, set ${k + 1}"></td><td><input inputmode="numeric" enterkeyhint="done" data-in="r" data-e="${i}" data-s="${k}" value="${esc(s.r)}" placeholder="${esc(h.r)}" aria-label="Reps, set ${k + 1}"></td><td><button class="check" data-a="set-done" data-e="${i}" data-s="${k}" aria-label="Set ${k + 1} done">✓</button></td></tr>`;
+      if (s.done) {
+        const w = parseW(s.w);
+        const up = last && last.sets[k] ? beatLabel({ w: w === undefined ? null : w, r: parseInt(s.r, 10) }, a.unit, last.sets[k], last.unit) : '';
+        if (up || nb === k) b += `<tr class="gain"><td></td><td colspan="3">${up ? `<span class="badge up">${esc(up)} vs last time</span>` : ''}${nb === k ? '<span class="badge best">New best</span>' : ''}</td></tr>`;
+      }
     });
     b += `</table><div class="row" style="margin-top:6px"><button class="btn sm" data-a="add-set" data-e="${i}">+ Add set</button>${en.sets.length ? `<button class="btn ghost sm" data-a="remove-set" data-e="${i}">Remove last set</button>` : ''}</div></div>`;
   });
@@ -291,8 +377,18 @@ function viewExercise() {
   let best = null;
   for (const { s, en } of hist) for (const x of en.sets) if (x.w != null) { const lb = conv(x.w, s.unit, 'lb'); if (!best || lb > best.lb || (lb === best.lb && x.r > best.r)) best = { lb, w: x.w, r: x.r, unit: s.unit }; }
   let b = `<button class="link" data-a="back-ex">‹ Exercises</button><div class="muted small">${esc(ex.group)}${ex.custom ? ' · added by you' : ''}</div>`;
-  b += `<div class="card row" style="margin-top:10px"><div class="stat"><b>${hist.length}</b><span class="small muted">times done</span></div><div class="stat"><b>${best ? esc(fmtNum(best.w) + ' ' + best.unit) : '–'}</b><span class="small muted">${best ? 'heaviest, × ' + best.r : 'heaviest'}</span></div><div class="stat"><b>${hist.length ? new Date(hist[0].s.start).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '–'}</b><span class="small muted">last done</span></div></div>`;
-  b += hist.length ? `<h2>History</h2><div class="card list">` + hist.map(({ s, en }) => `<div class="item"><div class="grow"><b>${fmtDate(s.start)}</b> <span class="small muted">${esc(s.name)}</span><div class="small">${esc(setsSummary(en.sets, s.unit))}</div></div></div>`).join('') + `</div>` : `<div class="card muted">Not done yet.</div>`;
+  b += `<div class="card row" style="margin-top:10px"><div class="stat"><b>${hist.length}</b><span class="small muted">times done</span></div><div class="stat"><b>${best ? esc(fmtNum(conv(best.w, best.unit, S.unit)) + ' ' + S.unit) : '–'}</b><span class="small muted">${best ? 'heaviest, × ' + best.r : 'heaviest'}</span></div><div class="stat"><b>${hist.length ? new Date(hist[0].s.start).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '–'}</b><span class="small muted">last done</span></div></div>`;
+  const chrono = hist.slice().reverse().slice(-20);
+  const weighted = chrono.some(({ en }) => en.sets.some(x => x.w != null));
+  if (hist.length) b += `<h2>Progress</h2>` + chartSvg(chrono.map(({ s, en }) => {
+    const t = topSet(weighted ? en.sets.filter(x => x.w != null) : en.sets, s.unit);
+    return t ? { t: s.start, v: weighted ? conv(t.w, s.unit, S.unit) : t.r } : null;
+  }).filter(Boolean), weighted ? S.unit : 'reps');
+  b += hist.length ? `<h2>History</h2><div class="card list">` + hist.map(({ s, en }, i) => {
+    const older = hist[i + 1];
+    const ch = older ? changeLabel(topSet(en.sets, s.unit), s.unit, topSet(older.en.sets, older.s.unit), older.s.unit) : null;
+    return `<div class="item"><div class="grow"><b>${fmtDate(s.start)}</b> <span class="small muted">${esc(s.name)}</span><div class="small">${esc(setsSummary(en.sets, s.unit))}</div></div>${ch ? `<span class="badge ${ch.cls}">${esc(ch.t)}</span>` : ''}</div>`;
+  }).join('') + `</div>` : `<div class="card muted">Not done yet.</div>`;
   if (ex.custom) b += `<div class="row wrap" style="margin-top:12px"><button class="btn sm" data-a="rename-ex">Rename</button><button class="btn sm" data-a="regroup-ex">Change group</button><button class="btn danger sm" data-a="delete-ex">Delete</button></div>`;
   return { title: ex.name, right: '', body: b };
 }
@@ -319,6 +415,17 @@ function viewSession() {
   let b = `<button class="link" data-a="back-history">‹ History</button>`;
   if (ui.justSaved) b += `<div class="card" style="border-color:var(--ok)"><h3>Workout saved. Nice work!</h3></div>`;
   b += `<div class="muted small">${fmtDate(s.start)}, ${fmtTime(s.start)}</div><div class="card row" style="margin-top:10px"><div class="stat"><b>${st.mins}</b><span class="small muted">minutes</span></div><div class="stat"><b>${st.sets}</b><span class="small muted">sets</span></div><div class="stat"><b>${st.vol.toLocaleString()}</b><span class="small muted">${s.unit} lifted</span></div></div>`;
+  let compared = 0; const ups = [];
+  for (const en of s.entries) {
+    const prev = prevEntry(en.exId, s.start); if (!prev) continue;
+    compared++;
+    const cur = topSet(en.sets, s.unit), p = topSet(prev.sets, prev.unit);
+    const up = beatLabel(cur, s.unit, p, prev.unit);
+    const best = bestBefore(en.exId, s.start);
+    const isBest = cur && cur.lb != null && best && (cur.lb > best.lb || (cur.lb === best.lb && cur.r > best.r));
+    if (up || isBest) ups.push(`<div class="item"><div class="grow"><b>${esc(exName(en.exId, en.name))}</b><div class="small">${esc(setStr(cur, s.unit))} <span class="muted">· was ${esc(setStr(p, prev.unit))} on ${esc(shortDate(prev.start))}</span></div></div><div>${up ? `<span class="badge up">${esc(up)}</span>` : ''}${isBest ? '<span class="badge best">New best</span>' : ''}</div></div>`);
+  }
+  if (compared) b += ups.length ? `<h2>Went up vs last time: ${ups.length} of ${compared}</h2><div class="card list">${ups.join('')}</div>` : `<div class="card small muted">No lift went up vs last time on this one.</div>`;
   for (const en of s.entries) b += `<div class="card"><h3>${esc(exName(en.exId, en.name))}</h3>` + en.sets.map((x, k) => `<div class="small" style="margin-top:4px"><span class="muted">${k + 1}.</span> ${esc(setStr(x, s.unit))}</div>`).join('') + `</div>`;
   if (s.notes) b += `<h2>Notes</h2><div class="card">${esc(s.notes)}</div>`;
   b += `<button class="btn danger block" data-a="delete-session">Delete this workout</button>`;
@@ -469,6 +576,7 @@ const A = {
     if (!(parseInt(s.r, 10) > 0)) { toast('Enter your reps first'); const i = document.querySelector(`input[data-in="r"][data-e="${el.dataset.e}"][data-s="${k}"]`); if (i) i.focus(); return; }
     if (parseW(s.w) === undefined) { toast('Weight should be a number (or leave it empty for bodyweight)'); return; }
     s.done = true; restStart = Date.now(); save(); render();
+    if (newBestIndex(en, S.active.unit) === k) toast(`New best on ${exName(en.exId, en.name)}: ${s.w} ${S.active.unit} × ${s.r}!`);
   },
   'add-set'(el) { const en = S.active.entries[+el.dataset.e]; const p = en.sets[en.sets.length - 1]; en.sets.push({ w: p ? p.w : '', r: '', done: false }); save(); render(); },
   'remove-set'(el) { const en = S.active.entries[+el.dataset.e]; const p = en.sets[en.sets.length - 1]; if (p && p.done && !confirm('Remove the last set? It is already ticked.')) return; en.sets.pop(); save(); render(); },
