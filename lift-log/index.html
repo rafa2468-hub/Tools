@@ -67,6 +67,10 @@ tr.done .check{background:var(--ok);border-color:var(--ok);color:#fff}
 .restbar .rb{display:flex;gap:2px}
 .restbar button{background:none;border:0;color:inherit;font-size:15px;font-weight:600;padding:8px 10px;min-width:44px}
 #restText{font-variant-numeric:tabular-nums}
+.flash{position:fixed;inset:0;z-index:30;pointer-events:none;display:none;align-items:center;justify-content:center;background:var(--ok);color:#fff;font-size:88px;font-weight:800;letter-spacing:-1px}
+.flash.show{display:flex;animation:flash 2.4s ease-out forwards}
+@keyframes flash{0%,28%,56%{opacity:.95}14%,42%{opacity:.4}100%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.flash.show{animation:fade 2.4s ease-in forwards}@keyframes fade{0%,60%{opacity:.95}100%{opacity:0}}}
 .sel{font:inherit;font-size:16px;padding:7px 6px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text)}
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10;display:none}
 .scrim.show{display:block}
@@ -102,6 +106,7 @@ tr.gain td{padding-top:0;text-align:left}
 <header class="top"><h1 id="title">Today</h1><div id="right"></div></header>
 <main id="view"></main>
 <div class="restbar" id="restbar" role="timer"><span id="restText">Rest 0:00</span><span class="rb"><button data-a="rest-adj" data-d="-15" aria-label="15 seconds less rest">−15</button><button data-a="rest-adj" data-d="15" aria-label="15 seconds more rest">+15</button><button data-a="rest-skip" aria-label="Skip the rest">Skip</button></span></div>
+<div class="flash" id="restFlash" aria-hidden="true">Go!</div>
 <nav class="tabs">
   <button data-a="tab" data-tab="today"><span class="dot" id="activeDot" style="display:none"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 7v10M3 9v6M18 7v10M21 9v6M6 12h12"/></svg>Today</button>
   <button data-a="tab" data-tab="plan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>Plan</button>
@@ -114,7 +119,7 @@ tr.gain td{padding-top:0;text-align:left}
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script>
 'use strict';
-const APP_VERSION = '1.0.4';
+const APP_VERSION = '1.0.5';
 const KEY = 'liftlog.v1';
 const GROUPS = ['Push', 'Pull', 'Legs', 'Core'];
 const DEFAULTS = {
@@ -450,7 +455,7 @@ function viewSettings() {
     REST_DEFAULTS.map(n => `<button class="chip ${n === S.restDefault ? 'on' : ''}" data-a="rest-default" data-n="${n}">${fmtSecs(n)}</button>`).join('') +
     `</div><div class="small">Beep when rest is over</div><div class="chips">` +
     [['on', true], ['off', false]].map(([l, v]) => `<button class="chip ${S.restSound === v ? 'on' : ''}" data-a="rest-sound" data-v="${l}">${l === 'on' ? 'On' : 'Off'}</button>`).join('') +
-    `</div><p class="small muted">The beep plays while Lift Log is open on screen, and the screen stays on during rest so it can. A locked phone can't beep, and iPhones can't vibrate for web apps.</p></div>`;
+    `</div><p class="small muted">The beep plays while Lift Log is open on screen, and the screen stays on during rest so it can. Silent mode mutes the beep, so the screen also flashes green when rest is over. A locked phone can't beep or flash, and iPhones can't vibrate for web apps.</p></div>`;
   b += `<div class="card"><h3>Backup</h3><p class="small muted">Your workouts are stored only on this phone. Save a backup now and then: it goes wherever you choose, like Files or iCloud Drive. Restoring replaces everything on this phone.</p><p class="small">Last backup: <b>${S.lastBackup ? fmtDate(S.lastBackup) : 'never'}</b></p><button class="btn primary block" data-a="export">Save a backup</button><button class="btn block" data-a="import">Restore from a backup</button></div>`;
   b += `<div class="card"><h3>About</h3><p class="small muted">Lift Log ${APP_VERSION}. ${S.sessions.length} workouts, ${S.exercises.length} exercises.${ui.persisted === true ? ' Storage: kept by the browser.' : ''}</p></div>`;
   b += `<button class="btn danger block" data-a="erase">Erase everything</button>`;
@@ -505,6 +510,12 @@ function beep() {
 }
 // Let go of the audio between rests, so the app doesn't hold on to the phone's sound.
 function audioIdle() { const r = S.active && S.active.rest; if (audio && audio.state === 'running' && !(r && !r.beeped)) audio.suspend().catch(() => { }); }
+// Silent mode mutes the beep (iPhone web audio follows the silent switch), so the whole screen flashes too.
+let flashTimer = null;
+function restFlash() {
+  const f = $('#restFlash'); f.classList.remove('show'); void f.offsetWidth; f.classList.add('show');
+  clearTimeout(flashTimer); flashTimer = setTimeout(() => f.classList.remove('show'), 2500);
+}
 function wakeOn() { if (wake || !navigator.wakeLock || document.visibilityState !== 'visible') return; navigator.wakeLock.request('screen').then(l => { wake = l; l.addEventListener('release', () => { if (wake === l) wake = null; }); }).catch(() => { }); }
 function wakeOff() { if (wake) { const l = wake; wake = null; l.release().catch(() => { }); } }
 function restLeft(r) { return r.secs * 1000 - (Date.now() - r.start); }
@@ -519,7 +530,7 @@ function renderRest() {
   const live = S.active && S.active.rest;
   if (live && !live.beeped && restLeft(live) <= 0) {
     live.beeped = true; save(); wakeOff();
-    if (restLeft(live) > -5000) beep(); // back in the app long after zero: no late beep
+    if (restLeft(live) > -5000) { beep(); restFlash(); } // back in the app long after zero: no late alert
   }
   bar.classList.toggle('show', !!live);
   if (!live) return;
