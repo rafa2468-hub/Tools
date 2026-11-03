@@ -119,7 +119,7 @@ tr.gain td{padding-top:0;text-align:left}
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script>
 'use strict';
-const APP_VERSION = '1.0.5';
+const APP_VERSION = '1.0.6';
 const KEY = 'liftlog.v1';
 const GROUPS = ['Push', 'Pull', 'Legs', 'Core'];
 const DEFAULTS = {
@@ -457,7 +457,7 @@ function viewSettings() {
     [['on', true], ['off', false]].map(([l, v]) => `<button class="chip ${S.restSound === v ? 'on' : ''}" data-a="rest-sound" data-v="${l}">${l === 'on' ? 'On' : 'Off'}</button>`).join('') +
     `</div><p class="small muted">The beep plays while Lift Log is open on screen, and the screen stays on during rest so it can. Silent mode mutes the beep, so the screen also flashes green when rest is over. A locked phone can't beep or flash, and iPhones can't vibrate for web apps.</p></div>`;
   b += `<div class="card"><h3>Backup</h3><p class="small muted">Your workouts are stored only on this phone. Save a backup now and then: it goes wherever you choose, like Files or iCloud Drive. Restoring replaces everything on this phone.</p><p class="small">Last backup: <b>${S.lastBackup ? fmtDate(S.lastBackup) : 'never'}</b></p><button class="btn primary block" data-a="export">Save a backup</button><button class="btn block" data-a="import">Restore from a backup</button></div>`;
-  b += `<div class="card"><h3>About</h3><p class="small muted">Lift Log ${APP_VERSION}. ${S.sessions.length} workouts, ${S.exercises.length} exercises.${ui.persisted === true ? ' Storage: kept by the browser.' : ''}</p></div>`;
+  b += `<div class="card"><h3>About</h3><p class="small muted">Lift Log ${APP_VERSION}. ${S.sessions.length} workout${S.sessions.length === 1 ? '' : 's'}, ${S.exercises.length} exercise${S.exercises.length === 1 ? '' : 's'}.${ui.persisted === true ? ' Storage: kept by the browser.' : ''}</p></div>`;
   b += `<button class="btn danger block" data-a="erase">Erase everything</button>`;
   return { title: 'Settings', right: '', body: b };
 }
@@ -632,7 +632,7 @@ $('#importFile').addEventListener('change', async ev => {
     const p = JSON.parse(await f.text()); const d = p && p.app === 'liftlog' ? p.data : p;
     if (!valid(d)) throw new Error("that isn't a Lift Log backup");
     const when = p && p.exportedAt ? ' from ' + fmtDate(Date.parse(p.exportedAt)) : '';
-    if (confirm(`Restore the backup${when}? It has ${d.sessions.length} workouts. Everything on this phone now will be replaced.`)) { wakeOff(); S = normalize(d); save(); ui = { ...ui, tab: 'today', settings: false, editDay: null, viewEx: null, viewSession: null }; render(true); toast('Backup restored'); }
+    if (confirm(`Restore the backup${when}? It has ${d.sessions.length} workout${d.sessions.length === 1 ? '' : 's'}. Everything on this phone now will be replaced.`)) { wakeOff(); S = normalize(d); save(); ui = { ...ui, tab: 'today', settings: false, editDay: null, viewEx: null, viewSession: null }; render(true); toast('Backup restored'); }
   } catch (e) { alert('Could not restore: ' + e.message); }
   finally { ev.target.value = ''; }
 });
