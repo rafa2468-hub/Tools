@@ -70,6 +70,8 @@ const server = http.createServer((req, res) => {
   let push = st.splits[0].days[0];
   ok(push.items.length === 3, 'Push day has 3 exercises', push.items);
   ok(st.exercises.some(e => e.custom && e.name === 'Cable y raise' && e.group === 'Push'), 'typed exercise saved as her own');
+  // 1.0.7 fills a suggested range on every pick; clear her own exercise's so "no reps and no hint" is still tested
+  await page.locator('[data-in="item-reps"]').nth(2).fill('');
   await page.locator('[data-in="item-reps"]').first().fill('8-12');
   await page.locator('[data-a="item-move"][data-i="0"][data-d="1"]').click();
   st = await state(); push = st.splits[0].days[0];

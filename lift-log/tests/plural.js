@@ -17,7 +17,8 @@ const server = http.createServer((req, res) => {
 });
 const BENCH = 'd-barbell-bench-press', FLY = 'd-cable-fly', DAY = 864e5, now = Date.now();
 const seed = {
-  v: 1, unit: 'lb', exercises: [], activeSplitId: 'sp', lastBackup: now, hideInstall: true,
+  // repsV: 1 keeps the blank Reps targets blank (1.0.7 fills them once otherwise), so "Goal N sets" is still shown
+  v: 1, unit: 'lb', exercises: [], activeSplitId: 'sp', lastBackup: now, hideInstall: true, repsV: 1,
   splits: [{ id: 'sp', name: 'PPL', days: [{ id: 'push', name: 'Push', items: [{ exId: BENCH, sets: 1, reps: '' }, { exId: FLY, sets: 2, reps: '' }] }] }],
   sessions: [
     { id: 'one', dayId: 'push', splitId: 'sp', name: 'Push', start: now - 2 * DAY, end: now - 2 * DAY + 60e3, unit: 'lb', notes: '', entries: [{ exId: BENCH, name: 'Barbell Bench Press', sets: [{ w: 95, r: 8 }] }] },
