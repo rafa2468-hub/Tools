@@ -102,6 +102,16 @@ tr.gain td{padding-top:0;text-align:left}
 .chart text{fill:var(--muted);font-size:11px}
 .rng{color:var(--accent);font-weight:700}
 .nudge{margin-top:8px;font-size:13px;font-weight:600;background:var(--goldSoft);color:var(--gold);border-radius:8px;padding:6px 10px}
+.wbox{position:relative}
+.sets .wbox input{padding-right:34px}
+.calcbtn{position:absolute;top:0;right:0;bottom:0;width:36px;display:grid;place-items:center;background:none;border:0;padding:0;color:var(--accent)}
+.calc-total{text-align:center;font-size:20px;font-weight:700;color:var(--muted);margin-top:2px}
+.calc-total b{font-size:44px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.calc-break{text-align:center;min-height:18px}
+.plates{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
+.plate{position:relative;min-height:56px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:20px;font-weight:700}
+.plate.on{border-color:var(--accent);background:var(--soft)}
+.plate .ct{position:absolute;top:4px;right:7px;font-size:13px;color:var(--accent)}
 </style>
 </head>
 <body>
@@ -121,7 +131,7 @@ tr.gain td{padding-top:0;text-align:left}
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script>
 'use strict';
-const APP_VERSION = '1.0.7';
+const APP_VERSION = '1.0.8';
 const KEY = 'liftlog.v1';
 const GROUPS = ['Push', 'Pull', 'Legs', 'Core'];
 const DEFAULTS = {
@@ -134,6 +144,7 @@ const TEMPLATES = [['ppl', 'Push / Pull / Legs', ['Push', 'Pull', 'Legs']], ['ul
 
 const UP = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>';
 const DOWN = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+const CALC_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 7h6M9 12h.01M12 12h.01M15 12h.01M9 16h.01M12 16h.01M15 16h.01"/></svg>';
 const $ = s => document.querySelector(s);
 const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -156,7 +167,7 @@ function defaultExercises() { const out = []; for (const g of GROUPS) for (const
 const REST_DEFAULTS = [60, 90, 120, 180];
 const REST_CHOICES = [30, 45, 60, 75, 90, 120, 150, 180, 240, 300];
 const REST_DROP = 15 * 60000; // a rest timer left running this long past its target is dropped
-function freshState() { return { v: 1, unit: 'lb', exercises: defaultExercises(), splits: [], activeSplitId: null, sessions: [], active: null, lastBackup: null, hideInstall: false, restDefault: 90, restSound: true, repsV: 1 }; }
+function freshState() { return { v: 1, unit: 'lb', exercises: defaultExercises(), splits: [], activeSplitId: null, sessions: [], active: null, lastBackup: null, hideInstall: false, restDefault: 90, restSound: true, repsV: 1, calc: {} }; }
 function valid(d) { return !!d && d.v === 1 && Array.isArray(d.exercises) && Array.isArray(d.splits) && Array.isArray(d.sessions); }
 function normalize(d) {
   const have = new Set(d.exercises.map(e => e.id));
@@ -165,6 +176,7 @@ function normalize(d) {
   if (d.active === undefined) d.active = null;
   if (!(d.restDefault > 0)) d.restDefault = 90;
   d.restSound = d.restSound !== false;
+  if (!d.calc || typeof d.calc !== 'object' || Array.isArray(d.calc)) d.calc = {};
   if (!d.repsV) { // 1.0.7, once: blank rep targets get the suggested range (clearing one later sticks)
     for (const sp of d.splits) for (const day of sp.days || []) for (const it of day.items || []) if (blank(it.reps)) it.reps = repsFor(it.exId);
     if (d.active) for (const en of d.active.entries || []) {
@@ -350,7 +362,8 @@ function viewWorkout() {
     const nb = newBestIndex(en, a.unit);
     en.sets.forEach((s, k) => {
       const h = hintFor(last, en, k, a.unit);
-      b += `<tr class="${s.done ? 'done' : ''}"><td class="setno">${k + 1}</td><td><input inputmode="decimal" enterkeyhint="next" data-in="w" data-e="${i}" data-s="${k}" value="${esc(s.w)}" placeholder="${esc(h.w)}" aria-label="Weight, set ${k + 1}"></td><td><input inputmode="numeric" enterkeyhint="done" data-in="r" data-e="${i}" data-s="${k}" value="${esc(s.r)}" placeholder="${esc(h.r)}" aria-label="Reps, set ${k + 1}"></td><td><button class="check" data-a="set-done" data-e="${i}" data-s="${k}" aria-label="Set ${k + 1} done">✓</button></td></tr>`;
+      const wIn = `<input inputmode="decimal" enterkeyhint="next" data-in="w" data-e="${i}" data-s="${k}" value="${esc(s.w)}" placeholder="${esc(h.w)}" aria-label="Weight, set ${k + 1}">`;
+      b += `<tr class="${s.done ? 'done' : ''}"><td class="setno">${k + 1}</td><td>${s.done ? wIn : `<div class="wbox">${wIn}<button class="calcbtn" data-a="calc-open" data-e="${i}" data-s="${k}" aria-label="Add up the weight, set ${k + 1}">${CALC_ICON}</button></div>`}</td><td><input inputmode="numeric" enterkeyhint="done" data-in="r" data-e="${i}" data-s="${k}" value="${esc(s.r)}" placeholder="${esc(h.r)}" aria-label="Reps, set ${k + 1}"></td><td><button class="check" data-a="set-done" data-e="${i}" data-s="${k}" aria-label="Set ${k + 1} done">✓</button></td></tr>`;
       if (s.done) {
         const w = parseW(s.w);
         const up = last && last.sets[k] ? beatLabel({ w: w === undefined ? null : w, r: parseInt(s.r, 10) }, a.unit, last.sets[k], last.unit) : '';
@@ -620,6 +633,44 @@ function openTarget(i) {
   sheet = { type: 'target', i };
   openSheet(sheetHead('Target: ' + exName(en.exId, en.name)) + `<div class="sh-pad"><div class="row" style="gap:10px"><label class="grow small muted">Sets<input class="txt" id="tgSets" inputmode="numeric" value="${esc(t.sets)}"></label><label class="grow small muted">Reps<input class="txt" id="tgReps" maxlength="12" value="${esc(t.reps)}" placeholder="e.g. 8-12"></label></div><p class="small muted">Suggested reps: ${repsFor(en.exId)}. ${planItem(en) ? 'Saved to your plan for next time too.' : "For this workout only, since it isn't on the plan day."}</p></div><div class="sh-foot" style="border:0"><button class="btn primary block" data-a="target-save">Save</button></div>`);
 }
+// Bar weight calculator (1.0.8): bar + plates (doubled unless they're on one side) + anything else, counted once.
+// S.calc[exId] keeps the last load used on each exercise, so the next set or next week starts from it.
+const BARS = { lb: [0, 15, 35, 45], kg: [0, 10, 15, 20] };
+const PLATES = { lb: [45, 35, 25, 10, 5, 2.5], kg: [25, 20, 15, 10, 5, 2.5, 1.25] };
+const barName = n => n ? String(n) : 'None';
+function calcFor(exId, unit) {
+  const c = S.calc[exId], bars = BARS[unit], std = bars[bars.length - 1];
+  if (!c || c.unit !== unit) return { unit, bar: std, plates: [], other: '', one: false };
+  return { unit, bar: bars.includes(c.bar) ? c.bar : std, plates: (Array.isArray(c.plates) ? c.plates : []).filter(p => PLATES[unit].includes(p)), other: typeof c.other === 'string' ? c.other : '', one: !!c.one };
+}
+const calcOther = c => { const o = parseW(c.other); return o > 0 ? o : 0; };
+const platesSum = c => c.plates.reduce((t, p) => t + p, 0);
+const calcTotal = c => Math.round((c.bar + platesSum(c) * (c.one ? 1 : 2) + calcOther(c)) * 100) / 100;
+function calcBreak(c) {
+  const parts = [], sum = platesSum(c), o = calcOther(c);
+  if (c.bar) parts.push('Bar ' + c.bar);
+  if (sum) parts.push(fmtNum(sum) + (c.one ? ' on one side' : ' per side'));
+  if (o) parts.push(fmtNum(o) + ' other');
+  return parts.join(' + ');
+}
+function openCalc(i, k) {
+  const a = S.active, en = a && a.entries[i], s = en && en.sets[k]; if (!s || s.done) return;
+  sheet = { type: 'calc', i, k, unit: a.unit, c: calcFor(en.exId, a.unit) };
+  openSheet(sheetHead(exName(en.exId, en.name) + ', set ' + (k + 1)) + `<div class="sh-body"><div class="calc-total" id="calcTotal"></div><div class="small muted calc-break" id="calcBreak"></div><div class="small muted" style="margin-top:10px">Bar</div><div id="calcBars"></div><div class="small muted" id="calcPlateHead"></div><div class="plates" id="calcPlates"></div><div class="row" style="margin-top:8px"><button class="btn sm" id="calcUndo" data-a="calc-undo">Undo</button><button class="btn ghost sm" id="calcClear" data-a="calc-clear">Clear</button></div><div id="calcSide"></div><label class="small muted">Anything else, counted once (sled, odd plates)<input class="txt" id="calcOther" data-in="calc-other" inputmode="decimal" enterkeyhint="done" maxlength="8" value="${esc(sheet.c.other)}" style="margin-top:4px"></label></div><div class="sh-foot"><button class="btn primary block" id="calcUse" style="margin-top:0" data-a="calc-use">Use this weight</button></div>`);
+  drawCalc();
+}
+function drawCalc() {
+  const c = sheet.c, u = sheet.unit, tot = calcTotal(c);
+  $('#calcTotal').innerHTML = `<b>${fmtNum(tot)}</b> ${u}`;
+  $('#calcBreak').textContent = calcBreak(c);
+  $('#calcBars').innerHTML = chips(BARS[u].map(barName), barName(c.bar), 'calc-bar');
+  $('#calcPlateHead').textContent = c.one ? 'Plates on the loaded side' : 'Plates on each side';
+  $('#calcPlates').innerHTML = PLATES[u].map(p => { const n = c.plates.filter(x => x === p).length; return `<button class="plate ${n ? 'on' : ''}" data-a="calc-plate" data-p="${p}" aria-label="Add a ${p} ${u} plate${n ? ', ' + n + ' on now' : ''}">${p}${n ? `<span class="ct">×${n}</span>` : ''}</button>`; }).join('');
+  $('#calcSide').innerHTML = chips(['Both sides', 'One side'], c.one ? 'One side' : 'Both sides', 'calc-side');
+  $('#calcUndo').disabled = !c.plates.length;
+  $('#calcClear').disabled = !c.plates.length && blank(c.other);
+  $('#calcUse').disabled = !(tot > 0);
+}
 function nameTaken(name, exceptId) { return S.exercises.some(e => e.id !== exceptId && e.name.toLowerCase() === name.toLowerCase()); }
 function addCustomExercise(name, group) {
   const e = { id: 'c-' + uid(), name: name.charAt(0).toUpperCase() + name.slice(1), group, custom: true };
@@ -736,6 +787,18 @@ const A = {
     const it = planItem(en); if (it) { it.sets = n; it.reps = reps; }
     closeSheet(); save(); render(); toast(it ? 'Target saved to your plan' : 'Target set for this workout');
   },
+  'calc-open'(el) { openCalc(+el.dataset.e, +el.dataset.s); },
+  'calc-bar'(el) { sheet.c.bar = el.dataset.g === 'None' ? 0 : +el.dataset.g; drawCalc(); },
+  'calc-plate'(el) { sheet.c.plates.push(+el.dataset.p); drawCalc(); },
+  'calc-undo'() { sheet.c.plates.pop(); drawCalc(); },
+  'calc-clear'() { sheet.c.plates = []; sheet.c.other = ''; $('#calcOther').value = ''; drawCalc(); },
+  'calc-side'(el) { sheet.c.one = el.dataset.g === 'One side'; drawCalc(); },
+  'calc-use'() {
+    const a = S.active, en = a && sheet && a.entries[sheet.i], s = en && en.sets[sheet.k], tot = sheet ? calcTotal(sheet.c) : 0;
+    if (!s || !(tot > 0)) { closeSheet(); return; }
+    s.w = fmtNum(tot); S.calc[en.exId] = sheet.c;
+    closeSheet(); save(); render();
+  },
   'workout-add-ex'() { const a = S.active; openPicker('Add exercises', null, a.entries.map(e => e.exId), ids => { for (const id of ids) a.entries.push({ exId: id, name: exName(id), target: { sets: 3, reps: repsFor(id) }, sets: [0, 1, 2].map(() => ({ w: '', r: '', done: false })) }); }); },
   finish() { finishWorkout(); },
   discard() { if (confirm('Discard this workout? Nothing from it will be saved.')) { stopRest(); S.active = null; save(); render(true); } },
@@ -781,7 +844,7 @@ const A = {
   'delete-ex'() {
     const ex = exById(ui.viewEx);
     if (!confirm(`Delete "${ex.name}"? It comes off your plan days. Past workouts keep it in History.`)) return;
-    S.exercises = S.exercises.filter(e => e !== ex);
+    S.exercises = S.exercises.filter(e => e !== ex); delete S.calc[ex.id];
     for (const sp of S.splits) for (const d of sp.days) d.items = d.items.filter(it => it.exId !== ex.id);
     ui.viewEx = null; save(); render(true);
   },
@@ -811,6 +874,7 @@ document.addEventListener('input', ev => {
   const el = ev.target, k = el.dataset && el.dataset.in; if (!k) return;
   if (k === 'w' || k === 'r') { const en = S.active && S.active.entries[+el.dataset.e]; const s = en && en.sets[+el.dataset.s]; if (s) { s[k] = el.value; save(); } return; }
   if (k === 'notes') { if (S.active) { S.active.notes = el.value; save(); } return; }
+  if (k === 'calc-other') { if (sheet && sheet.type === 'calc') { sheet.c.other = el.value; drawCalc(); } return; }
   if (k === 'item-sets' || k === 'item-reps') { const { d } = findDay(ui.editDay); const it = d && d.items[+el.dataset.i]; if (!it) return; if (k === 'item-reps') it.reps = el.value.slice(0, 12); else { const n = parseInt(el.value, 10); if (n >= 1 && n <= 20) it.sets = n; } save(); return; }
   if (k === 'item-rest') { setItemRest(el); return; }
   if (k === 'ex-search') { ui.exSearch = el.value; $('#exlist').innerHTML = exListHtml(); return; }
@@ -820,6 +884,7 @@ document.addEventListener('keydown', ev => {
   if (ev.key !== 'Enter') return;
   const el = ev.target;
   if ((el.id === 'tgSets' || el.id === 'tgReps') && sheet) { ev.preventDefault(); A['target-save'](); return; }
+  if (el.id === 'calcOther') { ev.preventDefault(); el.blur(); return; }
   if (el.id === 'sheetText' && sheet) { ev.preventDefault(); const t = sheet.type; A[t === 'newsplit' ? 'create-split' : t === 'exform' ? 'exform-save' : 'sheet-save'](); return; }
   if (el.dataset && el.dataset.in === 'w') { ev.preventDefault(); const r = document.querySelector(`input[data-in="r"][data-e="${el.dataset.e}"][data-s="${el.dataset.s}"]`); if (r) r.focus(); return; }
   if (el.dataset && el.dataset.in === 'r') { ev.preventDefault(); el.blur(); }

@@ -1,7 +1,7 @@
 // Lift Log service worker: serves the app from the cache first (so it opens instantly
 // with no signal at the gym) and refreshes the cache in the background, so an update
 // shows up the next time the app is opened. Bump CACHE with every release.
-const CACHE = 'liftlog-v8';
+const CACHE = 'liftlog-v9';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
