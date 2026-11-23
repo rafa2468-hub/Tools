@@ -1,6 +1,9 @@
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import '../models/server_config.dart';
 import '../services/paperless_service.dart';
 import '../services/storage_service.dart';
+import '../services/tls.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -14,12 +17,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _urlController = TextEditingController();
   final _tokenController = TextEditingController();
   final _storage = StorageService();
-  final _paperless = PaperlessService();
 
   bool _tokenVisible = false;
   bool _isTesting = false;
   bool _isSaving = false;
-  bool _allowInsecure = false;
+  String? _caPem;
+  String? _caLabel;
   String? _testResult;
   bool _testPassed = false;
 
@@ -37,38 +40,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _loadSaved() async {
-    final url = await _storage.getServerUrl();
-    final token = await _storage.getToken();
-    final allowInsecure = await _storage.getAllowInsecure();
-    if (mounted) {
-      _urlController.text = url ?? '';
-      _tokenController.text = token ?? '';
-      setState(() => _allowInsecure = allowInsecure);
+    final config = await _storage.load();
+    if (!mounted) return;
+    _urlController.text = config.url;
+    _tokenController.text = config.token;
+    setState(() {
+      _caPem = config.caPem;
+      _caLabel = config.caLabel;
+    });
+  }
+
+  /// What's on screen right now, saved or not.
+  ServerConfig get _formConfig => ServerConfig(
+        url: ServerConfig.normaliseUrl(_urlController.text),
+        token: _tokenController.text.trim(),
+        caPem: _caPem,
+        caLabel: _caLabel,
+      );
+
+  void _clearTestResult() {
+    if (_testResult != null) setState(() => _testResult = null);
+  }
+
+  Future<void> _importCa() async {
+    // No type filter: .pem has no standard MIME type on Android, so a
+    // filter would hide the file.
+    final file = await openFile();
+    if (file == null) return;
+    try {
+      final pem = caPemFromBytes(await file.readAsBytes());
+      setState(() {
+        _caPem = pem;
+        _caLabel = file.name;
+        _testResult = null;
+      });
+    } on CaImportException catch (e) {
+      _snack(e.message, error: true);
+    } on Exception catch (e) {
+      _snack('Could not read the file: $e', error: true);
     }
   }
 
+  void _removeCa() => setState(() {
+        _caPem = null;
+        _caLabel = null;
+        _testResult = null;
+      });
+
+  /// Tests what's on screen without saving it, so a failed test never
+  /// replaces settings that work.
   Future<void> _testConnection() async {
     if (!_formKey.currentState!.validate()) return;
-
-    // Save temporarily so the service can read the values
-    await _storage.saveSettings(
-      serverUrl: _urlController.text,
-      token: _tokenController.text,
-      allowInsecure: _allowInsecure,
-    );
-
     setState(() {
       _isTesting = true;
       _testResult = null;
     });
 
-    final result = await _paperless.testConnection();
+    final result = await PaperlessService(_formConfig).testConnection();
 
     if (!mounted) return;
     setState(() {
       _isTesting = false;
       _testPassed = result.ok;
-      _testResult = result.ok ? 'Connected successfully!' : result.error;
+      _testResult = result.message;
     });
   }
 
@@ -76,23 +110,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!_formKey.currentState!.validate()) return;
 
     setState(() => _isSaving = true);
-    await _storage.saveSettings(
-      serverUrl: _urlController.text,
-      token: _tokenController.text,
-      allowInsecure: _allowInsecure,
-    );
+    await _storage.save(_formConfig);
     if (!mounted) return;
     setState(() => _isSaving = false);
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Settings saved')),
-    );
+    _snack('Settings saved');
     Navigator.pop(context);
+  }
+
+  void _snack(String message, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: error ? Theme.of(context).colorScheme.error : null,
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final isPlainHttp =
+        _urlController.text.trim().toLowerCase().startsWith('http://');
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
@@ -106,28 +147,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
               // ── Server section ──────────────────────────────────────
               Text(
                 'Paperless-ngx Server',
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: cs.primary,
-                      fontWeight: FontWeight.bold,
-                    ),
+                style: tt.titleMedium?.copyWith(
+                  color: cs.primary,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
               const SizedBox(height: 12),
               TextFormField(
                 controller: _urlController,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Server URL',
                   hintText: 'https://paperless.example.com',
-                  prefixIcon: Icon(Icons.dns_outlined),
-                  border: OutlineInputBorder(),
-                  helperText: 'No trailing slash needed',
+                  prefixIcon: const Icon(Icons.dns_outlined),
+                  border: const OutlineInputBorder(),
+                  helperText: isPlainHttp
+                      ? 'Plain http sends your token unencrypted.'
+                      : 'No trailing slash needed',
+                  helperStyle: isPlainHttp ? TextStyle(color: cs.error) : null,
                 ),
                 keyboardType: TextInputType.url,
                 autocorrect: false,
+                onChanged: (_) => setState(() => _testResult = null),
                 validator: (v) {
                   if (v == null || v.trim().isEmpty) return 'Required';
                   final uri = Uri.tryParse(v.trim());
-                  if (uri == null || !uri.hasScheme) {
-                    return 'Enter a valid URL (include https://)';
+                  if (uri == null ||
+                      !(uri.scheme == 'https' || uri.scheme == 'http') ||
+                      uri.host.isEmpty) {
+                    return 'Enter a full URL, starting with https://';
                   }
                   return null;
                 },
@@ -142,7 +189,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   hintText: 'Paste your Paperless token here',
                   prefixIcon: const Icon(Icons.key_outlined),
                   border: const OutlineInputBorder(),
-                  helperText: 'Found in Paperless → Settings → API Token',
+                  helperText: 'Found in Paperless → My Profile → API Auth Token',
                   suffixIcon: IconButton(
                     icon: Icon(
                       _tokenVisible
@@ -156,27 +203,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 obscureText: !_tokenVisible,
                 autocorrect: false,
                 enableSuggestions: false,
+                onChanged: (_) => _clearTestResult(),
                 validator: (v) =>
                     (v == null || v.trim().isEmpty) ? 'Required' : null,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 24),
 
-              // ── Self-signed cert toggle ──────────────────────────────
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _allowInsecure,
-                onChanged: (v) => setState(() => _allowInsecure = v),
-                title: const Text('Allow self-signed certificates'),
-                subtitle: Text(
-                  'Enable for home labs with private CAs or self-signed TLS certs.',
-                  style: TextStyle(color: cs.onSurface.withOpacity(0.6)),
-                ),
-                secondary: Icon(
-                  _allowInsecure ? Icons.lock_open_outlined : Icons.lock_outline,
-                  color: _allowInsecure ? cs.tertiary : cs.primary,
-                ),
+              // ── Home certificate authority ───────────────────────────
+              Text(
+                'Home certificate authority',
+                style: tt.titleSmall?.copyWith(color: cs.primary),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Icon(
+                    _caPem == null ? Icons.public : Icons.verified_user_outlined,
+                    size: 20,
+                    color: cs.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _caPem == null
+                          ? 'Not set: only publicly trusted certificates are accepted.'
+                          : 'Also trusting: ${(_caLabel == null || _caLabel!.isEmpty) ? 'imported certificate' : _caLabel}',
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _importCa,
+                    icon: const Icon(Icons.file_open_outlined),
+                    label: Text(_caPem == null ? 'Import CA file' : 'Replace'),
+                  ),
+                  if (_caPem != null)
+                    TextButton(onPressed: _removeCa, child: const Text('Remove')),
+                ],
+              ),
+              Text(
+                'For a home-lab server (e.g. https://paperless.home.lab), import '
+                'the lab\'s public root certificate, rootCA.pem. Never import a key.',
+                style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+              ),
+              const SizedBox(height: 24),
 
               // ── Test connection ──────────────────────────────────────
               OutlinedButton.icon(
@@ -235,18 +309,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           const SizedBox(width: 8),
                           Text(
                             'How to get your API token',
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleSmall
-                                ?.copyWith(color: cs.primary),
+                            style: tt.titleSmall?.copyWith(color: cs.primary),
                           ),
                         ],
                       ),
                       const SizedBox(height: 8),
                       const Text(
                         '1. Open Paperless-ngx in a browser\n'
-                        '2. Go to Settings → Users → your user\n'
-                        '3. Copy the token shown under "API Token"',
+                        '2. Click your name (top right) → My Profile\n'
+                        '3. Under "API Auth Token", create or copy the token',
                         style: TextStyle(height: 1.6),
                       ),
                     ],

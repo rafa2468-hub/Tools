@@ -2,8 +2,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/scan_session.dart';
+import '../services/filename.dart';
 import '../services/paperless_service.dart';
 import '../services/pdf_service.dart';
+import '../services/storage_service.dart';
+import '../services/task_result.dart';
 
 class PreviewScreen extends StatefulWidget {
   const PreviewScreen({super.key, required this.session});
@@ -16,7 +19,6 @@ class PreviewScreen extends StatefulWidget {
 
 class _PreviewScreenState extends State<PreviewScreen> {
   final _titleController = TextEditingController();
-  final _paperless = PaperlessService();
   final _pdfService = PdfService();
 
   bool _isUploading = false;
@@ -28,49 +30,93 @@ class _PreviewScreenState extends State<PreviewScreen> {
     super.dispose();
   }
 
-  Future<File> _buildPdf() => _pdfService.buildPdf(
-        widget.session.imagePaths,
-        title: _titleController.text.trim().isNotEmpty
-            ? _titleController.text.trim()
-            : null,
-      );
+  String? get _title {
+    final t = _titleController.text.trim();
+    return t.isEmpty ? null : t;
+  }
+
+  Future<File> _buildPdf() =>
+      _pdfService.buildPdf(widget.session.imagePaths, title: _title);
+
+  void _setStatus(String message) {
+    if (mounted) setState(() => _statusMessage = message);
+  }
 
   Future<void> _upload() async {
+    final title = _title;
     setState(() {
       _isUploading = true;
       _statusMessage = 'Building PDF…';
     });
 
     try {
+      final config = await StorageService().load();
+      if (!config.isComplete) {
+        _showMessage('Setup needed',
+            'Open Settings and save the server URL and API token first.');
+        return;
+      }
+      final paperless = PaperlessService(config);
+
       final pdf = await _buildPdf();
-
-      setState(() => _statusMessage = 'Uploading to Paperless-ngx…');
-
-      final result = await _paperless.uploadDocument(
+      _setStatus('Uploading to Paperless-ngx…');
+      final upload = await paperless.upload(
         pdf,
-        title: _titleController.text.trim().isNotEmpty
-            ? _titleController.text.trim()
-            : null,
+        title: title,
+        filename: pdfFilename(title, widget.session.createdAt),
       );
-
       if (!mounted) return;
 
-      if (result.isSuccess) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Uploaded successfully!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-        Navigator.pop(context);
-      } else {
-        _showError(result.message ?? 'Upload failed.');
+      if (!upload.isQueued) {
+        _showMessage('Upload failed', upload.message ?? 'Upload failed.');
+        return;
+      }
+      final taskId = upload.taskId;
+      if (taskId == null) {
+        _finish('Uploaded. Paperless sent no task ID, so the app can\'t '
+            'confirm the import. Check Paperless.');
+        return;
+      }
+
+      _setStatus('Uploaded. Waiting for Paperless to import it…');
+      final outcome = await paperless.waitForTask(taskId);
+      if (!mounted) return;
+
+      switch (outcome.state) {
+        case TaskState.success:
+          _finish(outcome.documentId == null
+              ? 'Imported into Paperless.'
+              : 'Imported into Paperless as document #${outcome.documentId}.');
+        case TaskState.duplicate:
+          _showMessage(
+            'Already in Paperless',
+            'Paperless says this is a duplicate of document '
+                '#${outcome.documentId}${outcome.inTrash ? ' (in its trash)' : ''}. '
+                'Nothing new was added.',
+          );
+        case TaskState.failed:
+          _showMessage('Paperless couldn\'t import it',
+              outcome.message ?? 'The import failed.');
+        case TaskState.processing:
+          _finish('Uploaded. Paperless is still working on it; check its '
+              'Tasks page in a minute.');
+        case TaskState.unknown:
+          _finish(outcome.message ?? 'Uploaded, but the result is unknown.');
       }
     } on Exception catch (e) {
-      _showError(e.toString());
+      _showMessage('Upload failed', e.toString());
     } finally {
       if (mounted) setState(() => _isUploading = false);
     }
+  }
+
+  /// Shows [message] and goes back to the home screen.
+  void _finish(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 6)),
+    );
+    Navigator.pop(context);
   }
 
   Future<void> _sharePdf() async {
@@ -83,26 +129,24 @@ class _PreviewScreenState extends State<PreviewScreen> {
       if (!mounted) return;
       await Share.shareXFiles(
         [XFile(pdf.path, mimeType: 'application/pdf')],
-        subject: _titleController.text.trim().isNotEmpty
-            ? _titleController.text.trim()
-            : 'Scanned Document',
+        subject: _title ?? 'Scanned Document',
       );
     } on Exception catch (e) {
-      _showError(e.toString());
+      _showMessage('Share failed', e.toString());
     } finally {
       if (mounted) setState(() => _isUploading = false);
     }
   }
 
-  void _showError(String message) {
+  /// Shows a dialog and stays on this screen, so the scan isn't lost.
+  void _showMessage(String title, String message) {
     if (!mounted) return;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        icon: Icon(Icons.error_outline,
-            color: Theme.of(ctx).colorScheme.error),
-        title: const Text('Upload failed'),
-        content: Text(message),
+        icon: Icon(Icons.error_outline, color: Theme.of(ctx).colorScheme.error),
+        title: Text(title),
+        content: SingleChildScrollView(child: Text(message)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
