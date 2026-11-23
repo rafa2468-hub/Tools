@@ -1,0 +1,23 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="biz.cunning.cunning_document_scanner">
+    <application
+        android:theme="@style/Theme.AppCompat.NoActionBar"
+        android:dataExtractionRules="@xml/cunning_backup_rules"
+        android:fullBackupContent="@xml/cunning_backup_rules_legacy">
+        <activity
+            android:name=".fallback.DocumentScannerActivity"
+            android:configChanges="orientation|screenSize"
+            android:screenOrientation="portrait"
+            android:theme="@style/cunning_theme_fullscreen" />
+
+        <provider
+            android:name="biz.cunning.cunning_document_scanner.fallback.DocumentScannerFileProvider"
+            android:authorities="${applicationId}.DocumentScannerFileProvider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/cunning_file_paths" />
+        </provider>
+    </application>
+</manifest>

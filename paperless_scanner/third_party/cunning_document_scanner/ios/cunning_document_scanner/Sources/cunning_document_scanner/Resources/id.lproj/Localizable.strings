@@ -1,0 +1,12 @@
+"cunning_document_scanner_camera" = "Kamera";
+"cunning_document_scanner_gallery" = "Perpustakaan Foto";
+"cunning_document_scanner_cancel" = "Batal";
+"cunning_document_scanner_crop_title" = "Pangkas Halaman %1$d dari %2$d";
+"cunning_document_scanner_discard_title" = "Buang perubahan?";
+"cunning_document_scanner_discard_message" = "Apakah Anda yakin ingin membuang kemajuan Anda?";
+"cunning_document_scanner_discard" = "Buang";
+
+"cunning_document_scanner_filter_original" = "Asli";
+"cunning_document_scanner_filter_color" = "Warna";
+"cunning_document_scanner_filter_grayscale" = "Skala Abu-abu";
+"cunning_document_scanner_filter_bw" = "Hitam Putih";

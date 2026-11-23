@@ -62,6 +62,10 @@ jobs:
           rm -rf /tmp/build/test
           cp -r paperless_scanner/test         /tmp/build/
           cp    paperless_scanner/pubspec.yaml  /tmp/build/
+          # Our analyzer settings (they skip third_party/)
+          cp    paperless_scanner/analysis_options.yaml /tmp/build/
+          # The patched scanner plugin pubspec.yaml points at
+          cp -r paperless_scanner/third_party  /tmp/build/
           # flutter create leaves the template's own lock file; never use it.
           rm -f /tmp/build/pubspec.lock
           if [ -f paperless_scanner/pubspec.lock ]; then

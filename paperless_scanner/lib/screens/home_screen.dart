@@ -8,6 +8,7 @@ import '../services/storage_service.dart';
 import '../services/upload_queue.dart';
 import 'preview_screen.dart';
 import 'queue_screen.dart';
+import 'scanner_error.dart';
 import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -151,7 +152,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (message != null) _snack(message);
       await _refreshQueue();
     } on CunningDocumentScannerException catch (e) {
-      _snack('Scanner error: ${e.message}', error: true);
+      if (mounted) await showScannerError(context, e);
     } on Exception catch (e) {
       _snack('Scan error: $e', error: true);
     } finally {

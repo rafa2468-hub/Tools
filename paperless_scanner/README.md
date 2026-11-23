@@ -42,10 +42,12 @@ The PDF's file name keeps letters in any language; without a title it's `scan-YY
 
 The repo keeps only the app's own files. CI runs `flutter create` (Android only) in `/tmp/build`, then copies in:
 
-- `lib/`, `test/`, `pubspec.yaml` and `pubspec.lock` (resolved with `--enforce-lockfile`, so builds are repeatable; to change a package, update `pubspec.yaml`, delete `pubspec.lock`, take the new one from the run's `pubspec-lock` artifact and commit it)
+- `lib/`, `test/`, `analysis_options.yaml`, `third_party/` (the patched scanner plugin), `pubspec.yaml` and `pubspec.lock` (resolved with `--enforce-lockfile`, so builds are repeatable; to change a package, update `pubspec.yaml`, delete `pubspec.lock`, take the new one from the run's `pubspec-lock` artifact and commit it)
 - `android/build.gradle.kts` as the app-level Gradle file (Flutter's own template, with minSdk 29)
 
 It adds the INTERNET and CAMERA permissions to the generated manifest, then runs `flutter analyze`, `flutter test`, builds a release APK and re-signs it with the app's key. Flutter is pinned in the workflow (`flutter-version`); bump it on purpose.
+
+The scanner plugin is a patched copy of `cunning_document_scanner` 3.1.0 in `third_party/` (MIT licence kept). The stock plugin silently opens a plain camera with a manual crop box whenever Google's scanner fails to start; the copy reports Google's error instead, and the app shows it in a dialog. Details and how to update it: `third_party/cunning_document_scanner/PATCHES.md`.
 
 `flutter_secure_storage` stays on 10.x on purpose: 10.x moves what 9.x saved to its new format on first launch, while 11.x can't read 9.x data at all. Moving to 11.x is safe once every installed copy has run 1.2.0 or later.
 
@@ -79,10 +81,14 @@ lib/
     preview_screen.dart      # Pages, details, upload, share
     queue_screen.dart        # Waiting / failed scans
     settings_screen.dart     # Server, token, CA, test, save
+    scanner_error.dart       # Dialog for a scanner that won't start
 test/
   pure_test.dart             # File names, task parsing
   pdf_queue_test.dart        # Images, PDF pages, details, queue
   server_test.dart           # TLS, token, upload, lists, queue against a fake server
+  scanner_error_test.dart    # Scanner error text and dialog
+third_party/
+  cunning_document_scanner/  # Patched scanner plugin (see its PATCHES.md)
 ```
 
 ## iOS

@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  # The vendored scanner plugin follows its own upstream style.
+  exclude:
+    - third_party/**

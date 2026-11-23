@@ -13,6 +13,7 @@ import '../services/pdf_service.dart';
 import '../services/storage_service.dart';
 import '../services/task_result.dart';
 import 'home_screen.dart' show maxPages;
+import 'scanner_error.dart';
 
 /// Review the pages, add details, upload. Pops with a message for the home
 /// screen when the scan is done with (uploaded, queued or discarded).
@@ -102,7 +103,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
         _snack('${result.discardedPages} pages over the $maxPages-page limit were left out.');
       }
     } on Object catch (e) {
-      _snack('Scanner error: $e');
+      if (mounted) await showScannerError(context, e);
     }
   }
 

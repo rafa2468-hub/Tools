@@ -1,0 +1,12 @@
+"cunning_document_scanner_camera" = "कैमरा";
+"cunning_document_scanner_gallery" = "फ़ोटो लाइब्रेरी";
+"cunning_document_scanner_cancel" = "रद्द करें";
+"cunning_document_scanner_crop_title" = "%2$d में से %1$d पृष्ठ क्रॉप करें";
+"cunning_document_scanner_discard_title" = "बदलावों को खारिज करें?";
+"cunning_document_scanner_discard_message" = "क्या आप वाकई अपनी प्रगति को खारिज करना चाहते हैं?";
+"cunning_document_scanner_discard" = "खारिज करें";
+
+"cunning_document_scanner_filter_original" = "मूल";
+"cunning_document_scanner_filter_color" = "रंग";
+"cunning_document_scanner_filter_grayscale" = "ग्रेस्केल";
+"cunning_document_scanner_filter_bw" = "श्वेत-श्याम";
