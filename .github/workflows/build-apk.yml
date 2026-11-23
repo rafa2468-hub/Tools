@@ -60,6 +60,8 @@ jobs:
           rm -rf /tmp/build/test
           cp -r paperless_scanner/test         /tmp/build/
           cp    paperless_scanner/pubspec.yaml  /tmp/build/
+          # flutter create leaves the template's own lock file; never use it.
+          rm -f /tmp/build/pubspec.lock
           if [ -f paperless_scanner/pubspec.lock ]; then
             cp paperless_scanner/pubspec.lock /tmp/build/
           fi
