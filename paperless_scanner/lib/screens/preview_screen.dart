@@ -469,12 +469,10 @@ class _PreviewScreenState extends State<PreviewScreen> {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           buildDefaultDragHandles: false,
           itemCount: pages.length,
-          onReorder: (from, to) {
+          // onReorderItem's target index already allows for the removed item.
+          onReorderItem: (from, to) {
             if (_busy) return;
-            setState(() {
-              if (to > from) to -= 1;
-              pages.insert(to, pages.removeAt(from));
-            });
+            setState(() => pages.insert(to, pages.removeAt(from)));
           },
           itemBuilder: (context, i) {
             final page = pages[i];

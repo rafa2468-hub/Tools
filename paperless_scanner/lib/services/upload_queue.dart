@@ -178,7 +178,7 @@ class UploadQueue {
     try {
       final list = jsonDecode(await f.readAsString());
       if (list is! List) return [];
-      return [for (final r in list) if (QueueReport.fromJson(r) case final rep?) rep];
+      return [for (final r in list) ?QueueReport.fromJson(r)];
     } on FormatException {
       return [];
     }

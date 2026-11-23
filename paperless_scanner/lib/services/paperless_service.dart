@@ -123,7 +123,7 @@ class PaperlessService {
     }
     final client = _client();
     try {
-      final body = MultipartBody(
+      final form = MultipartBody(
         fields: meta.formFields,
         fileField: 'document',
         file: pdf,
@@ -131,10 +131,10 @@ class PaperlessService {
       );
       final request = http.StreamedRequest('POST', _uri('/api/documents/post_document/'))
         ..headers.addAll(_auth)
-        ..headers['Content-Type'] = body.contentType
-        ..contentLength = await body.length;
+        ..headers['Content-Type'] = form.contentType
+        ..contentLength = await form.length;
       unawaited(request.sink
-          .addStream(body.stream())
+          .addStream(form.stream())
           .then((_) => request.sink.close(), onError: request.sink.addError));
 
       final streamed = await client.send(request).timeout(const Duration(seconds: 120));

@@ -43,7 +43,7 @@ class Choices {
   factory Choices.fromJson(Map<String, dynamic> j) {
     List<NamedItem> list(String key) => [
           for (final e in (j[key] as List? ?? const []))
-            if (NamedItem.fromJson(e) case final item?) item,
+            ?NamedItem.fromJson(e),
         ];
     final at = j['fetched_at'];
     return Choices(
