@@ -1,72 +1,71 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-import 'package:path_provider/path_provider.dart';
+import '../models/scan_session.dart';
+import 'image_prep.dart';
+
+/// Every page is as tall (or, for a landscape page, as wide) as a Letter
+/// page, 11 inches, and the other side follows the scan's own shape, so a
+/// receipt stays a narrow strip instead of floating on a white sheet.
+const pageLongSidePt = 11 * PdfPageFormat.inch;
+
+PdfPageFormat pageFormatFor(int widthPx, int heightPx) {
+  if (widthPx <= 0 || heightPx <= 0) return PdfPageFormat.letter;
+  if (widthPx >= heightPx) {
+    return PdfPageFormat(pageLongSidePt, pageLongSidePt * heightPx / widthPx);
+  }
+  return PdfPageFormat(pageLongSidePt * widthPx / heightPx, pageLongSidePt);
+}
 
 class PdfService {
-  /// Combines one or more scanned image files into a single PDF.
-  /// Each image becomes one page, sized to A4 with the image fitted inside.
-  Future<File> buildPdf(List<String> imagePaths, {String? title}) async {
-    final doc = pw.Document(title: title ?? 'Scanned Document');
+  PdfService({this.shrinker = const NativeImageShrinker()});
 
-    for (final path in imagePaths) {
+  final ImageShrinker shrinker;
+
+  /// Builds the PDF for [pages] into [workDir] (created if missing):
+  /// each page rotated and shrunk, then one PDF page per image.
+  Future<File> buildPdf(
+    List<ScanPage> pages, {
+    required Directory workDir,
+    String? title,
+  }) async {
+    await workDir.create(recursive: true);
+    final prepared = <String>[];
+    for (var i = 0; i < pages.length; i++) {
+      final target = '${workDir.path}/page_${i + 1}.jpg';
+      await shrinker.shrink(pages[i].path, target,
+          rotateDegrees: pages[i].rotationDegrees);
+      prepared.add(target);
+    }
+    return buildPdfFromJpegs(prepared, out: File('${workDir.path}/scan.pdf'), title: title);
+  }
+
+  /// One page per image, each page sized by [pageFormatFor].
+  static Future<File> buildPdfFromJpegs(
+    List<String> jpegs, {
+    required File out,
+    String? title,
+    bool compress = true, // tests turn it off to read the page sizes back
+  }) async {
+    final doc = pw.Document(
+      title: title ?? 'Scanned document',
+      creator: 'Paperless Scanner',
+      compress: compress,
+    );
+    for (final path in jpegs) {
       final bytes = await File(path).readAsBytes();
-      final pdfImage = pw.MemoryImage(bytes);
-
-      // Decode dimensions to choose portrait vs landscape
-      final decoded = await _imageSize(bytes);
-      final isLandscape = decoded != null && decoded.$1 > decoded.$2;
-      final pageFormat =
-          isLandscape ? PdfPageFormat.a4.landscape : PdfPageFormat.a4;
-
+      final size = imageSize(bytes);
+      final format = size == null ? PdfPageFormat.letter : pageFormatFor(size.$1, size.$2);
+      final image = pw.MemoryImage(bytes);
       doc.addPage(
         pw.Page(
-          pageFormat: pageFormat,
+          pageFormat: format,
           margin: pw.EdgeInsets.zero,
-          build: (_) => pw.Center(
-            child: pw.Image(pdfImage, fit: pw.BoxFit.contain),
-          ),
+          build: (_) => pw.Image(image, fit: pw.BoxFit.contain),
         ),
       );
     }
-
-    final dir = await getTemporaryDirectory();
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final file = File('${dir.path}/scan_$timestamp.pdf');
-    await file.writeAsBytes(await doc.save());
-    return file;
-  }
-
-  /// Returns (width, height) by reading the JPEG/PNG header bytes.
-  Future<(int, int)?> _imageSize(Uint8List bytes) async {
-    try {
-      // JPEG: FF D8, dimensions in SOF0 (FF C0) or SOF2 (FF C2) marker
-      if (bytes.length > 4 && bytes[0] == 0xFF && bytes[1] == 0xD8) {
-        int i = 2;
-        while (i < bytes.length - 8) {
-          if (bytes[i] != 0xFF) break;
-          final marker = bytes[i + 1];
-          final len = (bytes[i + 2] << 8) | bytes[i + 3];
-          if (marker == 0xC0 || marker == 0xC2) {
-            final h = (bytes[i + 5] << 8) | bytes[i + 6];
-            final w = (bytes[i + 7] << 8) | bytes[i + 8];
-            return (w, h);
-          }
-          i += 2 + len;
-        }
-      }
-      // PNG: 8-byte sig + IHDR chunk, width at offset 16, height at 20
-      if (bytes.length > 24 &&
-          bytes[0] == 0x89 &&
-          bytes[1] == 0x50 &&
-          bytes[2] == 0x4E &&
-          bytes[3] == 0x47) {
-        final w = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
-        final h = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
-        return (w, h);
-      }
-    } catch (_) {}
-    return null;
+    await out.writeAsBytes(await doc.save());
+    return out;
   }
 }

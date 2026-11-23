@@ -1,0 +1,12 @@
+"cunning_document_scanner_camera" = "Cámara";
+"cunning_document_scanner_gallery" = "Fototeca";
+"cunning_document_scanner_cancel" = "Cancelar";
+"cunning_document_scanner_crop_title" = "Recortar página %1$d de %2$d";
+"cunning_document_scanner_discard_title" = "¿Descartar cambios?";
+"cunning_document_scanner_discard_message" = "¿Está seguro de que desea descartar su progreso?";
+"cunning_document_scanner_discard" = "Descartar";
+"cunning_document_scanner_filter_original" = "Original";
+"cunning_document_scanner_filter_color" = "Color";
+"cunning_document_scanner_filter_grayscale" = "Escala de grises";
+"cunning_document_scanner_filter_bw" = "B/N";
+

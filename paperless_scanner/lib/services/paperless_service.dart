@@ -3,7 +3,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import '../models/choices.dart';
 import '../models/server_config.dart';
+import '../models/upload_meta.dart';
+import 'multipart.dart';
 import 'task_result.dart';
 import 'tls.dart';
 
@@ -17,7 +20,14 @@ class ConnectionCheck {
   final String message;
 }
 
-enum UploadStatus { queued, unauthorized, certificateError, serverError, networkError }
+enum UploadStatus {
+  queued,
+  unauthorized,
+  certificateError,
+  serverError,
+  networkError,
+  notConfigured,
+}
 
 class UploadResult {
   const UploadResult(this.status, {this.taskId, this.message});
@@ -28,6 +38,10 @@ class UploadResult {
   final String? message;
 
   bool get isQueued => status == UploadStatus.queued;
+
+  /// The server couldn't be reached at all: worth keeping the scan and
+  /// trying again later (away from home, Wi-Fi off, server down).
+  bool get isUnreachable => status == UploadStatus.networkError;
 }
 
 class PaperlessService {
@@ -96,21 +110,32 @@ class PaperlessService {
 
   /// Sends the PDF. A queued result only means Paperless accepted the file;
   /// call [waitForTask] with its [UploadResult.taskId] for the real outcome.
-  Future<UploadResult> upload(File pdf, {String? title, required String filename}) async {
+  Future<UploadResult> upload(
+    File pdf, {
+    UploadMeta meta = const UploadMeta(),
+    required String filename,
+  }) async {
     if (!config.isComplete) {
       return const UploadResult(
-        UploadStatus.serverError,
+        UploadStatus.notConfigured,
         message: 'Server not configured. Open Settings and save your URL and token.',
       );
     }
     final client = _client();
     try {
-      final request = http.MultipartRequest('POST', _uri('/api/documents/post_document/'))
+      final form = MultipartBody(
+        fields: meta.formFields,
+        fileField: 'document',
+        file: pdf,
+        filename: filename,
+      );
+      final request = http.StreamedRequest('POST', _uri('/api/documents/post_document/'))
         ..headers.addAll(_auth)
-        ..files.add(await http.MultipartFile.fromPath('document', pdf.path, filename: filename));
-      if (title != null && title.isNotEmpty) {
-        request.fields['title'] = title;
-      }
+        ..headers['Content-Type'] = form.contentType
+        ..contentLength = await form.length;
+      unawaited(request.sink
+          .addStream(form.stream())
+          .then((_) => request.sink.close(), onError: request.sink.addError));
 
       final streamed = await client.send(request).timeout(const Duration(seconds: 120));
       final body = await streamed.stream.bytesToString();
@@ -171,6 +196,57 @@ class PaperlessService {
       return TaskOutcome(
         TaskState.unknown,
         message: 'Uploaded, but checking the result failed: ${describeError(e)}',
+      );
+    } finally {
+      client.close();
+    }
+  }
+}
+
+extension PaperlessChoices on PaperlessService {
+  /// Tags, correspondents and document types, every page of each.
+  /// Throws on any failure, so a half-fetched list never replaces a cache.
+  Future<Choices> fetchChoices() async {
+    final client = _client();
+    try {
+      Future<List<NamedItem>> all(String path) async {
+        final items = <NamedItem>[];
+        // Page numbers instead of the `next` link: behind a proxy that link
+        // can carry the wrong scheme or host.
+        for (var page = 1; page <= 50; page++) {
+          final r = await client
+              .get(
+                _uri(path, {
+                  'page': '$page',
+                  'page_size': '500',
+                  'ordering': 'name',
+                }),
+                headers: _apiHeaders,
+              )
+              .timeout(const Duration(seconds: 15));
+          if (r.statusCode != 200) {
+            throw HttpException('HTTP ${r.statusCode} from $path');
+          }
+          final body = jsonDecode(utf8.decode(r.bodyBytes));
+          if (body is! Map || body['results'] is! List) {
+            throw FormatException('Unexpected answer from $path');
+          }
+          for (final e in body['results'] as List) {
+            if (NamedItem.fromJson(e) case final item?) items.add(item);
+          }
+          final count = body['count'];
+          if (body['next'] == null || (count is int && items.length >= count)) {
+            break;
+          }
+        }
+        return items;
+      }
+
+      return Choices(
+        tags: await all('/api/tags/'),
+        correspondents: await all('/api/correspondents/'),
+        documentTypes: await all('/api/document_types/'),
+        fetchedAt: DateTime.now(),
       );
     } finally {
       client.close();
