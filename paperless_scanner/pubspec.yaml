@@ -1,7 +1,7 @@
 name: paperless_scanner
 description: Document scanner that uploads directly to Paperless-ngx.
 publish_to: 'none'
-version: 1.2.0+4
+version: 1.2.0+5
 
 environment:
   # Flutter 3.50.1 ships Dart 3.14; material_ui needs 3.13.

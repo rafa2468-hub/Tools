@@ -45,7 +45,7 @@ The repo keeps only the app's own files. CI runs `flutter create` (Android only)
 - `lib/`, `test/`, `analysis_options.yaml`, `third_party/` (the patched scanner plugin), `pubspec.yaml` and `pubspec.lock` (resolved with `--enforce-lockfile`, so builds are repeatable; to change a package, update `pubspec.yaml`, delete `pubspec.lock`, take the new one from the run's `pubspec-lock` artifact and commit it)
 - `android/build.gradle.kts` as the app-level Gradle file (Flutter's own template, with minSdk 29)
 
-It adds the INTERNET and CAMERA permissions to the generated manifest, then runs `flutter analyze`, `flutter test`, builds a release APK and re-signs it with the app's key. Flutter is pinned in the workflow (`flutter-version`); bump it on purpose.
+It adds the INTERNET and CAMERA permissions to the generated manifest and sets `shrink=false` in `android/gradle.properties` (Flutter's default R8 shrinking of release builds broke Google's scanner: it failed to start with a NullPointerException), then runs `flutter analyze`, `flutter test`, builds a release APK and re-signs it with the app's key. Flutter is pinned in the workflow (`flutter-version`); bump it on purpose.
 
 The scanner plugin is a patched copy of `cunning_document_scanner` 3.1.0 in `third_party/` (MIT licence kept). The stock plugin silently opens a plain camera with a manual crop box whenever Google's scanner fails to start; the copy reports Google's error instead, and the app shows it in a dialog. Details and how to update it: `third_party/cunning_document_scanner/PATCHES.md`.
 

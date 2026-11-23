@@ -479,6 +479,14 @@ class CunningDocumentScannerPlugin :
                     else -> ""
                 }
             parts += "${failure.javaClass.name}$code: ${failure.message}"
+            if (parts.size == 1) {
+                // Where it broke: the top frames of the first exception.
+                val frames =
+                    failure.stackTrace.take(6).joinToString(" < ") {
+                        "${it.className}.${it.methodName}:${it.lineNumber}"
+                    }
+                if (frames.isNotEmpty()) parts += "at $frames"
+            }
             val next = failure.cause
             current = if (next === failure) null else next
         }

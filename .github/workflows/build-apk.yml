@@ -84,6 +84,14 @@ jobs:
           echo "--- manifest permissions ---"
           grep -E "uses-permission|uses-feature" "$MANIFEST"
 
+          # No R8 shrinking in release builds. Flutter turns it on by default,
+          # and with it Google's ML Kit document scanner failed to start
+          # (NullPointerException) on 1.2.0. Flutter reads this property in
+          # FlutterPluginUtils.shouldShrinkResources.
+          echo "" >> /tmp/build/android/gradle.properties
+          echo "shrink=false" >> /tmp/build/android/gradle.properties
+          grep -qx 'shrink=false' /tmp/build/android/gradle.properties
+
           echo "--- app/build.gradle.kts after copy ---"
           grep -E "compileSdk|minSdk|targetSdk|namespace|applicationId" \
             /tmp/build/android/app/build.gradle.kts

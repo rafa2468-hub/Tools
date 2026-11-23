@@ -15,7 +15,7 @@ fails or throws), upstream silently opens its fallback scanner: the phone's
 plain camera app, then a crop box the user drags by hand, with no edge
 detection. This copy fails the call instead, with code `SCANNER_UNAVAILABLE`
 and a message naming the exception, ML Kit's error code or the Play services
-status, and up to three causes. The app shows it (`lib/screens/scanner_error.dart`).
+status, the top six stack frames, and up to three causes. The app shows it (`lib/screens/scanner_error.dart`).
 
 The fallback launcher (`openFallbackScanner`, `createDocumentScanIntent`) is
 removed. `DocumentScannerActivity` stays: gallery-only imports still use it.
