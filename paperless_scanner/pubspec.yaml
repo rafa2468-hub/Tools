@@ -1,43 +1,57 @@
 name: paperless_scanner
 description: Document scanner that uploads directly to Paperless-ngx.
 publish_to: 'none'
-version: 1.1.0+2
+version: 1.2.0+3
 
 environment:
-  sdk: '>=3.3.0 <4.0.0'
+  # Flutter 3.50.1 ships Dart 3.14; material_ui needs 3.13.
+  sdk: ^3.13.0
 
 dependencies:
   flutter:
     sdk: flutter
 
+  # Material widgets, moved out of the Flutter SDK in 3.47
+  material_ui: ^1.11.1
+
   # Document scanner (edge detection, perspective correction, multi-page)
-  cunning_document_scanner: ^1.2.0
+  cunning_document_scanner: ^3.1.0
+
+  # Shrink and rotate page images before they go into the PDF
+  flutter_image_compress: ^2.5.1
 
   # PDF generation
-  pdf: ^3.10.8
-  printing: ^5.12.0
+  pdf: ^3.13.1
 
   # HTTP client for Paperless-ngx REST API
-  http: ^1.2.0
+  http: ^1.6.0
 
-  # Secure storage for server URL and API token
-  flutter_secure_storage: ^9.0.0
+  # Secure storage for server URL, API token and CA. Held at 10.x on
+  # purpose: 10 moves data saved by 9.x to its new format on first launch,
+  # 11 can't read 9.x data at all. Go to 11 only once every phone has run
+  # a 10.x build (1.2.0 or later).
+  flutter_secure_storage: ^10.3.4
 
   # File system
-  path_provider: ^2.1.4
+  path_provider: ^2.1.6
 
-  # Share sheet (fallback: share PDF to other apps)
-  share_plus: ^9.0.0
+  # Share sheet (share the PDF to other apps)
+  share_plus: ^13.3.1
 
   # Pick the home-lab CA certificate file in Settings
   file_selector: ^1.1.0
+
+  # Uploads waiting scans in the background on Wi-Fi
+  workmanager: ^0.10.10
 
   cupertino_icons: ^1.0.8
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^4.0.0
+  flutter_lints: ^6.0.0
+  # Makes JPEG test images for the PDF tests
+  image: ^4.13.1
 
 flutter:
   uses-material-design: true

@@ -1,5 +1,5 @@
 import 'package:file_selector/file_selector.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import '../models/server_config.dart';
 import '../services/paperless_service.dart';
 import '../services/storage_service.dart';
@@ -348,8 +348,8 @@ class _StatusBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
-        border: Border.all(color: color.withOpacity(0.4)),
+        color: color.withValues(alpha: 0.15),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(

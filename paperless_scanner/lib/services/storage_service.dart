@@ -2,8 +2,11 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/server_config.dart';
 
 class StorageService {
+  // flutter_secure_storage 10: the default Android store. On first launch
+  // after 1.1.0 it finds the old EncryptedSharedPreferences data and moves
+  // it over (migrateOnAlgorithmChange, on by default), so settings survive.
   static const _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    aOptions: AndroidOptions(),
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
   );
 
