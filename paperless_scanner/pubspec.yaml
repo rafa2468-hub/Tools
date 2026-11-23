@@ -1,7 +1,7 @@
 name: paperless_scanner
 description: Document scanner that uploads directly to Paperless-ngx.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -11,8 +11,6 @@ dependencies:
     sdk: flutter
 
   # Document scanner (edge detection, perspective correction, multi-page)
-  # — Android: Google ML Kit Document Scanner (wrapped)
-  # — iOS:     VisionKit VNDocumentCameraViewController (built-in to iOS 13+)
   cunning_document_scanner: ^1.2.0
 
   # PDF generation
@@ -30,6 +28,9 @@ dependencies:
 
   # Share sheet (fallback: share PDF to other apps)
   share_plus: ^9.0.0
+
+  # Pick the home-lab CA certificate file in Settings
+  file_selector: ^1.1.0
 
   cupertino_icons: ^1.0.8
 
