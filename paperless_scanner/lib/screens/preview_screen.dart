@@ -8,6 +8,7 @@ import '../models/upload_meta.dart';
 import '../services/app_files.dart';
 import '../services/background.dart';
 import '../services/filename.dart';
+import '../services/local_save.dart';
 import '../services/paperless_service.dart';
 import '../services/pdf_service.dart';
 import '../services/storage_service.dart';
@@ -15,8 +16,9 @@ import '../services/task_result.dart';
 import 'home_screen.dart' show maxPages;
 import 'scanner_error.dart';
 
-/// Review the pages, add details, upload. Pops with a message for the home
-/// screen when the scan is done with (uploaded, queued or discarded).
+/// Review the pages, add details, upload or save to the phone. Pops with a
+/// message for the home screen when the scan is done with (uploaded, queued,
+/// saved or discarded).
 class PreviewScreen extends StatefulWidget {
   const PreviewScreen({super.key, required this.session});
 
@@ -243,6 +245,32 @@ class _PreviewScreenState extends State<PreviewScreen> {
       }
     } on Exception catch (e) {
       _showMessage('Upload failed', e.toString());
+    } finally {
+      await AppFiles.deleteDir(work);
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// For scans that don't belong in Paperless: the same PDF an upload would
+  /// get, saved through Android's Save dialog. Saved closes the scan;
+  /// cancelled or failed keeps it on screen.
+  Future<void> _saveToPhone() async {
+    final meta = _meta;
+    setState(() {
+      _busy = true;
+      _status = 'Building PDF…';
+    });
+    Directory? work;
+    try {
+      work = await AppFiles.newWorkDir();
+      final pdf = await _pdfService.buildPdf(_session.pages, workDir: work, title: meta.cleanTitle);
+      if (!mounted) return;
+      _setStatus('Choose where to save it…');
+      final saved = await saveToPhone(pdf, pdfFilename(meta.cleanTitle, _session.createdAt));
+      if (!mounted) return;
+      if (saved) await _close('Saved to phone.');
+    } on Exception catch (e) {
+      _showMessage('Save failed', e.toString());
     } finally {
       await AppFiles.deleteDir(work);
       if (mounted) setState(() => _busy = false);
@@ -575,13 +603,32 @@ class _PreviewScreenState extends State<PreviewScreen> {
                       Text(_status, style: Theme.of(context).textTheme.bodySmall),
                     ],
                   )
-                : FilledButton.icon(
-                    onPressed: _upload,
-                    icon: const Icon(Icons.cloud_upload_outlined),
-                    label: const Text('Upload to Paperless-ngx'),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
+                : Row(
+                    children: [
+                      Expanded(
+                        flex: 2,
+                        child: OutlinedButton.icon(
+                          onPressed: _saveToPhone,
+                          icon: const Icon(Icons.save_alt),
+                          label: const Text('Save to phone'),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        flex: 3,
+                        child: FilledButton.icon(
+                          onPressed: _upload,
+                          icon: const Icon(Icons.cloud_upload_outlined),
+                          label: const Text('Upload to Paperless'),
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
           ),
         ),

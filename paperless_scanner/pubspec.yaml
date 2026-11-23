@@ -1,7 +1,7 @@
 name: paperless_scanner
 description: Document scanner that uploads directly to Paperless-ngx.
 publish_to: 'none'
-version: 1.2.0+5
+version: 1.2.1+6
 
 environment:
   # Flutter 3.50.1 ships Dart 3.14; material_ui needs 3.13.
@@ -44,6 +44,10 @@ dependencies:
 
   # Pick the home-lab CA certificate file in Settings
   file_selector: ^1.1.0
+
+  # "Save to phone": Android's own Save dialog for scans that don't go to
+  # Paperless (file_selector has no save dialog on Android)
+  file_picker: ^13.4.1
 
   # Uploads waiting scans in the background on Wi-Fi
   workmanager: ^0.10.10

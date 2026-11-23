@@ -11,9 +11,10 @@ Android app: scan a document with automatic edge detection, tidy the pages, turn
 - Upload through the Paperless-ngx REST API, then follow the import task to its real result
 - Offline queue: if the server can't be reached, the PDF is kept on the phone and uploads when the app is opened or, in the background, about every 15 minutes on Wi-Fi
 - Trust a home-lab certificate authority (import its public root certificate); no "accept any certificate" switch
+- Save to phone instead of uploading, for scans that don't belong in Paperless: the same PDF goes through Android's own Save dialog, which opens in the folder last saved to
 - Share the PDF to any app through the Android share sheet
 - Server URL, API token and imported CA kept in the plugin's encrypted storage (Android Keystore)
-- Cleans up after itself: scanned images and work files are deleted once a scan is uploaded, queued or discarded, and leftovers at the next start
+- Cleans up after itself: scanned images and work files are deleted once a scan is uploaded, queued, saved or discarded, and leftovers at the next start
 
 ## Get the app
 
@@ -70,6 +71,7 @@ lib/
     multipart.dart           # Upload body (repeated fields, streamed file)
     task_result.dart         # Read a Paperless task's outcome
     filename.dart            # PDF file name from the title
+    local_save.dart          # Save to phone (Android's Save dialog)
     image_prep.dart          # Rotate and shrink a page image
     pdf_service.dart         # Page images → PDF
     upload_queue.dart        # Scans waiting for the server, on disk
@@ -78,7 +80,7 @@ lib/
     app_files.dart           # Where files live, clean-up
   screens/
     home_screen.dart         # Start a scan, queue status
-    preview_screen.dart      # Pages, details, upload, share
+    preview_screen.dart      # Pages, details, upload, save, share
     queue_screen.dart        # Waiting / failed scans
     settings_screen.dart     # Server, token, CA, test, save
     scanner_error.dart       # Dialog for a scanner that won't start
@@ -87,6 +89,7 @@ test/
   pdf_queue_test.dart        # Images, PDF pages, details, queue
   server_test.dart           # TLS, token, upload, lists, queue against a fake server
   scanner_error_test.dart    # Scanner error text and dialog
+  local_save_test.dart       # Save to phone: saved, cancelled, failed
 third_party/
   cunning_document_scanner/  # Patched scanner plugin (see its PATCHES.md)
 ```
